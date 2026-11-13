@@ -64,6 +64,7 @@
             </select>
           </label>
         </div>
+        <span class="muted" style="display:block; margin-bottom:8px">本文を書くエンジン。Antigravity の本文モデルは画面下の「モデル」、Google のときはこの箱の「Googleモデル」で選びます（選択肢のモデルはどちらのエンジンでも、下の「選択肢のモデル」）。</span>
         <div id="googleBox" class="hidden" style="border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:10px">
           <div class="row" style="justify-content:space-between">
             <strong>Google Gemini</strong>
@@ -113,7 +114,7 @@
         </div>
         <span id="choicesIdeState" class="muted"></span>
         <span id="choicesPokeState" class="muted"></span>
-        <label title="選択肢担当の会話で使うモデル。高速なモデルを選ぶとさらに早く選択肢が出ます">選択肢のモデル<select id="choicesIdeModel">
+        <label title="選択肢の生成に使うモデル。Antigravity のときは選択肢担当の会話、Google のときは API で使う。高速なモデルを選ぶとさらに早く選択肢が出ます">選択肢のモデル<select id="choicesIdeModel">
           <option value="">メインのモデルと同じ</option>
         </select></label>
         <label title="担当の会話にもう見せたものは、どちらでも送り直さない。違うのは全部送るときと、続きのときに何を出すか">入力の渡し方<select id="f_input_mode">
@@ -565,7 +566,7 @@
 <div id="googleKeyModal" class="modal hidden">
   <div class="modal-content compact">
     <h2>Google APIキー</h2>
-    <div class="muted">キーはサーバーの data/google_api_key.json にだけ保存します。ブラウザには保存しません。</div>
+    <div class="muted">キーはサーバーの .env ファイルに保存されます。ブラウザには保存しません。</div>
     <label>APIキー<input id="googleKeyInput" type="password" autocomplete="off" placeholder="AIza... / AQ..."></label>
     <div class="modal-actions">
       <button id="googleKeySave" type="button">保存</button>
@@ -585,6 +586,6 @@
   </div>
 </div>
 <script src="prompt_toolbar.js"></script>
-<script src="app.js?v=101"></script>
+<script src="app.js?v=103"></script>
 </body>
 </html>

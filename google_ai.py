@@ -1,7 +1,7 @@
 """
 Google AI Studio (Gemini Developer API) プロバイダ用の最小クライアント。
 
-- APIキーは data/google_api_key.json にだけ保存する（セッションJSONには入れない）
+- APIキーは .env ファイル（GEMINI_API_KEY）で管理する（セッションJSONには入れない）
 - models.list の結果をキャッシュする
 - generateContent を直接呼ぶモードと、function calling で
   「モデルにコンテキストを取りに来させる」fetch モードの両方を提供する
@@ -17,8 +17,10 @@ import urllib.parse
 import urllib.request
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
-DATA = os.environ.get("RPCHAT_DATA", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
-KEY_FILE = os.path.join(DATA, "google_api_key.json")
+ROOT = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("RPCHAT_DATA", os.path.join(ROOT, "data"))
+ENV_FILE = os.environ.get("RPCHAT_ENV_FILE", os.path.join(ROOT, ".env"))
+KEY_FILE = ENV_FILE  # 後方互換性のため維持
 SAFETY_CATEGORIES = [
     "HARM_CATEGORY_HARASSMENT",
     "HARM_CATEGORY_HATE_SPEECH",
@@ -43,47 +45,145 @@ class GoogleAPIError(Exception):
         self.retryable = bool(retryable)
 
 
-def _read_json(path, default=None):
+def read_env_file(path=None):
+    """指定された .env ファイルを辞書として読み込む。"""
+    target = path or ENV_FILE
+    if not os.path.exists(target):
+        return {}
+    res = {}
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            return json.load(f)
+        with open(target, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                        v = v[1:-1]
+                    if k:
+                        res[k] = v
     except Exception:
-        return default
+        pass
+    return res
 
 
-def _write_json_atomic(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+def load_env(path=None, override=False):
+    """指定された .env ファイルの環境変数を os.environ に反映する。"""
+    env_vars = read_env_file(path)
+    for k, v in env_vars.items():
+        if override or k not in os.environ:
+            os.environ[k] = v
+    return env_vars
 
 
-def load_key():
-    """(key, source) を返す。UI保存値が優先、なければ環境変数。"""
-    d = _read_json(KEY_FILE, {})
-    file_key = (d.get("key") if isinstance(d, dict) else "") or ""
-    if file_key.strip():
-        return file_key.strip(), "file"
+# 初期化時に .env を読み込む
+load_env()
+
+
+def _cleanup_legacy_key_file():
+    legacy_file = os.path.join(DATA, "google_api_key.json")
+    if os.path.exists(legacy_file):
+        try:
+            os.remove(legacy_file)
+        except OSError:
+            pass
+
+
+# 旧ファイルがあればクリーンアップ
+_cleanup_legacy_key_file()
+
+
+def load_key(path=None):
+    """(key, source) を返す。.env が優先、なければプロセスの環境変数。"""
+    env_file_vars = read_env_file(path or ENV_FILE)
+    file_key = (env_file_vars.get("GEMINI_API_KEY") or env_file_vars.get("GOOGLE_API_KEY") or "").strip()
+    if file_key:
+        return file_key, ".env"
     env = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
     if env:
         return env, "env"
     return "", ""
 
 
-def save_key(key):
+def save_key(key, path=None):
     key = (key or "").strip()
     if not key or len(key) < 10 or any(c.isspace() for c in key):
         raise ValueError("APIキーの形式が不正です")
-    _write_json_atomic(KEY_FILE, {"key": key, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
+
+    target = path or ENV_FILE
+    lines = []
+    if os.path.exists(target):
+        try:
+            with open(target, "r", encoding="utf-8-sig") as f:
+                lines = f.readlines()
+        except Exception:
+            lines = []
+
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        if "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k == "GEMINI_API_KEY":
+                new_lines.append(f"GEMINI_API_KEY={key}\n")
+                found = True
+                continue
+            elif k == "GOOGLE_API_KEY":
+                if not found:
+                    new_lines.append(f"GEMINI_API_KEY={key}\n")
+                    found = True
+                continue
+        new_lines.append(line)
+
+    if not found:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines.append("\n")
+        new_lines.append(f"GEMINI_API_KEY={key}\n")
+
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    tmp = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+    os.replace(tmp, target)
+
+    os.environ["GEMINI_API_KEY"] = key
+    os.environ.pop("GOOGLE_API_KEY", None)
+    _cleanup_legacy_key_file()
     invalidate_models_cache()
 
 
-def delete_key():
-    try:
-        os.remove(KEY_FILE)
-    except OSError:
-        pass
+def delete_key(path=None):
+    target = path or ENV_FILE
+    if os.path.exists(target):
+        try:
+            with open(target, "r", encoding="utf-8-sig") as f:
+                lines = f.readlines()
+            new_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped.startswith("#") and "=" in stripped:
+                    k = stripped.split("=", 1)[0].strip()
+                    if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                        continue
+                new_lines.append(line)
+
+            tmp = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            os.replace(tmp, target)
+        except OSError:
+            pass
+
+    os.environ.pop("GEMINI_API_KEY", None)
+    os.environ.pop("GOOGLE_API_KEY", None)
+    _cleanup_legacy_key_file()
     invalidate_models_cache()
 
 

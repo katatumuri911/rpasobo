@@ -386,6 +386,12 @@ def _user_config(port, tok, cid, s):
     return cfg
 
 
+# server.py が選択肢専用会話のIDを入れる（累積）。選択肢会話の設定は「借りる元」にも
+# 共通キャッシュ（last_cascade_config.json）の書き込み元にもしない（メイン会話の設定が汚れるため）
+AVOID_BORROW = set()
+_SKIP_TITLE = ("【選択肢】", "【旧】", "【失敗】")  # 名前で判るものは念のため除外（退避・旧世代の選択肢会話）
+
+
 def _borrowed_config(port, tok, skip):
     """まだ一度も入力のない会話（新規）用に、同じ言語サーバーで最近ユーザーが入力した会話の設定を借りる"""
     code, d = _call(port, tok, "GetAllCascadeTrajectories", {}, timeout=5)
@@ -393,10 +399,13 @@ def _borrowed_config(port, tok, skip):
         return None
     rows = sorted((d.get("trajectorySummaries") or {}).items(), key=lambda kv: kv[1].get("lastUserInputTime") or "", reverse=True)
     for cid, s in rows[:5]:
-        if cid != skip and s.get("lastUserInputTime"):
-            cfg = _user_config(port, tok, cid, s)
-            if cfg:
-                return cfg
+        if cid == skip or cid in AVOID_BORROW or not s.get("lastUserInputTime"):
+            continue
+        if (s.get("summary") or "").startswith(_SKIP_TITLE):
+            continue
+        cfg = _user_config(port, tok, cid, s)
+        if cfg:
+            return cfg
     return None
 
 
@@ -467,17 +476,54 @@ def model_label(port, tok, key):
     return next((r["label"] for r in rows or [] if r["model"] == key), key)
 
 
+def _resolve_model_key(port, tok, key_or_label):
+    """表示名(label)が渡されても内部キー(model)に直す。一覧が読めなければそのまま返す"""
+    if not isinstance(key_or_label, str) or not key_or_label:
+        return ""
+    rows, _ = _model_data(port, tok)
+    if not rows:
+        return key_or_label
+    if any(r["model"] == key_or_label for r in rows):
+        return key_or_label
+    return next((r["model"] for r in rows if r["label"] == key_or_label), key_or_label)
+
+
+def _set_cfg_model(cfg, model_key):
+    """cfg の中でモデルを指す値をそろえる。既にあるキーだけ書き換える（oneof 衝突の回避）。
+    planModel だけ書き換えると、借りてきた設定に残っている requestedModel / modelOrAlias が優先されて
+    設定画面で選んだモデルが使われないので、存在するキーは全部そろえる"""
+    if not isinstance(cfg, dict) or not model_key:
+        return
+    pc = cfg.get("plannerConfig")
+    if not isinstance(pc, dict):
+        pc = cfg["plannerConfig"] = {}
+    pc["planModel"] = model_key
+    for k in ("requestedModel", "modelOrAlias"):
+        v = pc.get(k)
+        if not isinstance(v, dict):
+            continue
+        inner = v.get("modelOrAlias")
+        if isinstance(inner, dict):
+            inner["model"] = model_key          # {modelOrAlias: {model: "..."}} 形
+        elif isinstance(v.get("model"), str):
+            v["model"] = model_key              # {model: "..."} 形
+
+
 def _fix_model(port, tok, cfg):
     """設定のモデルが今は選べない（モデルの入れ替えで消えた）なら Antigravity の既定モデルに替える。
     古い設定をそのまま送ると「unknown model key …: model not found」で会話がすぐエラーになる。替えたら元のモデル名を返す"""
     pc = cfg.get("plannerConfig") or {}
     cur = pc.get("planModel")
-    if not cur:
+    if not isinstance(cur, str) or not cur:
         return None
+    resolved = _resolve_model_key(port, tok, cur)
+    if resolved != cur:
+        _set_cfg_model(cfg, resolved)        # 表示名で保存されていても内部キーに直して送る
+        cur = resolved
     rows, default = _model_data(port, tok)
-    if rows is None or cur in {r["model"] for r in rows} or not default:
+    if not rows or cur in {r["model"] for r in rows} or not default:
         return None
-    pc["planModel"] = default
+    _set_cfg_model(cfg, default)             # planModel だけでなく requestedModel なども替える
     return cur
 
 
@@ -498,22 +544,30 @@ def send_to_conversation(cid, text=" ", model="", media=None):
 
     if not cfg:
         cfg = _user_config(port, tok, cid, s) or _borrowed_config(port, tok, cid)
-        cfg = _cached_config(cfg) if cfg else _cached_config()
+        if cid in AVOID_BORROW:
+            cfg = cfg or _cached_config()      # 選択肢会話の設定はディスクの共通キャッシュに書かない
+        else:
+            cfg = _cached_config(cfg) if cfg else _cached_config()
         if cfg:
-            _cid_cfg[cid] = copy.deepcopy(cfg)
+            _cid_cfg[cid] = copy.deepcopy(cfg)   # 上書き前の cfg を覚える（モデルを空欄に戻せるように）
             cfg = copy.deepcopy(cfg)  # グローバルキャッシュ(_disk_cfg_cache)の直接書き換えを防止
     if not cfg:
         return False, f"送るときの設定（モデルなど）が読めない: {title}", False
     if model:
-        cfg.setdefault("plannerConfig", {})["planModel"] = model
+        _set_cfg_model(cfg, _resolve_model_key(port, tok, model))
     old = _fix_model(port, tok, cfg)
+    active = (cfg.get("plannerConfig") or {}).get("planModel") or ""
     if old:
-        note = f"（{model_label(port, tok, old)} は選べないので {model_label(port, tok, cfg['plannerConfig']['planModel'])} で送った）"
+        note = f"（{model_label(port, tok, old)} は選べないので {model_label(port, tok, active) or active} で送った）"
     else:
-        note = f"（{model_label(port, tok, model)}）" if model else ""
-        row = next((r for r in _model_data(port, tok)[0] or [] if r["model"] == cfg["plannerConfig"].get("planModel")), None)
+        note = f"（{model_label(port, tok, active)}）" if (model and active) else ""
+        row = next((r for r in _model_data(port, tok)[0] or [] if r["model"] == active), None)
         if row and row["left"] == 0:
             note += f"（{row['label']} は利用枠を使い切っているので、会話がエラーになるかもしれない）"
+
+    if os.environ.get("RPCHAT_MODEL_VERIFY") == "1":
+        pc = cfg.get("plannerConfig") or {}
+        print(f"[poke][cfg] {cid[:8]} plannerConfig keys={sorted(pc)} planModel={pc.get('planModel')}")
     before = s.get("lastUserInputTime")
     # deliveryStrategy は付けない（WHEN_IDLE だと待機中の会話では受け付けたまま捨てられた）
     body = {"cascadeId": cid, "items": [{"text": text}], "cascadeConfig": cfg}
@@ -534,6 +588,12 @@ def send_to_conversation(cid, text=" ", model="", media=None):
             (new_input_time and new_input_time != before)
             or (s2_status and s2_status not in (IDLE, "CASCADE_RUN_STATUS_UNSPECIFIED"))
         ):
+            if os.environ.get("RPCHAT_MODEL_VERIFY") == "1":
+                try:
+                    got = ((_user_config(port, tok, cid, s2) or {}).get("plannerConfig") or {}).get("planModel")
+                    print(f"[poke][model] {cid[:8]} want={active} got={got}")
+                except Exception:
+                    pass
             return True, f"送った{note}: {title}", False
         time.sleep(0.03 if i == 0 else 0.1)
     return False, f"送ったが会話が動かない: {title}", False

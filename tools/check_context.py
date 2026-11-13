@@ -145,6 +145,27 @@ def inspect_channel(sid):
             except Exception:
                 spec_json_ok = False
 
+    # 必須語は「応答の書き方（JSON）」と「執筆スタイル（data/writing_style.md）」の両方で見る。
+    # 本文の書き方（一人称視点など）は 0c207b6 で writing_style.md へ移したので、spec 側だけ見ると必ず欠落する。
+    # 執筆スタイルは一時ディレクトリには無い（RPCHAT_DATA を差し替えているため）ので、実データの方を読む
+    style_text = ""
+    for _p in (os.path.join(REAL_DATA, "writing_style.md"), server.WRITING_STYLE):
+        try:
+            if os.path.isfile(_p):
+                with open(_p, encoding="utf-8-sig", errors="replace") as _f:
+                    style_text = _f.read()
+                break
+        except OSError:
+            continue
+    spec_check = spec_text + "\n" + style_text
+    # image.characters / state の name/pose/expression はそのチャンネルのモードで出すか決まる
+    st_ = s.get("setting", {})
+    req_words = ["催眠", "一人称視点", "memories", "reply_to"]
+    if st_.get("image_mode", "always") != "off":
+        req_words.append("image.characters")
+    if st_.get("rp_state"):
+        req_words.append("name/pose/expression")
+
     return {
         "sid": sid,
         "title": s.get("setting", {}).get("title") or sid,
@@ -154,9 +175,7 @@ def inspect_channel(sid):
         "frozen": frozen,
         "spec_json_ok": spec_json_ok,
         "spec_chars": len(spec_text),
-        "spec_has_required_words": all(w in spec_text for w in [
-            "催眠", "一人称視点", "pose と expression は毎回必ず", "image.characters", "memories", "reply_to"
-        ]),
+        "spec_has_required_words": all(w in spec_check for w in req_words),
         "spilled": max_payload_bytes > server.LONG_BYTES,
         "all_cards_found": all_cards_found,
         "memo_bytes": mb,

@@ -702,7 +702,7 @@ function fillFileOptions(st) {
   const list = $("refList");
   list.innerHTML = "";
   const all = [...sysFiles, ...refs.filter((r) => !sysFiles.includes(r))];
-  if (!all.length) list.innerHTML = '<span class="muted">ファイルがありません（上の「変更…」でフォルダを確認）</span>';
+  if (!all.length) list.innerHTML = `<span class="muted">ファイルは未設定です（使うときだけ、${esc(meta.app?.system_root || "systemfiles")} の下に「フォルダ名/ファイル名.md」を置くか、上の「変更…」でフォルダを選んでください）</span>`;
   for (const f of all) {
     const l = document.createElement("label");
     l.className = "check";
@@ -723,7 +723,7 @@ function fillFolderFiles(selected) {
                  ...opts.filter((o) => !selected.includes(o.path))];
   list.innerHTML = items.length ? "" : `<span class="muted">${folderOpts.length
     ? "ファイルがありません（登録したフォルダに .md .txt がない）"
-    : "フォルダがまだありません（上の「＋ フォルダを追加」で選ぶ）"}</span>`;
+    : "フォルダは未登録です（使うときだけ、上の「＋ フォルダを追加」で .md / .txt の入ったフォルダを選んでください）"}</span>`;
   for (const o of items) {
     const l = document.createElement("label");
     l.className = "check";
@@ -1744,11 +1744,19 @@ function renderModels() {
     $("footBar")?.classList.toggle("hidden", !state?.setting);
   }
 
-  if (!google && selChoices && state && document.activeElement !== selChoices) {
-    const wantChoices = state.setting?.choices_ide_model || "";
-    const optsChoices = [`<option value="">メインのモデルと同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
-      .concat(rows.map((r) => `<option value="${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
-    if (wantChoices && !rows.some((r) => r.model === wantChoices)) optsChoices.push(`<option value="${esc(wantChoices)}">${esc(wantChoices)}（いまは選べない）</option>`);
+  if (selChoices && state && document.activeElement !== selChoices) {
+    // Google のときは API のモデル（google_choices_model）、Antigravity のときは選択肢担当の会話のモデル
+    const wantChoices = google ? (state.setting?.google_choices_model || "") : (state.setting?.choices_ide_model || "");
+    const rowsChoices = google
+      ? (googleModels || []).map((m) => ({ model: m.id, label: m.label || m.id }))
+      : rows;
+    const noList = google ? (rowsChoices.length ? "" : "（Googleモデルを読めない）")
+      : (ideModels?.error ? "（一覧を読めない）" : "");
+    const optsChoices = [`<option value="">メインのモデルと同じ${noList}</option>`]
+      .concat(rowsChoices.map((r) => google
+        ? `<option value="${esc(r.model)}">${esc(r.label)}</option>`
+        : `<option value="${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
+    if (wantChoices && !rowsChoices.some((r) => r.model === wantChoices)) optsChoices.push(`<option value="${esc(wantChoices)}">${esc(wantChoices)}（いまは選べない）</option>`);
     const htmlChoices = optsChoices.join("");
     if (selChoices.dataset.html !== htmlChoices) { selChoices.innerHTML = htmlChoices; selChoices.dataset.html = htmlChoices; }
     selChoices.value = wantChoices;
@@ -1846,10 +1854,14 @@ function openGoogleKeyModal() {
 function closeGoogleKeyModal() { $("googleKeyModal")?.classList.add("hidden"); }
 
 if ($("aiProvider")) {
-  $("aiProvider").onchange = () => {
-    const google = $("aiProvider").value === "google";
-    $("googleBox")?.classList.toggle("hidden", !google);
-    if (google && !googleStatusLoaded) loadGoogleStatus();
+  $("aiProvider").onchange = async () => {
+    const provider = $("aiProvider").value === "google" ? "google" : "antigravity";
+    $("googleBox")?.classList.toggle("hidden", provider !== "google");
+    if (provider === "google" && !googleStatusLoaded) await loadGoogleStatus();
+    // 選んだ時点で切り替える。以前は保存が箱の中の「Google設定を保存」だけで、
+    // Antigravity を選ぶとそのボタンごと箱が隠れ、しかも /api/setting は ai_provider を
+    // 上書きさせないので、Google から Antigravity へ戻せなくなっていた
+    await applyGoogleSettings();
   };
 }
 if ($("googleApply")) $("googleApply").onclick = applyGoogleSettings;
@@ -1958,8 +1970,10 @@ $("ideModel").onchange = async () => {
 };
 if ($("choicesIdeModel")) {
   $("choicesIdeModel").onchange = async () => {
+    // Google のときは google_choices_model、Antigravity のときは choices_ide_model に保存する
+    const provider = state?.setting?.ai_provider === "google" ? "google" : "antigravity";
     try {
-      await checked("/api/ide/model", { sid, model: $("choicesIdeModel").value, target: "choices" });
+      await checked("/api/ide/model", { sid, model: $("choicesIdeModel").value, target: "choices", provider });
       flash("選択肢のモデル: " + $("choicesIdeModel").selectedOptions[0].textContent);
       await poll();
     } catch (e) { alert(e.message); }

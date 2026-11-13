@@ -1,0 +1,21 @@
+# 機密情報・環境変数（AIへのプロンプト混入を防止）
+.env
+.env.*
+!.env.example
+
+# ローカルデータ・会話セッション・RAGメモリ
+/data/
+/outbox/
+/inbox/
+/session/
+/systemfiles/
+/models/
+
+# Python キャッシュ・仮想環境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ログファイル
+*.log

@@ -28,10 +28,13 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+import google_ai
+
 DATA = os.environ.get("RPCHAT_DATA", os.path.join(ROOT, "data"))
 SESS_DIR = os.path.join(DATA, "sessions")
 OUTBOX = os.path.join(ROOT, "outbox")
-KEY_FILE = os.path.join(DATA, "google_api_key.json")
 RESULT_LOG = os.path.join(DATA, "google_spike_results.jsonl")
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 SAFETY_CATEGORIES = [
@@ -80,7 +83,7 @@ HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>Google AI Studio Spike</h1>
-  <div class="muted">APIキーはサーバー側の <code>data/google_api_key.json</code> にだけ保存します。画面には末尾4文字しか出しません。元チャンネルは変更せず、テスト用の複製チャンネルに応答を入れます。</div>
+  <div class="muted">APIキーはサーバー側の <code>.env</code> に保存されます。画面には末尾4文字しか出しません。元チャンネルは変更せず、テスト用の複製チャンネルに応答を入れます。</div>
 
   <div class="box">
     <div class="row" style="justify-content:space-between">
@@ -281,19 +284,11 @@ def write_json_atomic(path, obj):
 
 
 def load_key():
-    env = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
-    d = read_json(KEY_FILE, {})
-    file_key = (d.get("key") if isinstance(d, dict) else "") or ""
-    if file_key.strip():
-        return file_key.strip(), "file"
-    if env:
-        return env, "env"
-    return "", ""
+    return google_ai.load_key()
 
 
-def key_hint(key):
-    key = (key or "").strip()
-    return key[-4:] if len(key) >= 4 else ""
+def key_hint(key=None):
+    return google_ai.key_hint(key)
 
 
 def gemini_request(model, payload, key, timeout=180):
@@ -910,26 +905,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": f"bad request: {e}"}, 400)
         if p == "/api/key":
             key = str(d.get("key") or "").strip()
-            if not key or len(key) < 10 or any(c.isspace() for c in key):
-                return self.send_json({"error": "APIキーの形式が不正です"}, 400)
-            write_json_atomic(KEY_FILE, {"key": key, "updated": now()})
+            try:
+                google_ai.save_key(key)
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            _, source = google_ai.load_key()
             try:
                 models = list_models(key)
-                return self.send_json({"ok": True, "hint": key_hint(key), "source": "file", "models": models, "error": None})
+                return self.send_json({"ok": True, "hint": key_hint(key), "source": source or ".env", "models": models, "error": None})
             except urllib.error.HTTPError as e:
                 raw = e.read().decode("utf-8", "replace")
                 try:
                     msg = (json.loads(raw).get("error") or {}).get("message") or raw
                 except Exception:
                     msg = raw
-                return self.send_json({"ok": True, "hint": key_hint(key), "source": "file", "models": [], "error": f"HTTP {e.code}: {msg}"})
+                return self.send_json({"ok": True, "hint": key_hint(key), "source": source or ".env", "models": [], "error": f"HTTP {e.code}: {msg}"})
             except Exception as e:
-                return self.send_json({"ok": True, "hint": key_hint(key), "source": "file", "models": [], "error": str(e)})
+                return self.send_json({"ok": True, "hint": key_hint(key), "source": source or ".env", "models": [], "error": str(e)})
         if p == "/api/key/delete":
-            try:
-                os.remove(KEY_FILE)
-            except OSError:
-                pass
+            google_ai.delete_key()
             return self.send_json({"ok": True})
         if p == "/api/run":
             sid = str(d.get("sid") or "").strip()
@@ -976,7 +970,7 @@ def main():
     os.makedirs(SESS_DIR, exist_ok=True)
     os.makedirs(OUTBOX, exist_ok=True)
     print(f"Google Spike: http://{args.host}:{args.port}/")
-    print("APIキーは data/google_api_key.json に保存されます。")
+    print("APIキーは .env に保存されます。")
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 

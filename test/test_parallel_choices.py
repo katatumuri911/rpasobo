@@ -107,6 +107,26 @@ class TestParallelChoices(unittest.TestCase):
         self.assertTrue(server.has_parallel_choices_ide({"ide_session": "", "choices_ide_session": "conv-2"}))
         self.assertTrue(server.has_parallel_choices_ide({"ide_session": "conv-1", "choices_ide_session": "conv-2"}))
 
+    def test_ide_model_choices_provider_google(self):
+        """選択肢のモデルの保存先: Google は google_choices_model、Antigravity は choices_ide_model"""
+        sid = self.api_post("/api/session/new", {"title": "model test"})["sid"]
+        r = self.api_post("/api/ide/model", {"sid": sid, "model": "gemini-3-flash", "target": "choices", "provider": "google"})
+        self.assertEqual(r["model"], "gemini-3-flash")
+        st = server.load(sid)["setting"]
+        self.assertEqual(st.get("google_choices_model"), "gemini-3-flash")
+        self.assertEqual(st.get("choices_ide_model"), "")
+
+        self.api_post("/api/ide/model", {"sid": sid, "model": "MODEL_PLACEHOLDER_M319", "target": "choices", "provider": "antigravity"})
+        st = server.load(sid)["setting"]
+        self.assertEqual(st.get("choices_ide_model"), "MODEL_PLACEHOLDER_M319")
+        self.assertEqual(st.get("google_choices_model"), "gemini-3-flash")  # もう一方は消さない
+
+        # メインのモデルは従来どおり ide_model（provider を間違って送っても choices 以外は影響しない）
+        self.api_post("/api/ide/model", {"sid": sid, "model": "MODEL_PLACEHOLDER_M318", "target": "main", "provider": "google"})
+        st = server.load(sid)["setting"]
+        self.assertEqual(st.get("ide_model"), "MODEL_PLACEHOLDER_M318")
+        self.assertEqual(st.get("google_choices_model"), "gemini-3-flash")
+
     def test_get_poke_lock(self):
         lock1 = server.get_poke_lock("conv-1")
         lock1_again = server.get_poke_lock("conv-1")

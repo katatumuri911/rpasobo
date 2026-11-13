@@ -491,6 +491,7 @@ DEFAULT_SETTING = {
     "choices_ide_manual_off": False,  # ユーザーが手動で選択肢担当を「外す」にした場合は自動作成しない
     "ai_provider": "antigravity",   # antigravity / google
     "google_model": "",             # Google AI Studio のモデルID
+    "google_choices_model": "",     # Google のとき、選択肢の生成だけ別のモデルにする（空なら google_model と同じ）
     "google_fetch": True,           # function calling でプロンプトを取りに行かせる
     "google_safety_off": True,      # 調整可能な安全カテゴリを OFF にする（PROHIBITED_CONTENT は解除不可）
     "google_max_output_tokens": 8192,
@@ -526,7 +527,7 @@ DEFAULT_SETTING = {
 NO_IDE = {
     "ide_session": "", "ide_title": "", "ide_model": "", "ide_auto": False,
     "choices_ide_session": "", "choices_ide_title": "", "choices_ide_model": "", "choices_ide_auto": False,
-    "choices_ide_manual_off": False,
+    "choices_ide_manual_off": False, "google_choices_model": "",
 }
 NO_FOLDER = {"ide_folder": ""}  # 作業フォルダも持ち越さない（同じ AGENTS.md を2つのチャンネルで取り合わないように）
 
@@ -953,7 +954,27 @@ def has_parallel_choices_ide(st):
         return False
     if st.get("ai_provider") == "google":
         return True
+    if "_choices_parallel" in st:  # build_context が発言ごとの実態で上書きする
+        return bool(st["_choices_parallel"])
     return has_choices_ide_session(st)
+
+
+def latest_choices_task(msgs, statuses=("pending", "processing"), max_age=None, role=None):
+    """未完了の選択肢タスクのうち choices_ts が最新のもの。max_age 秒より古い残骸は無視する。
+    リストの先頭から取ると、古い未完了フラグが残っているときに最新ターンが処理されない（先頭詰まり）ので、
+    poke_worker と /api/pending はこの関数で同じ基準（choices_ts が最新）にそろえる"""
+    best, best_ts = None, ""
+    for m in msgs or []:
+        if not isinstance(m, dict) or m.get("choices_status") not in statuses:
+            continue
+        if role and m.get("role") != role:
+            continue
+        ts = task_ts(m, "choices") or ""
+        if max_age is not None and age(ts) >= max_age:
+            continue
+        if best is None or ts >= best_ts:
+            best, best_ts = m, ts
+    return best
 
 
 def read_json(path, default):
@@ -2674,6 +2695,8 @@ def output_text(st, is_diff=False, transport="ag"):
         must.append("state")
     if mode != "off":
         must.append("image")
+    if inline_choices:
+        must.append("choices")   # 任意キー扱いにするとAIが省略して選択肢が出ないターンができる
     optional = ["memo", "elapsed_time", "resolved_ids", "memory_query"]
     if mode != "off":
         optional.append("characters")
@@ -3448,6 +3471,11 @@ def build_context(s, m, transport="ag"):
     google = transport == "google"
     if not google and st.get("agents_md") and sync_agents(s):  # PC で System ファイルを書き換えていても、ここで AGENTS.md に反映する
         save(s)
+    if not google:
+        # 並列（専用会話）か本文にインラインで作るかは、「いまの設定」ではなく、この発言を作ったときに
+        # 並列タスクが積まれたか（choices_status / staged_choices）で決める。専用会話の作成直後・解除直後は
+        # 設定と実態がずれ、並列タスクもインライン指示も無い空白ターンになるため（st はコピーなので保存しない）
+        st = dict(st, _choices_parallel=bool(m.get("choices_status") or m.get("staged_choices")))
     light = False if google else (st.get("input_mode") == "light")
     paths = {}
     parts, missing = settings_parts(st, None if google else agents_in_use(s), paths, transport=transport)
@@ -9511,11 +9539,16 @@ def poke_worker():
     rpc = POKE_MODE != "window"
     since, done, quiet = {}, set(), {}
     poked, again = {}, set()  # 合図した入力 -> そのときの時刻 / コマンドを送り直した入力
+    fails = {}                # task_key -> 連続失敗回数（送信失敗を即 done にしないため）
+    POKE_FAIL_MAX = 4         # ここまでは短い間隔（3・6・9秒）で粘る
+    POKE_SLOW = 20            # 以降はこの間隔でゆっくり再試行（打ち切りは age(t_ref) >= 600 が行う）
     while True:
         poke_event.wait(timeout=0.3)
         poke_event.clear()
         try:
             busy, cands, unclaimed = set(), {}, {}
+            choices_ides = set()    # このサイクルで「選択肢専用会話」として扱う会話ID（設定借用の除外用）
+            choices_tasks = set()   # 選択肢タスクの task_key（フル送信の判定用。IDE単位ではなくタスク単位）
             fresh_sid_map = {}
             with lock:
                 if repoke_tasks:
@@ -9524,6 +9557,7 @@ def poke_worker():
                         poked.pop(tk, None)
                         again.discard(tk)
                         since.pop(tk, None)
+                        fails.pop(tk, None)
                     repoke_tasks.clear()
                 for sid in list_ids():
                     cached_ide = session_ide_cache.get(sid)
@@ -9536,6 +9570,12 @@ def poke_worker():
                     ide = st.get("ide_session")
                     has_par = has_choices_ide_session(st)
                     choices_ide = st.get("choices_ide_session") if has_par else None
+                    if choices_ide:
+                        choices_ides.add(choices_ide)
+                    _rot = rotation_state(s) or {}  # 世代交代中の予備の選択肢会話も設定の汚染源になる
+                    for _ch in (_rot.get("new_choices_ide"), _rot.get("old_choices_ide")):
+                        if isinstance(_ch, str) and _ch:
+                            choices_ides.add(_ch)
                     if not ide and not choices_ide:
                         continue
 
@@ -9581,7 +9621,7 @@ def poke_worker():
                         if not p_user:
                             p_img_refine = next((m for m in msgs if m.get("image_refine_status") in ("pending", "processing")), None)
                         if not p_user and not p_img_refine and not has_par:
-                            p_choices_seq = next((m for m in msgs if m["role"] == "assistant" and m.get("choices_status") in ("pending", "processing")), None)
+                            p_choices_seq = latest_choices_task(msgs, ("pending", "processing"), role="assistant")
                         if not p_user and not p_img_refine and not p_choices_seq:
                             p_mem = next((m for m in msgs if m["role"] == "assistant" and m.get("memory_status") in ("pending", "processing")), None)
                         if not p_user and not p_img_refine and not p_choices_seq and not p_mem:
@@ -9620,12 +9660,13 @@ def poke_worker():
                     # 2. 選択肢IDE向けタスク（パラレルモード）
                     cand_choices = None
                     if choices_ide:
-                        p_ch = next((m for m in msgs if m.get("choices_status") in ("pending", "processing")), None)
+                        p_ch = latest_choices_task(msgs, ("pending", "processing"), max_age=600)
                         if p_ch:
                             orig_id = p_ch.get("choices_orig_id") or p_ch["id"]
                             task_key = f"{orig_id}:choices:{p_ch.get('choices_ts')}"
                             fresh_sid_map[task_key] = sid
                             cand_choices = (task_key, p_ch, "choices", sid)
+                            choices_tasks.add(task_key)
                             if p_ch.get("choices_status") == "pending" and task_key in poked and task_key not in again:
                                 unclaimed.setdefault(choices_ide, []).append(task_key)
 
@@ -9669,6 +9710,13 @@ def poke_worker():
                     elif user_turns_of(msgs) >= ROTATION_TURNS and not has_pending:
                         if rotation_maybe_arm(s):
                             save(s)
+                # 選択肢専用会話は「設定を借りる元」にも共通キャッシュの書き込み元にもしない（累積で覚える）。
+                # 置換ではなく |= にしないと、世代交代で交代した旧選択肢会話が抜けてメイン会話を汚す
+                if ide_poke is not None:
+                    try:
+                        ide_poke.AVOID_BORROW |= choices_ides
+                    except AttributeError:
+                        ide_poke.AVOID_BORROW = set(choices_ides)
             t = time.time()
             busy |= reverting | {v["ide"] for v in list(revert_plan.values()) if t - v["t"] < REVERT_HOLD}
             for ide_k, ids in unclaimed.items():  # スペースは届いたのに wait_input.py が実行されていない
@@ -9682,8 +9730,10 @@ def poke_worker():
                 quiet[ide_k] = time.time() + (1.5 if rpc else 15)
 
             to_poke = []
+            live_tasks = set()
             for ide_k, cand in cands.items():
                 task_key, m, task_type, sid = cand
+                live_tasks.add(task_key)
                 if ide_k in busy or t < quiet.get(ide_k, 0) or (not rpc and t - ide_waiting.get(ide_k, 0) < 4):
                     since.pop(task_key, None)
                     continue
@@ -9697,19 +9747,39 @@ def poke_worker():
                     # （以前はここで発言に「合図した会話」を刻んでいたが廃止した。理由は /api/pending の
                     #   コメントを参照。ここは lock の外なので、load して save すると、その間に
                     #   /api/send が足した発言を巻き戻して消してしまう事故も起きていた）
+            # もう候補に上がらないタスクの失敗カウンタは捨てる（長期運用で溜まらないように）
+            for _k in [k for k in fails if k not in live_tasks]:
+                fails.pop(_k, None)
 
             def dispatch_poke(target_ide, item):
                 task_k, m_item, ttype, item_sid = item
-                # 既にブートストラップ等で wait_input.py の実行経験がある会話なら半角スペース合図（full=False）。
-                # 一度も実行したことがない完全新規の会話のみフルコマンド（full=True）を送る。
-                full = not ide_is_known(target_ide)
+                is_choices_task = task_k in choices_tasks
+                role = "choices" if is_choices_task else "main"
+                # 選択肢専用会話は「書いたら待機せずターン終了」するので、半角スペースでは動かない。
+                # 毎回コマンド全文（full=True）を送る。他の会話は wait_input.py の実行経験がなければフルコマンド。
+                full = True if is_choices_task else not ide_is_known(target_ide)
                 media = paste_media([m_item]) if (rpc and ttype == "user" and m_item.get("files") and not m_item.get("pasted")) else []
-                ok, msg, retry = send_poke(target_ide, full, media)
+                ok, msg, retry = send_poke(target_ide, full, media)  # モデルは send_poke が ide_model_of() で解決
+                print(f"[poke] role={role} full={full} ide={target_ide[:8]} ok={ok}")
                 if retry:  # 会話が応答中。終わるのを待って送り直す
                     quiet[target_ide] = time.time() + 0.5  # 0.5秒後にリトライ
                     return
+                if not ok:
+                    # 新規作成直後や Antigravity の起動遅れで一度失敗しただけで done にすると、
+                    # そのタスクは二度と合図されない。しばらく粘って再送する
+                    n = fails.get(task_k, 0) + 1
+                    fails[task_k] = n
+                    if n < POKE_FAIL_MAX:
+                        quiet[target_ide] = time.time() + 3 * n   # 3秒・6秒・9秒後に再試行
+                        print(f"[poke] 再送待ち {target_ide[:8]} {task_k[:12]} ({n}/{POKE_FAIL_MAX})")
+                    else:
+                        # 諦めない（Antigravity を後から起動した場合も届く）。600秒で上の age 判定が打ち切る
+                        quiet[target_ide] = time.time() + POKE_SLOW
+                        print(f"[poke] 低速で再試行 {target_ide[:8]} {task_k[:12]}")
+                    return
+                fails.pop(task_k, None)
                 done.add(task_k)
-                if ok and media:
+                if media:
                     with lock:
                         x = fresh_sid_map.get(m_item["id"]) or session_of_msg(m_item["id"])
                         s = load(x) if x else None
@@ -9717,10 +9787,10 @@ def poke_worker():
                         if target_m and target_m.get("files"):
                             target_m["pasted"] = True  # wait_input.py の表示で「チャット欄にも貼った」と伝える
                             save(s)
-                if ok:
-                    poked[task_k] = time.time()
-                    if full:
-                        again.add(task_k)
+                poked[task_k] = time.time()
+                if full and not is_choices_task:
+                    # 選択肢会話は again に入れず、POKE_AGAIN 秒後の unclaimed 再送枠を残す
+                    again.add(task_k)
                 quiet[target_ide] = time.time() + (1.5 if rpc else 15)
 
             if to_poke:
@@ -12435,7 +12505,7 @@ class H(BaseHTTPRequestHandler):
                                     if m.get("choices_status") == "processing":
                                         left = [sid, m, "choices"]
                                         break
-                            pending_choices = next((m for m in s["messages"] if m.get("choices_status") == "pending"), None)
+                            pending_choices = latest_choices_task(s["messages"], ("pending",))
                             if pending_choices:
                                 cand_cand = (sid, pending_choices, "choices")
                         else:
@@ -12465,7 +12535,7 @@ class H(BaseHTTPRequestHandler):
                             if not pending_user:
                                 pending_img_refine = next((m for m in s["messages"] if m.get("image_refine_status") == "pending"), None)
                             if not pending_user and not pending_img_refine and not par:
-                                pending_choices = next((m for m in s["messages"] if m.get("role") == "assistant" and m.get("choices_status") == "pending"), None)
+                                pending_choices = latest_choices_task(s["messages"], ("pending",), role="assistant")
                             if not pending_user and not pending_img_refine and not pending_choices:
                                 pending_mem = next((m for m in s["messages"] if m.get("role") == "assistant" and m.get("memory_status") == "pending"), None)
                             if not pending_user and not pending_img_refine and not pending_choices and not pending_mem:
@@ -13168,7 +13238,8 @@ class H(BaseHTTPRequestHandler):
                 google_ai.save_key(key)
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
-            result = {"ok": True, "hint": google_ai.key_hint(key), "source": "file", "models": [], "error": None}
+            _, source = google_ai.load_key()
+            result = {"ok": True, "hint": google_ai.key_hint(key), "source": source or ".env", "models": [], "error": None}
             try:
                 result["models"] = google_ai.list_models(refresh=True)
             except Exception as e:
@@ -14106,9 +14177,13 @@ class H(BaseHTTPRequestHandler):
                 # 合図を送るときのモデル。空なら会話の最後の入力と同じ
                 model = d.get("model") or ""
                 target = d.get("target") or "main"
+                provider = d.get("provider") or ""
                 if not isinstance(model, str):
                     return self.send_json({"error": "model must be a string"}, 400)
-                field = "choices_ide_model" if target == "choices" else "ide_model"
+                if target == "choices" and provider == "google":
+                    field = "google_choices_model"   # Google は会話が無いので API のモデルIDを別枠で持つ
+                else:
+                    field = "choices_ide_model" if target == "choices" else "ide_model"
                 s["setting"][field] = model.strip()
                 save(s)
                 return self.send_json({"ok": True, "model": s["setting"][field]})
@@ -14513,6 +14588,14 @@ def main():
         pass
     for d in (SESS_DIR, RAG_DIR, TRASH, SENT, DONE, CHOICES_DIR, STATES_DIR, IMAGES_DIR):
         os.makedirs(d, exist_ok=True)
+    # 「設定ファイル（System・参照ファイル）」の置き場所。無いと画面の一覧が空になり、
+    # 何も設定していないだけなのに「ファイルがありません」と出続けるので、起動時に作っておく
+    sys_root = app_settings().get("system_root")
+    if sys_root:
+        try:
+            os.makedirs(sys_root, exist_ok=True)
+        except OSError as e:
+            print(f"[init] 設定ファイルの置き場所を作れません: {e}（画面の「変更…」でフォルダを選んでください）")
     migrate_all_sessions()
     cleanup_done_dir()
     get_vapid()

@@ -33,6 +33,17 @@ class TestGoogleParallelChoices(unittest.TestCase):
         st_ag = {"ai_provider": "antigravity", "suggest_choices": True, "ide_session": "ide-1", "choices_ide_session": "ide-2"}
         self.assertEqual(server.choices_ide_of(st_ag), "ide-2")
 
+    def test_google_model_choices_override(self):
+        """選択肢だけ別モデル: google_choices_model があれば choices タスクはそちらを使う"""
+        st = {"ai_provider": "google", "google_model": "main-model", "google_choices_model": "fast-model"}
+        self.assertEqual(server._google_model(st, "choices"), "fast-model")
+        self.assertEqual(server._google_model(st, "user"), "main-model")
+        # 空ならメインと同じ
+        st2 = {"ai_provider": "google", "google_model": "main-model", "google_choices_model": "  "}
+        self.assertEqual(server._google_model(st2, "choices"), "main-model")
+        # 既定値にキーがある（設定フォームで消えない）
+        self.assertIn("google_choices_model", server.DEFAULT_SETTING)
+
     def test_set_google_status_user_priority(self):
         sid = "test_status_prio_sid"
         # 1. user タスクを開始

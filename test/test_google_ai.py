@@ -17,14 +17,30 @@ class TestGoogleAIModule(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.orig_data = google_ai.DATA
+        self.orig_env_file = google_ai.ENV_FILE
         self.orig_key_file = google_ai.KEY_FILE
+        self.orig_gemini_key = os.environ.get("GEMINI_API_KEY")
+        self.orig_google_key = os.environ.get("GOOGLE_API_KEY")
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GOOGLE_API_KEY", None)
+
         google_ai.DATA = self.tmp
-        google_ai.KEY_FILE = os.path.join(self.tmp, "google_api_key.json")
+        google_ai.ENV_FILE = os.path.join(self.tmp, ".env")
+        google_ai.KEY_FILE = google_ai.ENV_FILE
         google_ai.invalidate_models_cache()
 
     def tearDown(self):
         google_ai.DATA = self.orig_data
+        google_ai.ENV_FILE = self.orig_env_file
         google_ai.KEY_FILE = self.orig_key_file
+        if self.orig_gemini_key is not None:
+            os.environ["GEMINI_API_KEY"] = self.orig_gemini_key
+        else:
+            os.environ.pop("GEMINI_API_KEY", None)
+        if self.orig_google_key is not None:
+            os.environ["GOOGLE_API_KEY"] = self.orig_google_key
+        else:
+            os.environ.pop("GOOGLE_API_KEY", None)
         google_ai.invalidate_models_cache()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -40,8 +56,11 @@ class TestGoogleAIModule(unittest.TestCase):
         google_ai.save_key(test_key)
         key, src = google_ai.load_key()
         self.assertEqual(key, test_key)
-        self.assertEqual(src, "file")
+        self.assertEqual(src, ".env")
         self.assertEqual(google_ai.key_hint(), "7890")
+        with open(google_ai.ENV_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+            self.assertIn(f"GEMINI_API_KEY={test_key}", content)
 
         # 3. Invalid key formats
         with self.assertRaises(ValueError):
@@ -54,6 +73,47 @@ class TestGoogleAIModule(unittest.TestCase):
         key, src = google_ai.load_key()
         self.assertEqual(key, "")
         self.assertEqual(src, "")
+        self.assertNotIn("GEMINI_API_KEY", os.environ)
+
+    def test_env_preserves_other_variables(self):
+        # 既存の環境変数やコメント行がある .env
+        initial_content = (
+            "# Existing config\n"
+            "RPCHAT_PORT=8200\n"
+            "CUSTOM_VAR=\"hello_world\"\n"
+        )
+        with open(google_ai.ENV_FILE, "w", encoding="utf-8") as f:
+            f.write(initial_content)
+
+        test_key = "AIzaSyFakeKey9876543210"
+        google_ai.save_key(test_key)
+
+        # 保存後、他の変数が維持されていること
+        env_dict = google_ai.read_env_file()
+        self.assertEqual(env_dict.get("RPCHAT_PORT"), "8200")
+        self.assertEqual(env_dict.get("CUSTOM_VAR"), "hello_world")
+        self.assertEqual(env_dict.get("GEMINI_API_KEY"), test_key)
+
+        with open(google_ai.ENV_FILE, "r", encoding="utf-8") as f:
+            raw = f.read()
+            self.assertIn("# Existing config", raw)
+            self.assertIn("RPCHAT_PORT=8200", raw)
+
+        # 削除後も他の変数が維持されていること
+        google_ai.delete_key()
+        env_dict = google_ai.read_env_file()
+        self.assertEqual(env_dict.get("RPCHAT_PORT"), "8200")
+        self.assertEqual(env_dict.get("CUSTOM_VAR"), "hello_world")
+        self.assertNotIn("GEMINI_API_KEY", env_dict)
+
+    def test_load_key_fallback_to_os_environ(self):
+        # .env が空でも os.environ にあれば拾うこと
+        if os.path.exists(google_ai.ENV_FILE):
+            os.remove(google_ai.ENV_FILE)
+        os.environ["GEMINI_API_KEY"] = "AIzaSyEnvKey12345678"
+        key, src = google_ai.load_key()
+        self.assertEqual(key, "AIzaSyEnvKey12345678")
+        self.assertEqual(src, "env")
 
     def test_extract_text_and_thought_filtering(self):
         resp = {
@@ -114,14 +174,30 @@ class TestGoogleServerIntegration(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.orig_data = google_ai.DATA
+        self.orig_env_file = google_ai.ENV_FILE
         self.orig_key_file = google_ai.KEY_FILE
+        self.orig_gemini_key = os.environ.get("GEMINI_API_KEY")
+        self.orig_google_key = os.environ.get("GOOGLE_API_KEY")
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("GOOGLE_API_KEY", None)
+
         google_ai.DATA = self.tmp
-        google_ai.KEY_FILE = os.path.join(self.tmp, "google_api_key.json")
+        google_ai.ENV_FILE = os.path.join(self.tmp, ".env")
+        google_ai.KEY_FILE = google_ai.ENV_FILE
         google_ai.invalidate_models_cache()
 
     def tearDown(self):
         google_ai.DATA = self.orig_data
+        google_ai.ENV_FILE = self.orig_env_file
         google_ai.KEY_FILE = self.orig_key_file
+        if self.orig_gemini_key is not None:
+            os.environ["GEMINI_API_KEY"] = self.orig_gemini_key
+        else:
+            os.environ.pop("GEMINI_API_KEY", None)
+        if self.orig_google_key is not None:
+            os.environ["GOOGLE_API_KEY"] = self.orig_google_key
+        else:
+            os.environ.pop("GOOGLE_API_KEY", None)
         google_ai.invalidate_models_cache()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
