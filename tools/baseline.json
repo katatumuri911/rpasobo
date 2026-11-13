@@ -1,0 +1,311 @@
+{
+  "51a9031728": {
+    "sid": "51a9031728",
+    "title": "アニス（催眠）",
+    "mode": "diff",
+    "payload_bytes": 8491,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "7bb8deef2095dc3ec1cd8210fa2018cba26ae811",
+        "chars": 11
+      },
+      "ユーザーの発言": {
+        "sha1": "be40c20eb1272da29e9bf0de9a672cd4eaf3f1f2",
+        "chars": 51
+      },
+      "指示": {
+        "sha1": "12c1da4d29a8f90a7ab91ea23389172bc4b66443",
+        "chars": 754
+      },
+      "キャラクター": {
+        "sha1": "56582c40ab824b76ef6a0e025e493a2e23e2e84a",
+        "chars": 883
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": true,
+      "chara": true,
+      "output": true
+    },
+    "memo_bytes": 897,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "787ee84551": {
+    "sid": "787ee84551",
+    "title": "なつみ",
+    "mode": "diff",
+    "payload_bytes": 6982,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "aae21d373f0bf8d821c7be5a4198df5be1ab3039",
+        "chars": 12
+      },
+      "ユーザーの発言": {
+        "sha1": "0731e46ba4b3b057d896b3a1643f0e1578741c9b",
+        "chars": 10
+      },
+      "指示": {
+        "sha1": "56050fd13e869bfb1bbac238a71eac803d369aae",
+        "chars": 204
+      },
+      "キャラクター": {
+        "sha1": "524785886a5c584ea19ec1096156ff6beb06b69e",
+        "chars": 995
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": true,
+      "chara": true,
+      "output": true
+    },
+    "memo_bytes": 360,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "95a409720c": {
+    "sid": "95a409720c",
+    "title": "ラピ(催眠)",
+    "mode": "diff",
+    "payload_bytes": 8577,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "19a5c72e33542b80d47cb18f51fa9254c36d2a14",
+        "chars": 12
+      },
+      "ユーザーの発言": {
+        "sha1": "fd61071c83c869038fed6715754769deeac32280",
+        "chars": 60
+      },
+      "指示": {
+        "sha1": "e26435396c0400d5cd182da6ca5bc65f68c42fe8",
+        "chars": 404
+      },
+      "キャラクター": {
+        "sha1": "a45e4b45c6e4ea304ef4b96af0cec491f37cdce4",
+        "chars": 851
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": true,
+      "chara": true,
+      "output": true
+    },
+    "memo_bytes": 1164,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "9c93a61633": {
+    "sid": "9c93a61633",
+    "title": "メリル",
+    "mode": "diff",
+    "payload_bytes": 5583,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "2d3947304df3b8b7c28e7c3b40f74c10a18ba017",
+        "chars": 12
+      },
+      "ユーザーの発言": {
+        "sha1": "104a873f1bd87a0b2687480e02edada6bb843e10",
+        "chars": 53
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": false,
+      "chara": false,
+      "output": false
+    },
+    "memo_bytes": 360,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "aac82e9723": {
+    "sid": "aac82e9723",
+    "title": "ダクネス（このすば）",
+    "mode": "diff",
+    "payload_bytes": 6832,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "c3a54e55e8282ddb2d2037dc0cebdcc7f784eeea",
+        "chars": 11
+      },
+      "ユーザーの発言": {
+        "sha1": "2d8fd7869335b140ed89fc19bb0e16a178435b88",
+        "chars": 10
+      },
+      "指示": {
+        "sha1": "e07d8c1dfe96c387091cdc7e15b9c0f488b1e277",
+        "chars": 316
+      },
+      "キャラクター": {
+        "sha1": "21bcc299609a14e62a71a6c7f47e3ce97f791192",
+        "chars": 462
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": true,
+      "chara": true,
+      "output": true
+    },
+    "memo_bytes": 573,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "ad15304db2": {
+    "sid": "ad15304db2",
+    "title": "RAGテスト",
+    "mode": "diff",
+    "payload_bytes": 5440,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "2d3947304df3b8b7c28e7c3b40f74c10a18ba017",
+        "chars": 12
+      },
+      "ユーザーの発言": {
+        "sha1": "560e4f36deedfb5464b0f6bdd6221a720a8f49a0",
+        "chars": 5
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": false,
+      "chara": false,
+      "output": true
+    },
+    "memo_bytes": 0,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "b533b1a0bf": {
+    "sid": "b533b1a0bf",
+    "title": "RAGテスト",
+    "mode": "diff",
+    "payload_bytes": 5285,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "2d3947304df3b8b7c28e7c3b40f74c10a18ba017",
+        "chars": 12
+      },
+      "ユーザーの発言": {
+        "sha1": "560e4f36deedfb5464b0f6bdd6221a720a8f49a0",
+        "chars": 5
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": false,
+      "chara": false,
+      "output": true
+    },
+    "memo_bytes": 0,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "d031990fb3": {
+    "sid": "d031990fb3",
+    "title": "ナツミ",
+    "mode": "diff",
+    "payload_bytes": 6998,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "2d3947304df3b8b7c28e7c3b40f74c10a18ba017",
+        "chars": 12
+      },
+      "ユーザーの発言": {
+        "sha1": "0b3b9de43f5c0c401ddc3b8b243f2661ae2bf3b8",
+        "chars": 47
+      },
+      "指示": {
+        "sha1": "56050fd13e869bfb1bbac238a71eac803d369aae",
+        "chars": 204
+      },
+      "キャラクター": {
+        "sha1": "723198497cf84ed590b9d4768e90d1c2d0741717",
+        "chars": 1003
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": true,
+      "chara": true,
+      "output": true
+    },
+    "memo_bytes": 462,
+    "memo_over_target": false,
+    "memo_over_budget": false
+  },
+  "d95138c51c": {
+    "sid": "d95138c51c",
+    "title": "錦木千束（催眠）",
+    "mode": "diff",
+    "payload_bytes": 9123,
+    "compact": true,
+    "frozen": {
+      "作中経過時間": {
+        "sha1": "2d9d2df394e440e9b98daf744571d86c3c1ca6b6",
+        "chars": 11
+      },
+      "ユーザーの発言": {
+        "sha1": "7c0484789e650e95afeeccba3fe7424dff0eb9a9",
+        "chars": 46
+      },
+      "指示": {
+        "sha1": "f03150ea25734219bd55397770a75de57ab74871",
+        "chars": 263
+      },
+      "キャラクター": {
+        "sha1": "7ceb88be2c6da464370ffd0c695ad8d619e2364b",
+        "chars": 747
+      }
+    },
+    "spec_json_ok": true,
+    "spec_chars": 1309,
+    "spec_has_required_words": true,
+    "spilled": false,
+    "all_cards_found": {
+      "instructions": true,
+      "chara": true,
+      "output": true
+    },
+    "memo_bytes": 1431,
+    "memo_over_target": true,
+    "memo_over_budget": false
+  }
+}
