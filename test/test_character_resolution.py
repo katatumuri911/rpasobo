@@ -292,7 +292,7 @@ class TestEdgeCasesAndSteps(unittest.TestCase):
     def test_step1_always_show_keys(self):
         self.assertIn("chars", server.ALWAYS_SHOW_KEYS)
         self.assertIn("elapsed_time", server.ALWAYS_SHOW_KEYS)
-        self.assertIn("output.md", server.ALWAYS_SHOW_KEYS)
+        self.assertNotIn("output.md", server.ALWAYS_SHOW_KEYS)
 
     def test_step1_output_text_diff_mode(self):
         st = {"image_mode": "always", "image": {"width": 896, "height": 1152}}

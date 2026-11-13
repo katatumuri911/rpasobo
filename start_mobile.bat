@@ -1,6 +1,12 @@
 @echo off
 chcp 65001 >nul
 setlocal
+REM memo予算・構造化（4見出し/1,200B目標）を有効化
+set "RPCHAT_MEMO_BUDGET=1"
+REM 速度計測（latency / read_file 使用有無）を有効にするときだけコメントを外す
+REM set "RPCHAT_PERF_LOG=1"
+REM full送信時の重複アンカーを旧挙動に戻すなら 1、全オフなら 0（既定 auto）
+REM set "RPCHAT_CORE_ANCHOR=1"
 python --version >nul 2>&1
 if errorlevel 1 (
   echo Python が見つかりません。python.org から Python 3.10 以上を入れてください。
@@ -43,7 +49,7 @@ if errorlevel 1 (
 )
 
 echo スマホ用（同じ Wi-Fi の機器から開ける）で起動します。自宅など信頼できる Wi-Fi だけで使ってください。
-echo このウィンドウは、アプリを使っている間は閉じないでください。
+echo このウィンドウは閉じないでください。
 set "RPCHAT_HOST=lan"
 python "%~dp0server.py"
 pause

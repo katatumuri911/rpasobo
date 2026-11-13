@@ -28,7 +28,7 @@
   python ide_poke.py --list                 # Antigravity IDE のウィンドウ一覧（キーは送らない）
   python ide_poke.py --find <ワークスペース名>  # 合図を送る先のウィンドウを探すだけ（キーは送らない）
 """
-import copy, ctypes, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import copy, ctypes, datetime, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from ctypes import wintypes
 
 EXE = "antigravity ide.exe"
@@ -235,21 +235,24 @@ def _language_servers(ttl=2.0):
             "  [pscustomobject]@{cmd=$_.CommandLine; ports=($ports[$id] | Where-Object { $_ -ne $null })} "
             "} | ConvertTo-Json -Compress -Depth 3"
         )
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, timeout=30, creationflags=0x08000000
-        ).stdout
-        rows = json.loads(out or "[]")
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps],
+                capture_output=True, text=True, timeout=30, creationflags=0x08000000
+            ).stdout
+            rows = json.loads(out or "[]")
+        except Exception:
+            rows = []
         res = []
         for r in (rows if isinstance(rows, list) else [rows]):
             if not isinstance(r, dict):
                 continue
-            m = re.search(r"--csrf_token\s+(\S+)", r.get("cmd") or "")
+            m = re.search(r"--csrf_token(?:=|\s+)(\S+)", r.get("cmd") or "")
             if m:
                 p_list = r.get("ports") or []
                 if isinstance(p_list, int):
                     p_list = [p_list]
-                res.append((m.group(1), [int(p) for p in p_list]))
+                res.append((m.group(1), list(dict.fromkeys(int(p) for p in p_list))))
         _ls_cache = (time.time(), res)
         return res
 
@@ -266,7 +269,7 @@ def locate(cid):
         server_entry = _servers.get(cid)
 
     checked_ok = set()  # HTTP 200 で応答し、この cid を持っていないことが確定した (port, tok)
-    checked_failed = set()  # 通信例外等で到達不能だった (port, tok)
+    checked_failed = set()  # 通信例外や HTTP エラー等で到達不能・認証失敗だった (port, tok)
 
     if server_entry:
         port, tok = server_entry
@@ -274,10 +277,21 @@ def locate(cid):
             s = _summary(cid, port, tok)
             if s is not None:  # 空辞書 {} でも会話が存在するため is not None で判定
                 return port, tok, s
-            # 正常応答したが cid を持っていない
-            checked_ok.add((port, tok))
-            with _servers_lock:
-                _servers.pop(cid, None)
+            # s is None: 会話が存在しないか、HTTPエラー/通信失敗
+            code, d = _call(port, tok, "GetAllCascadeTrajectories", {}, timeout=5)
+            if code == 200:
+                # 正常応答したが cid を持っていない
+                checked_ok.add((port, tok))
+                with _servers_lock:
+                    _servers.pop(cid, None)
+            else:
+                checked_failed.add((port, tok))
+                with _servers_lock:
+                    dead_keys = [k for k, v in _servers.items() if v == (port, tok)]
+                    for k in dead_keys:
+                        _servers.pop(k, None)
+                if _hub == (port, tok):
+                    _hub = None
         except (OSError, ValueError):
             # アプリ再起動等でポートが変わったかプロセス終了。このサーバーに紐づく会話を全削除
             checked_failed.add((port, tok))
@@ -300,6 +314,8 @@ def locate(cid):
         try:
             code, d = _call(port, tok, "GetAllCascadeTrajectories", {}, timeout=5)
         except (OSError, ValueError):
+            code, d = 0, {}
+        if code != 200:
             checked_failed.add((port, tok))
             with _servers_lock:
                 dead_keys = [k for k, v in _servers.items() if v == (port, tok)]
@@ -307,8 +323,6 @@ def locate(cid):
                     _servers.pop(k, None)
             if _hub == (port, tok):
                 _hub = None
-            continue
-        if code != 200:
             continue
         checked_ok.add((port, tok))
         summaries = d.get("trajectorySummaries") or {}
@@ -320,17 +334,21 @@ def locate(cid):
 
     # 2. 既知サーバーで見つからなければ、動いている言語サーバー一覧を取得して探す
     for tok, ports in _language_servers():
-        if any((p, tok) in checked_ok or (p, tok) in checked_failed for p in ports):
+        if any((p, tok) in checked_ok for p in ports) or (ports and all((p, tok) in checked_failed for p in ports)):
             continue
         for port in ports:
-            if (port, tok) in checked_ok or (port, tok) in checked_failed:
-                break  # すでに上で確認済みの言語サーバー
+            if (port, tok) in checked_ok:
+                break
+            if (port, tok) in checked_failed:
+                continue
             try:
                 code, d = _call(port, tok, "GetAllCascadeTrajectories", {}, timeout=5)
             except (OSError, ValueError):
-                continue  # http で答えないポート
+                code, d = 0, {}
             if code != 200:
-                continue
+                checked_failed.add((port, tok))
+                continue  # http で答えないポートや認証エラーポート
+            checked_ok.add((port, tok))
             summaries = d.get("trajectorySummaries") or {}
             with _servers_lock:
                 for k in summaries:
@@ -473,21 +491,16 @@ def send_to_conversation(cid, text=" ", model="", media=None):
     title = s.get("summary") or cid[:8]
     status = s.get("status")
     # 新規作成直後の会話は status が None または UNSPECIFIED になるため待機中(IDLE)として扱う
-    if status not in (IDLE, None, "", "CASCADE_RUN_STATUS_UNSPECIFIED"):
-        return False, f"会話が応答中なので待つ（{status.replace('CASCADE_RUN_STATUS_', '')}）: {title}", True
-    step_idx = s.get("lastUserInputStepIndex")
-    cached_entry = _cid_cfg.get(cid)
-    cfg = None
-    if isinstance(cached_entry, tuple) and len(cached_entry) == 2:
-        c_step_idx, c_cfg = cached_entry
-        if c_step_idx == step_idx and c_cfg:
-            cfg = copy.deepcopy(c_cfg)
+    if status not in (IDLE, "IDLE", None, "", "CASCADE_RUN_STATUS_UNSPECIFIED"):
+        return False, f"会話が応答中なので待つ（{str(status).replace('CASCADE_RUN_STATUS_', '')}）: {title}", True
+    cached_cfg = _cid_cfg.get(cid)
+    cfg = copy.deepcopy(cached_cfg) if isinstance(cached_cfg, dict) and cached_cfg else None
 
     if not cfg:
         cfg = _user_config(port, tok, cid, s) or _borrowed_config(port, tok, cid)
         cfg = _cached_config(cfg) if cfg else _cached_config()
         if cfg:
-            _cid_cfg[cid] = (step_idx, copy.deepcopy(cfg))
+            _cid_cfg[cid] = copy.deepcopy(cfg)
             cfg = copy.deepcopy(cfg)  # グローバルキャッシュ(_disk_cfg_cache)の直接書き換えを防止
     if not cfg:
         return False, f"送るときの設定（モデルなど）が読めない: {title}", False
@@ -508,6 +521,7 @@ def send_to_conversation(cid, text=" ", model="", media=None):
         body["media"] = media
     code, d = _call(port, tok, "SendUserCascadeMessage", body, timeout=60 if media else 15)
     if code != 200:
+        _cid_cfg.pop(cid, None)
         return False, f"送れなかった（{code} {d}）: {title}", False
     for i in range(10):
         try:
@@ -556,6 +570,18 @@ def hub_server():
         except (OSError, ValueError):
             pass
         _hub = None
+
+    # 既知サーバーを先に試して PowerShell の起動を抑止する
+    with _servers_lock:
+        servers_snapshot = list(_servers.values())
+    for port, tok in dict.fromkeys(servers_snapshot):
+        try:
+            if _call(port, tok, "ReadProjects", {}, timeout=3)[0] == 200:
+                _hub = (port, tok)
+                return _hub
+        except (OSError, ValueError):
+            continue
+
     for tok, ports in _language_servers():
         for port in ports:
             try:
@@ -565,7 +591,6 @@ def hub_server():
             if code == 200:
                 _hub = (port, tok)
                 return _hub
-            break
     return None
 
 
@@ -781,6 +806,100 @@ def progress(cid, limit=10):
     return {"running": running, "user_time": s.get("lastUserInputTime") or "", "steps": n, "items": items[-limit:]}, None
 
 
+READ_TOOL_NAMES = {"view_file", "read_file", "open_file", "read_text_file", "view_file_content"}
+
+
+def tool_usage_since(cid, after_step=None, limit=200):
+    """after_step 以降のツール呼び出しを数える（read_file 検出用の軽量版）。
+    戻り値: {"total", "read_file", "names", "ok"}。IDE に問い合わせできなければ ok=False。"""
+    out = {"total": 0, "read_file": False, "names": [], "ok": False}
+    try:
+        port, tok, s = locate(cid)
+        if not port:
+            return out
+        n = int(s.get("stepCount") or 0)
+        if after_step is None:
+            after_step = int(s.get("lastUserInputStepIndex") or 0)
+        start = max(0, int(after_step or 0))
+        truncated = n - start > limit
+        if truncated:
+            start = max(0, n - limit)
+        code, d = _call(port, tok, "GetCascadeTrajectorySteps",
+                        {"cascadeId": cid, "stepOffset": start}, timeout=20)
+        if code != 200:
+            return out
+        names = []
+        for x in d.get("steps") or []:
+            t = (x.get("type") or "").replace("CORTEX_STEP_TYPE_", "")
+            if t == "PLANNER_RESPONSE":
+                for tc in (x.get("plannerResponse") or {}).get("toolCalls") or []:
+                    nm = str(tc.get("name") or "")
+                    if nm:
+                        names.append(nm)
+            elif t in ("VIEW_FILE", "READ_FILE", "OPEN_FILE"):
+                names.append(t.lower())
+        uniq = list(dict.fromkeys(names))
+        out.update(
+            total=len(uniq),
+            names=uniq[:20],
+            ok=True,
+            truncated=truncated,
+            read_file=any(nm.lower() in READ_TOOL_NAMES for nm in uniq),
+        )
+        return out
+    except Exception:
+        return out
+
+
+def _ts(ts):
+    """now() のローカル表記も Antigravity の UTC (末尾 Z) 表記も正確に POSIX 秒にする"""
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z)?", ts or "")
+    if not m:
+        return None
+    t = time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")
+    sec = (datetime.datetime(*t[:6], tzinfo=datetime.timezone.utc).timestamp()
+           if m.group(3) else time.mktime(t))
+    return sec + (float(m.group(2)) if m.group(2) else 0)
+
+
+def errors_since(cid, since="", kinds=None, limit=200):
+    """since 以降の content safety ブロックを含むエラーを抽出"""
+    t0 = _ts(since) if since else None
+    if not t0:
+        return []
+    try:
+        port, tok, s = locate(cid)
+        if not port:
+            return []
+        n = int(s.get("stepCount") or 0)
+        code, d = _call(port, tok, "GetCascadeTrajectorySteps",
+                        {"cascadeId": cid, "stepOffset": max(0, n - limit)}, timeout=10)
+    except Exception:
+        return []
+    if code != 200:
+        return []
+    out = []
+    for x in d.get("steps") or []:
+        t = (x.get("type") or "").replace("CORTEX_STEP_TYPE_", "")
+        at = (x.get("metadata") or {}).get("createdAt") or ""
+        if t == "ERROR_MESSAGE":
+            e = (x.get("errorMessage") or {}).get("error") or {}
+            msg = e.get("shortError") or e.get("userErrorMessage") or ""
+            kind = "filter" if ("content safety" in msg or "Prohibited Use" in msg) else "error"
+            text = msg[:300]
+        elif t == "PLANNER_RESPONSE":
+            if (x.get("plannerResponse") or {}).get("stopReason") != "STOP_REASON_CONTENT_FILTER":
+                continue
+            kind, text = "filter", "STOP_REASON_CONTENT_FILTER"
+        else:
+            continue
+        ep = _ts(at)
+        if ep and ep < t0 - 3:
+            continue
+        out.append({"kind": kind, "text": text, "at": at})
+    return [e for e in out if not kinds or e["kind"] in kinds]
+
+
 def fork(cid, at=-1, title=None):
     """会話を at（ステップ番号。-1 は最後まで）で分岐し、名前を title にする。同じワークスペース・プロジェクトのまま。
     (新しい会話ID, 説明) か (None, 失敗の説明)"""
@@ -840,6 +959,26 @@ def revert(cid, at, backup_dir):
     if code != 200:
         return False, f"巻き戻せなかった（{code} {d}）"
     return True, f"Antigravity の会話を {n} ステップから {at + 1} ステップに戻した"
+
+
+def revert_when_idle(cid, at, backup_dir=None, timeout=45):
+    """会話が IDLE になるのを待ってから指定ステップ at まで巻き戻す"""
+    if at is None or at < 0:
+        return False, "巻き戻すステップがない"
+    if backup_dir is None:
+        backup_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "data", "trash", "ide_revert"
+        )
+    start = time.time()
+    while time.time() - start < timeout:
+        port, tok, s = locate(cid)
+        if not port:
+            return False, "この会話を開いている Antigravity が見つからない"
+        st = s.get("status") or ""
+        if st in (IDLE, "IDLE", "", "CASCADE_RUN_STATUS_UNSPECIFIED"):
+            return revert(cid, at, backup_dir)
+        time.sleep(0.4)
+    return False, "IDLE待機タイムアウト"
 
 
 # ---------------------------------------------------------------- 会話の作業フォルダを付け替える（Antigravity の再起動が要る）
@@ -902,15 +1041,18 @@ def _pb_build(fields):
 
 def _app_procs():
     """Antigravity（IDE でないほう）のプロセスと、hub の言語サーバー。([(pid, 親pid, exe)], hub の言語サーバーの数)"""
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='Antigravity.exe' or Name='language_server.exe'\" | ForEach-Object {"
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='Antigravity.exe' or Name like 'language_server%'\" | ForEach-Object {"
           " [pscustomobject]@{pid=$_.ProcessId; ppid=$_.ParentProcessId; name=$_.Name; exe=$_.ExecutablePath;"
           " hub=($_.CommandLine -like '*subclient_type hub*')} } | ConvertTo-Json")
-    out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
-                         timeout=30, creationflags=0x08000000).stdout
-    rows = json.loads(out or "[]")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                             timeout=30, creationflags=0x08000000).stdout
+        rows = json.loads(out or "[]")
+    except Exception:
+        rows = []
     rows = rows if isinstance(rows, list) else [rows]
-    app = [(r["pid"], r["ppid"], r.get("exe") or "") for r in rows if r.get("name") == "Antigravity.exe"]
-    return app, sum(1 for r in rows if r.get("name") == "language_server.exe" and r.get("hub"))
+    app = [(r["pid"], r["ppid"], r.get("exe") or "") for r in rows if (r.get("name") or "").lower() == "antigravity.exe"]
+    return app, sum(1 for r in rows if (r.get("name") or "").lower().startswith("language_server") and r.get("hub"))
 
 
 def _rewrite_workspace(cid, folder, project, backup):

@@ -29,9 +29,13 @@ class TestNewSessionFix(unittest.TestCase):
         self.orig_done = server.DONE
         self.orig_rag_dir = server.RAG_DIR
         self.orig_memory_store_data = memory_store.DATA
+        self.orig_ide_known = server.IDE_KNOWN
+        self.orig_known_ides = server.known_ides
 
         server.DATA = os.path.join(self.test_dir, "data")
         os.makedirs(server.DATA, exist_ok=True)
+        server.IDE_KNOWN = os.path.join(server.DATA, "ide_known.json")
+        server.known_ides = None
         server.SESS_DIR = os.path.join(server.DATA, "sessions")
         os.makedirs(server.SESS_DIR, exist_ok=True)
         server.IMAGES_DIR = os.path.join(server.DATA, "images")
@@ -50,6 +54,13 @@ class TestNewSessionFix(unittest.TestCase):
         os.makedirs(server.RAG_DIR, exist_ok=True)
 
         memory_store.DATA = server.DATA
+        # memory_store 側の RAG_DIR / TRASH は import 時に確定しているので明示的に差し替える
+        # （差し替えないとデータが実データの data/rag に書き込まれてしまう）
+        self.orig_ms_rag_dir = memory_store.RAG_DIR
+        self.orig_ms_trash = memory_store.TRASH
+        memory_store.RAG_DIR = server.RAG_DIR
+        memory_store.TRASH = server.TRASH
+        memory_store._memory_cache.clear()
 
         server.OUTBOX = os.path.join(self.test_dir, "outbox")
         os.makedirs(server.OUTBOX, exist_ok=True)
@@ -80,7 +91,12 @@ class TestNewSessionFix(unittest.TestCase):
         server.OUTBOX = self.orig_outbox
         server.DONE = self.orig_done
         server.RAG_DIR = self.orig_rag_dir
+        server.IDE_KNOWN = self.orig_ide_known
+        server.known_ides = self.orig_known_ides
         memory_store.DATA = self.orig_memory_store_data
+        memory_store.RAG_DIR = self.orig_ms_rag_dir
+        memory_store.TRASH = self.orig_ms_trash
+        memory_store._memory_cache.clear()
 
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
@@ -222,6 +238,8 @@ class TestNewSessionFix(unittest.TestCase):
         # rotation_notice, last_memo_mid, rotation 等が除去されている
         self.assertNotIn("rotation_notice", st)
         self.assertNotIn("last_memo_mid", st)
+        self.assertNotIn("memo_manual_edit_mid", st)
+        self.assertNotIn("memo_manual_edit_ts", st)
         self.assertNotIn("rotation", st)
         self.assertNotIn("rotation_reserve", st)
         self.assertNotIn("rotation_skip_until", st)
@@ -232,6 +250,8 @@ class TestNewSessionFix(unittest.TestCase):
             disk_data = json.load(f)
         self.assertNotIn("rotation_notice", disk_data["setting"])
         self.assertNotIn("last_memo_mid", disk_data["setting"])
+        self.assertNotIn("memo_manual_edit_mid", disk_data["setting"])
+        self.assertNotIn("memo_manual_edit_ts", disk_data["setting"])
         self.assertNotIn("rotation", disk_data["setting"])
         self.assertNotIn("rotation_reserve", disk_data["setting"])
         self.assertNotIn("rotation_skip_until", disk_data["setting"])
@@ -363,6 +383,10 @@ class TestNewSessionFix(unittest.TestCase):
         self.assertNotIn("character_tags", nst["image"])
         self.assertNotIn("rotation_notice", nst)
         self.assertNotIn("last_memo_mid", nst)
+        self.assertNotIn("memo_manual_edit_mid", nst)
+        self.assertNotIn("memo_manual_edit_ts", nst)
+        self.assertFalse(nst.get("memo_over_budget"))
+        self.assertEqual(nst.get("memo_bytes"), 0)
         self.assertEqual(nst["elapsed_time"]["day"], 1)
 
         # --- B. copy_from（複製）: キャラ設定・RAGを残して進行カウンタのみリセット ---
@@ -404,6 +428,10 @@ class TestNewSessionFix(unittest.TestCase):
         self.assertNotIn("character_tags", cst["image"])
         self.assertNotIn("rotation_notice", cst)
         self.assertNotIn("last_memo_mid", cst)
+        self.assertNotIn("memo_manual_edit_mid", cst)
+        self.assertNotIn("memo_manual_edit_ts", cst)
+        self.assertFalse(cst.get("memo_over_budget"))
+        self.assertEqual(cst.get("memo_bytes"), 0)
 
         # 6. 会話履歴はリセットされ、first_message のみで再開される
         self.assertEqual(len(copy_sess["messages"]), 1)
@@ -516,6 +544,25 @@ class TestNewSessionFix(unittest.TestCase):
             content = m.get("content", "")
             self.assertNotIn("無効_CHAR", content)
             self.assertNotIn("無効_USER", content)
+
+    def test_5_dispatch_poke_full_flag_uses_known_ides(self):
+        """世代交代等でブートストラップ済みの会話には full=False（半角スペース）が送られ、二重フルコマンドが防止されること"""
+        # 1. 未知の会話 (known でない) -> full=True
+        ide_unknown = "conv_test_unknown_123"
+        server.known_ides = set()
+        self.assertFalse(server.ide_is_known(ide_unknown))
+        txt_unknown = server.poke_text(ide_unknown, full=(not server.ide_is_known(ide_unknown)))
+        self.assertIn("python", txt_unknown)
+        self.assertIn("wait_input.py", txt_unknown)
+
+        # 2. ブートストラップ済み（mark_known された会話） -> full=False (半角スペースのみ)
+        ide_known = "conv_test_known_456"
+        server.mark_known(ide_known)
+        self.assertTrue(server.ide_is_known(ide_known))
+        txt_known = server.poke_text(ide_known, full=(not server.ide_is_known(ide_known)))
+        self.assertEqual(txt_known, server.POKE_TEXT)
+        self.assertNotIn("python", txt_known)
+        self.assertNotIn("wait_input.py", txt_known)
 
 
 if __name__ == "__main__":

@@ -395,6 +395,87 @@ class TestRotationPipeline(unittest.TestCase):
                 self.assertEqual(server.rotation_phase(s_loaded), "cutover")
 
     # -------------------------------------------------------------
+    # T12b: 新規会話（stepCount=0）でもブートストラップの返事で疎通テストを省略できる
+    #       （旧: if b_step: で 0 が偽になり、必ず疎通テストが走っていた）
+    # -------------------------------------------------------------
+    def _verify_session(self, attempts=None):
+        s = self._create_dummy_session(user_turns=3)
+        s["setting"]["rotation"] = {
+            "phase": "verify_test", "rot_no": 1, "new_ide": "conv-new-0",
+            "old_model": "model-1",
+            "attempts": attempts if attempts is not None else {
+                "verify": 0, "test_sent": False, "bootstrap_after_step_main": 0
+            },
+        }
+        server.save(s)
+        return s
+
+    def test_T12b_skip_test_when_bootstrap_step_is_zero(self):
+        s = self._verify_session()
+        calls = {"send": 0}
+
+        def _boom(*a, **k):
+            calls["send"] += 1
+            raise AssertionError("疎通テストを送ってしまった（stepCount=0 の判定漏れ）")
+
+        with patch.object(server.ide_poke, "idle", return_value=(True, "IDLE")), \
+             patch.object(server.ide_poke, "summary", return_value={"stepCount": 0}), \
+             patch.object(server.ide_poke, "last_reply", return_value=("準備完了", "", "ok")), \
+             patch.object(server, "ide_is_known", return_value=True), \
+             patch.object(server, "send_poke_text", side_effect=_boom):
+            delay = server._rot_verify_test(s["id"])
+
+        self.assertEqual(delay, 0.0)
+        self.assertEqual(calls["send"], 0)
+        self.assertEqual(server.rotation_phase(server.load(s["id"])), "cutover")
+
+    # -------------------------------------------------------------
+    # T12c: ブートストラップの返事が無いときは、従来どおり疎通テストを送る（フォールバック）
+    # -------------------------------------------------------------
+    def test_T12c_sends_test_when_bootstrap_reply_missing(self):
+        s = self._verify_session()
+        calls = {"send": 0, "text": ""}
+
+        def _ok(cid, text, **k):
+            calls["send"] += 1
+            calls["text"] = text
+            return True, "ok", False
+
+        with patch.object(server.ide_poke, "idle", return_value=(True, "IDLE")), \
+             patch.object(server.ide_poke, "summary", return_value={"stepCount": 0}), \
+             patch.object(server.ide_poke, "last_reply", return_value=("", "", "ok")), \
+             patch.object(server, "ide_is_known", return_value=True), \
+             patch.object(server, "send_poke_text", side_effect=_ok):
+            delay = server._rot_verify_test(s["id"])
+
+        self.assertEqual(calls["send"], 1)
+        self.assertIn("準備完了", calls["text"])
+        self.assertEqual(delay, server.ROT_VERIFY_POLL)
+        self.assertEqual(server.rotation_phase(server.load(s["id"])), "verify_test")
+
+    # -------------------------------------------------------------
+    # T12d: bootstrap_after_step の main / choices キーが分離されている（choices が main を上書きしない）
+    # -------------------------------------------------------------
+    def test_T12d_bootstrap_step_keys_are_separated(self):
+        s = self._verify_session({
+            "verify": 0, "test_sent": False,
+            "bootstrap_after_step_main": 0, "bootstrap_after_step_choices": 7,
+        })
+        seen = {}
+
+        def _lr(cid, after_step=0):
+            seen["after_step"] = after_step
+            return "準備完了", "", "ok"
+
+        with patch.object(server.ide_poke, "idle", return_value=(True, "IDLE")), \
+             patch.object(server.ide_poke, "summary", return_value={"stepCount": 9}), \
+             patch.object(server.ide_poke, "last_reply", side_effect=_lr), \
+             patch.object(server, "ide_is_known", return_value=True):
+            server._rot_verify_test(s["id"])
+
+        self.assertEqual(seen["after_step"], 0, "main の b_step で判定されていない（choices に上書きされている）")
+
+    # -------------------------------------------------------------
     # T13: テスト送信失敗（retry=False）で verify が +1 され、ROT_VERIFY_ROUNDS で必ず rotation_fail
     # -------------------------------------------------------------
     def test_T13_verify_failure_limits_to_rounds(self):
@@ -681,7 +762,18 @@ class TestRotationPipeline(unittest.TestCase):
             s = server.load(sid)
             self.assertEqual(server.rotation_phase(s), "cutover")
 
-        # 7. cutover
+        # 7. cutoverは睡眠プロセス（consolidation）の完了を待つ（作中時間はそこで確定する）
+        pend = [m for m in server.load(sid)["messages"] if m.get("consolidation_status") == "pending"]
+        self.assertEqual(len(pend), 1, "世代交代アーム時に睡眠プロセスが積まれていること")
+        with patch.object(server.ide_poke, "rename") as mock_rename:
+            self.assertEqual(server.rotation_step(sid), 1.0)
+            mock_rename.assert_not_called()
+        # 睡眠プロセスの応答が取り込まれてマーカーが消えたら切り替わる
+        s = server.load(sid)
+        for m in s["messages"]:
+            m.pop("consolidation_status", None)
+            m.pop("consolidation_ts", None)
+        server.save(s)
         with patch.object(server.ide_poke, "rename") as mock_rename:
             delay = server.rotation_step(sid)
             self.assertIsNone(delay)  # 完了
@@ -789,7 +881,15 @@ class TestRotationPipeline(unittest.TestCase):
             server.rotation_step(sid)
         self.assertEqual(server.rotation_phase(server.load(sid)), "cutover")
 
-        # 9. cutover (AGENTS.md & choices AGENTS.md written, both old renamed)
+        # 9. cutover (睡眠プロセスの完了を待ってから、AGENTS.md & choices AGENTS.md written, both old renamed)
+        with patch.object(server.ide_poke, "rename") as mock_rename:
+            self.assertEqual(server.rotation_step(sid), 1.0)
+            mock_rename.assert_not_called()
+        s = server.load(sid)
+        for m in s["messages"]:
+            m.pop("consolidation_status", None)
+            m.pop("consolidation_ts", None)
+        server.save(s)
         with patch.object(server.ide_poke, "rename") as mock_rename:
             delay = server.rotation_step(sid)
             self.assertIsNone(delay)
@@ -983,6 +1083,144 @@ class TestRotationPipeline(unittest.TestCase):
         self.assertIn("--ide conv-new", txt)
         normal = server.poke_text("conv-new", full=True)
         self.assertNotIn("AGENTS.md", normal)
+
+    # -------------------------------------------------------------
+    # T31b: agents_md がオフのチャンネルでは、AGENTS.md の注意文を出さない
+    # （アプリが AGENTS.md を管理していないのに「書いてある」と伝えるのは誤誘導）
+    # -------------------------------------------------------------
+    def test_T31b_no_agents_notice_when_agents_md_off(self):
+        s = self._create_dummy_session(user_turns=1)
+        s["setting"]["ide_session"] = "conv-noagents"
+        s["setting"]["agents_md"] = False
+        server.save(s)
+        txt = server.poke_text("conv-noagents", full=True, wait=server.ROT_BOOTSTRAP_WAIT)
+        self.assertNotIn("AGENTS.md", txt)
+        self.assertIn("--ide conv-noagents", txt)
+        # オンに戻せば従来どおり注意文が出る
+        s["setting"]["agents_md"] = True
+        server.save(s)
+        txt2 = server.poke_text("conv-noagents", full=True, wait=server.ROT_BOOTSTRAP_WAIT)
+        self.assertIn("AGENTS.md", txt2)
+
+    # -------------------------------------------------------------
+    # T12b: ブートストラップのターンに返事があれば、疎通テストを送らずに合格
+    # -------------------------------------------------------------
+    def test_T12b_verify_skipped_when_bootstrap_replied(self):
+        s = self._create_dummy_session(user_turns=30)
+        s["setting"]["rotation"] = {
+            "phase": "verify_test", "rot_no": 1, "new_ide": "conv-new-456",
+            "old_model": "model-1",
+            "attempts": {"verify": 0, "test_sent": False, "bootstrap_after_step": 7},
+        }
+        server.save(s)
+        called = {"send": 0}
+        def fake_send(*a, **kw):
+            called["send"] += 1
+            return (True, "ok", False)
+        with patch.object(server.ide_poke, "idle", return_value=(True, "IDLE")), \
+             patch.object(server.ide_poke, "summary", return_value={"stepCount": 9}), \
+             patch.object(server.ide_poke, "last_reply", return_value=("（待機）", "", "ok")), \
+             patch.object(server, "ide_is_known", return_value=True), \
+             patch.object(server, "send_poke_text", side_effect=fake_send):
+            delay = server._rot_verify_test(s["id"])
+        self.assertEqual(delay, 0.0)
+        self.assertEqual(called["send"], 0, "疎通テストを送ってはいけない")
+        self.assertEqual(server.rotation_phase(server.load(s["id"])), "cutover")
+
+    # -------------------------------------------------------------
+    # T12c: ブートストラップの返事が無ければ従来どおり疎通テストを送る
+    # -------------------------------------------------------------
+    def test_T12c_verify_sends_when_no_bootstrap_reply(self):
+        s = self._create_dummy_session(user_turns=30)
+        s["setting"]["rotation"] = {
+            "phase": "verify_test", "rot_no": 1, "new_ide": "conv-new-789",
+            "old_model": "model-1",
+            "attempts": {"verify": 0, "test_sent": False, "bootstrap_after_step": 7},
+        }
+        server.save(s)
+        called = {"send": 0}
+        def fake_send(*a, **kw):
+            called["send"] += 1
+            return (True, "ok", False)
+        with patch.object(server.ide_poke, "idle", return_value=(True, "IDLE")), \
+             patch.object(server.ide_poke, "summary", return_value={"stepCount": 9}), \
+             patch.object(server.ide_poke, "last_reply", return_value=("", "", "ok")), \
+             patch.object(server, "ide_is_known", return_value=True), \
+             patch.object(server, "send_poke_text", side_effect=fake_send):
+            delay = server._rot_verify_test(s["id"])
+        self.assertEqual(delay, server.ROT_VERIFY_POLL)
+        self.assertEqual(called["send"], 1, "返事が無いので疎通テストを送るべき")
+
+    # -------------------------------------------------------------
+    # T32: 世代交代アーム時に睡眠プロセス（作中時間確定）が1件だけ積まれる
+    # -------------------------------------------------------------
+    def test_T32_consolidation_enqueued_once_on_arm(self):
+        s = self._create_dummy_session(user_turns=30)
+        self.assertTrue(server.rotation_maybe_arm(s))
+        pend = [m for m in s["messages"] if m.get("consolidation_status") == "pending"]
+        self.assertEqual(len(pend), 1)
+        self.assertEqual(pend[0]["id"], "a_30")          # 直近のアシスタント発言に積む
+        self.assertIsInstance(pend[0]["consolidation_ts"], str)   # age() 用に ISO 文字列
+        # 二重発行しない（冪等）
+        self.assertFalse(server.enqueue_consolidation(s))
+        self.assertEqual(len([m for m in s["messages"] if m.get("consolidation_status") == "pending"]), 1)
+
+    # -------------------------------------------------------------
+    # T33: 睡眠プロセス中は cutover しない／コンテキストに既存memoと作中時間が入る
+    # -------------------------------------------------------------
+    def test_T33_consolidation_blocks_cutover_and_context_has_memo(self):
+        s = self._create_dummy_session(user_turns=30)
+        s["setting"]["memo"] = "1日目: 放課後に告白した"
+        s["setting"]["elapsed_time"] = {"day": 1, "period": "夕方"}
+        server.save(s)
+        self.assertTrue(server.rotation_maybe_arm(s))
+        server.save(s)
+        s = server.load(s["id"])
+        self.assertFalse(server.rotation_idle(s), "睡眠プロセスの応答待ちの間は切り替えない")
+
+        m = next(x for x in s["messages"] if x.get("consolidation_status") == "pending")
+        ctx = server.build_consolidation_context(s, m)
+        self.assertEqual(ctx["mode"], "consolidation")
+        texts = "\n".join(sec.get("text", "") for sec in ctx["sections"])
+        self.assertIn("放課後に告白した", texts)   # 既存memoを引き継いで書き直す
+        self.assertIn("1日目・夕方", texts)       # 直前の作中時間を提示
+        self.assertIn("elapsed_time", texts)      # 作中時間の確定タスク
+    # -------------------------------------------------------------
+    # T34: 睡眠プロセスの応答が memo / 作中時間 / state に反映され、回転が再開する
+    # -------------------------------------------------------------
+    def test_T34_consolidation_reply_applies_time_and_resumes_rotation(self):
+        s = self._create_dummy_session(user_turns=30)
+        s["setting"]["memo"] = "旧あらすじ"
+        s["setting"]["elapsed_time"] = {"day": 1, "period": "夜"}
+        s["setting"]["turns_in_period"] = 7
+        server.save(s)
+        self.assertTrue(server.rotation_maybe_arm(s))
+        server.save(s)
+        sid = s["id"]
+        pend = next(m for m in server.load(sid)["messages"] if m.get("consolidation_status") == "pending")
+
+        rep = {
+            "session": sid,
+            "reply_to": pend["id"],
+            "type": "consolidation",
+            "memo": "新あらすじ（1日目夜の告白）",
+            "elapsed_time": {"day": 2, "period": "早朝"},
+            "state": [{"name": "アリス", "outfit": "パジャマ", "place": "寝室"}],
+        }
+        path = os.path.join(server.OUTBOX, f"{sid}_cons.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rep, f, ensure_ascii=False)
+
+        with patch.object(server, "rotation_note_body") as mock_note:
+            self.assertTrue(server.process_outbox())
+        mock_note.assert_called_once_with(sid)   # 睡眠プロセスの完了で回転を進める
+
+        s2 = server.load(sid)
+        self.assertEqual(s2["setting"]["memo"], "新あらすじ（1日目夜の告白）")
+        self.assertEqual(s2["setting"]["elapsed_time"], {"day": 2, "period": "早朝"})
+        self.assertEqual(s2["setting"]["turns_in_period"], 0)
+        self.assertFalse(any(m.get("consolidation_status") for m in s2["messages"]))
+        self.assertTrue(server.rotation_idle(s2))          # cutover 可能に戻る
 
 
 if __name__ == "__main__":

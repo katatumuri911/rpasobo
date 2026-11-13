@@ -166,7 +166,7 @@ class TestBoostChanges(unittest.TestCase):
         self.assertEqual(mem_data_after["memories"][0]["mid"], asst_msg["id"])
 
     def test_fallback_memory_queueing(self):
-        """When LLM does not return memories, fallback extraction is queued"""
+        """LLM が memories を返さないターンは、まず同期キーワード抽出で拾う（fallback キューは使わない）"""
         s = server.create_session({"title": "テスト会話", "character": {"name": "アリス"}})
         sid = s["id"]
         user_msg = make_msg("user", "アリス、今度の日曜日にカフェに行く約束しよう！", mid="u1", status="pending")
@@ -186,14 +186,16 @@ class TestBoostChanges(unittest.TestCase):
 
         self.assertEqual(len(server.queued_memories), 1)
         task = server.queued_memories.popleft()
-        self.assertEqual(task[0], "fallback")
-        kind, m_sid, m_s_snap, m_msg_snap, m_mid = task
+        self.assertEqual(task[0], "explicit")   # キーワードで拾えた分は即保存キューに乗る
+        kind, m_sid, m_ch, m_list, m_res, m_turn, m_id, m_el = task
         self.assertEqual(m_sid, sid)
-        self.assertIn("messages", m_s_snap)
-        self.assertEqual(m_msg_snap["id"], m_mid)
+        self.assertTrue(any(x["category"] == "promise" for x in m_list))
+        self.assertEqual(m_id, server.load(sid, readonly=True)["messages"][-1]["id"])
 
-        # Run fallback extraction
-        server.extract_memories_fallback(m_sid, m_s_snap, m_msg_snap)
+        # 実際に保存されるところまで確認
+        memory_store.save_extracted_memories(
+            m_sid, m_ch, m_list, resolved_ids=m_res, turn_idx=m_turn, mid=m_id, elapsed_time=m_el
+        )
         mem_data = memory_store.load_memories(sid)
         self.assertTrue(len(mem_data.get("memories", [])) >= 1)
 
@@ -232,7 +234,9 @@ class TestBoostChanges(unittest.TestCase):
         self.assertNotIn("memo", server.ALWAYS_SHOW_KEYS)
         self.assertNotIn("relationship_core", server.ALWAYS_SHOW_KEYS)
         self.assertIn("elapsed_time", server.ALWAYS_SHOW_KEYS)
-        self.assertIn("output.md", server.ALWAYS_SHOW_KEYS)
+        self.assertNotIn("output.md", server.ALWAYS_SHOW_KEYS)
+        self.assertNotIn("instructions.md", server.ALWAYS_SHOW_KEYS)
+        self.assertNotIn("chara.md", server.ALWAYS_SHOW_KEYS)
 
         st = {
             "image_mode": "always",
@@ -241,7 +245,10 @@ class TestBoostChanges(unittest.TestCase):
         }
         diff_text = server.output_text(st, is_diff=True)
         # Verify optional keys explanation exists
-        self.assertIn("任意キー（変化・該当がない通常ターンはキー自体を省略すること）", diff_text)
+        if server.compact_on():
+            self.assertIn("任意", diff_text)
+        else:
+            self.assertIn("任意キー（変化・該当がない通常ターンはキー自体を省略すること）", diff_text)
         self.assertIn("- state:", diff_text)
         self.assertIn("【重要】終了・解除した状態", diff_text)
         # Sample json in diff mode should not have memo or elapsed_time in root keys
@@ -252,7 +259,9 @@ class TestBoostChanges(unittest.TestCase):
         self.assertNotIn("memo", schema_sample)
         self.assertNotIn("elapsed_time", schema_sample)
         self.assertNotIn("relationship_core", schema_sample)
-        self.assertNotIn("memories", schema_sample)
+        # 以前は diff の例から memories も外していたが、例が無いとモデルが出力自体を省略する
+        # （実測: memories付き返答が 5〜16%）ため、形だけは毎回見せる方針に変更した
+        self.assertIn("memories", schema_sample)
         self.assertNotIn("resolved_ids", schema_sample)
         self.assertIn("text", schema_sample)
         self.assertIn("state", schema_sample)
@@ -284,9 +293,10 @@ class TestBoostChanges(unittest.TestCase):
 
         ctx_first = server.build_context(s, m1)
         self.assertEqual(ctx_first["mode"], "full")
-        # In full mode, image guidelines are full
+        # In full mode, image guidelines are state_tag_guidelines_text (< 2000B, ~1.7KB)
         img_sec = next(sec for sec in ctx_first["sections"] if "解剖学的整合性規則" in sec["label"])
-        self.assertTrue(len(img_sec["text"]) > 4000)
+        self.assertEqual(img_sec["text"], server.state_tag_guidelines_text())
+        self.assertTrue(len(img_sec["text"].encode("utf-8")) < 2000)
 
         # Simulate assistant reply and subsequent turn in diff mode
         a1 = make_msg("assistant", "1ターン目返答", mid="a1")
@@ -299,9 +309,13 @@ class TestBoostChanges(unittest.TestCase):
         # In diff mode (not memo_due), memo was not changed and memo_due is False -> memo omitted
         memo_sec = next((sec for sec in ctx_diff["sections"] if "AIメモ" in sec["label"]), None)
         self.assertIsNone(memo_sec)
-        # Image guidelines should be brief in diff mode
-        img_sec_diff = next(sec for sec in ctx_diff["sections"] if "解剖学的整合性規則" in sec["label"])
-        self.assertTrue(len(img_sec_diff["text"]) < 2000)
+        # Image guidelines should be brief in diff mode if enabled
+        img_sec_diff = next((sec for sec in ctx_diff["sections"] if "作成の要点" in sec["label"]), None)
+        if os.environ.get("RPCHAT_IMGNOTE", "0") != "0":
+            self.assertIsNotNone(img_sec_diff)
+            self.assertTrue(len(img_sec_diff["text"]) < 2000)
+        else:
+            self.assertIsNone(img_sec_diff)
 
         # Now simulate 10 assistant turns after last memo
         for i in range(10):
@@ -317,25 +331,60 @@ class TestBoostChanges(unittest.TestCase):
         self.assertIsNotNone(memo_sec_due)
         self.assertIn("【重要】あらすじ（memo）の定期更新ターン", [sec["label"] for sec in ctx_due["sections"]])
 
-    def test_build_context_always_sends_instructions_and_character(self):
-        """指示とキャラは diff モードでも毎回再送される（IDE側の文脈縮小対策）"""
+    def test_build_context_cycles_instructions_character_and_spec(self):
+        """指示・キャラ・specは3ターン周期で1枚ずつローテーションされ、一巡して全て現れる"""
         s = server.create_session({"title": "テスト", "ide_session": "ide-1",
                                    "instructions": "必ず敬語で話す", "character": {"name": "アリス", "speech": "一人称は私"}})
         m1 = make_msg("user", "1ターン目", mid="u1")
         s["messages"].append(m1)
         server.save(s)
-        server.build_context(s, m1)
+        ctx1 = server.build_context(s, m1)
+        self.assertEqual(ctx1["mode"], "full")
 
-        a1 = make_msg("assistant", "返答", mid="a1")
+        a1 = make_msg("assistant", "返答1", mid="a1")
         m2 = make_msg("user", "2ターン目", mid="u2")
         s["messages"].extend([a1, m2])
         server.save(s)
-        ctx_diff = server.build_context(s, m2)
-        self.assertEqual(ctx_diff["mode"], "diff")
-        labels = [sec["label"] for sec in ctx_diff["sections"]]
-        self.assertTrue(any(lb.startswith("指示") for lb in labels), labels)
-        self.assertTrue(any(lb.startswith("キャラクター") for lb in labels), labels)
-        self.assertNotIn("指示", ctx_diff["same"])
+        server.note_reply(s, "u1", a1)
+
+        # 2ターン目: diff (phase 1: キャラクター)
+        ctx2 = server.build_context(s, m2)
+        self.assertEqual(ctx2["mode"], "diff")
+        labels2 = [sec["label"] for sec in ctx2["sections"]]
+        self.assertTrue(any(lb.startswith("キャラクター") for lb in labels2), labels2)
+        self.assertFalse(any(lb.startswith("指示") for lb in labels2), labels2)
+        self.assertNotIn("キャラクター", ctx2["same"])
+        self.assertNotIn("指示", ctx2["same"])
+
+        a2 = make_msg("assistant", "返答2", mid="a2")
+        m3 = make_msg("user", "3ターン目", mid="u3")
+        s["messages"].extend([a2, m3])
+        server.save(s)
+        server.note_reply(s, "u2", a2)
+
+        # 3ターン目: diff (phase 2: 応答の書き方)
+        ctx3 = server.build_context(s, m3)
+        self.assertEqual(ctx3["mode"], "diff")
+        labels3 = [sec["label"] for sec in ctx3["sections"]]
+        self.assertTrue(any("応答の書き方" in lb for lb in labels3), labels3)
+        self.assertFalse(any(lb.startswith("指示") for lb in labels3), labels3)
+        self.assertFalse(any(lb.startswith("キャラクター") for lb in labels3), labels3)
+        self.assertNotIn("応答の書き方", ctx3["same"])
+
+        a3 = make_msg("assistant", "返答3", mid="a3")
+        m4 = make_msg("user", "4ターン目", mid="u4")
+        s["messages"].extend([a3, m4])
+        server.save(s)
+        server.note_reply(s, "u3", a3)
+
+        # 4ターン目: diff (phase 0: 指示)
+        ctx4 = server.build_context(s, m4)
+        self.assertEqual(ctx4["mode"], "diff")
+        labels4 = [sec["label"] for sec in ctx4["sections"]]
+        self.assertTrue(any(lb.startswith("指示") for lb in labels4), labels4)
+        self.assertFalse(any(lb.startswith("キャラクター") for lb in labels4), labels4)
+        self.assertFalse(any("応答の書き方" in lb for lb in labels4), labels4)
+        self.assertNotIn("指示", ctx4["same"])
 
     def test_save_extracted_memories_edge_cases(self):
         """Test boundary values, type checks, and deduplication in save_extracted_memories"""
@@ -473,9 +522,13 @@ class TestBoostChanges(unittest.TestCase):
         server.save(s)
 
         ctx_diff = server.build_context(s, m2)
-        lbl_diff = next(sec["label"] for sec in ctx_diff["sections"] if "画像プロンプト" in sec["label"])
-        self.assertIn("要点", lbl_diff)
-        self.assertIn("解剖学的整合性規則", lbl_diff)
+        lbl_diff = next((sec["label"] for sec in ctx_diff["sections"] if "作成の要点" in sec["label"]), None)
+        if os.environ.get("RPCHAT_IMGNOTE", "0") != "0":
+            self.assertIsNotNone(lbl_diff)
+            self.assertIn("要点", lbl_diff)
+            self.assertIn("解剖学的整合性規則", lbl_diff)
+        else:
+            self.assertIsNone(lbl_diff)
 
         # Memo was updated by AI and recorded in note_reply, not changed since, not memo_due
         # Therefore, memo must NOT appear in diff sections (neither as regular nor as '前回から変わった')
@@ -624,6 +677,7 @@ class TestBoostChanges(unittest.TestCase):
             s["messages"].append(make_msg("user", f"ユーザー発言 {i}", mid=f"u_{i}"))
             s["messages"].append(make_msg("assistant", f"アシスタント返答 {i}", mid=f"a_{i}"))
         target_m = s["messages"][-2]  # last user msg
+        s["setting"]["rotation"] = {"phase": "armed", "armed_turn": 30}
         server.save(s)
 
         # Record sent history so diff mode applies

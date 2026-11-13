@@ -1,4 +1,4 @@
-// モバイル レイアウト仕様 v1.0 の小物（状態チップ・操作を表示/reveal・footBar 移送・
+// モバイル レイアウト仕様 v1.0 の小物（状態チップ・ツール（旧「操作を表示」）/reveal・footBar 移送・
 // 作中の時間モーダルのクランプ）の自動テスト。
 // public/app.js から該当モジュールを抜き出し、スタブ DOM 上で振る舞いを検証する。
 // 実行: node test/test_mobile_layout.cjs
@@ -15,6 +15,8 @@ function slice(startMarker, endMarker) {
 }
 const helper = slice("// --- モバイル判定・短縮文言", "// スマホ向けレスポンシブ・UIヘルパー");
 const footbar = slice("function syncFootBarPlacement() {", "\nasync function api(");
+// 中央の「送信 / ツール」ボタンの押下処理（押した瞬間の役割を覚えるか）
+const actionToggleSrc = slice("// 中央ボタン: 入力中は「送信」、それ以外は「ツール」", "if ($(\"revealRpToggle\"))");
 const clampday = slice("function clampDay(n) {", "\n\nfunction renderElapsedPeriodPicker");
 if (!helper.includes("function syncActionControlsVisibility")) throw new Error("ヘルパーを抽出できません");
 
@@ -58,6 +60,16 @@ class El {
   get firstChild() { return this.children[0] || null; }
   contains(n) { return this === n || this.children.some((c) => c.contains(n)); }
   setAttribute() {}
+  addEventListener(type, fn) {
+    this._listeners = this._listeners || {};
+    (this._listeners[type] = this._listeners[type] || []).push(fn);
+  }
+  fire(type, ev = {}) {
+    const list = (this._listeners && this._listeners[type]) || [];
+    let prevented = false;
+    for (const fn of list) fn({ button: 0, preventDefault: () => { prevented = true; }, ...ev });
+    return prevented;
+  }
 }
 
 const els = {};
@@ -77,9 +89,11 @@ mk("revealRpToggle", "button");
 mk("revealBackdrop", "div").classList.add("hidden");
 mk("ideModel", "select");
 mk("elapsedDayInput", "input");
+mk("messageInput", "textarea");
 
 const footer = new El("footer", "footer");
 els.attachList = footer.appendChild(new El("attachList", "div"));   // footer.firstChild 兼 $("attachList")
+footer.appendChild(els.messageInput);   // isFooterFocused の判定用（フッターの中にある）
 
 const body = new El("body", "body");
 let moreSheets = [];
@@ -104,6 +118,11 @@ const sandbox = {
   setTimeout: (...a) => { timers.push(a); return { f: a[0] }; },
   clearTimeout: () => {},
   state: { setting: { ide_session: "abc" } },
+  // 中央ボタン（送信/ツール）の出し分けが見る状態。抽出した断片だけでは未定義なので明示する
+  sending: false,
+  stopping: false,
+  attaching: [],
+  hasWaitingInput: () => false,
   rpMode: true,
   dirtyFields: new Set(),
   PERIODS: ["早朝", "午前", "昼", "夕方", "夜", "深夜"],
@@ -117,6 +136,11 @@ vm.createContext(sandbox);
 vm.runInContext(helper, sandbox, { filename: "app.js#mobile-helpers" });
 vm.runInContext(footbar, sandbox, { filename: "app.js#footbar" });
 vm.runInContext(clampday, sandbox, { filename: "app.js#clampday" });
+let sendCount = 0;
+let fakeNow = 1000;   // 二重送信防止の抑止時間（600ms）をテスト内で進める
+sandbox.Date = { now: () => fakeNow };
+sandbox.send = () => { sendCount++; };   // 実際の送信は通信するので回数だけ見る
+vm.runInContext(actionToggleSrc, sandbox, { filename: "app.js#action-toggle" });
 
 let pass = 0;
 let fail = 0;
@@ -129,7 +153,7 @@ t("-5 -> 1", sandbox.clampDay(-5) === 1);
 t("999999 -> 99999", sandbox.clampDay(999999) === 99999);
 t("3.9 -> 3", sandbox.clampDay(3.9) === 3);
 
-console.log("[2] 操作を表示 / reveal はオーバーレイ中に出さない");
+console.log("[2] ツール（旧「操作を表示」） / reveal はオーバーレイ中に出さない");
 sandbox.syncActionControlsVisibility();
 t("モバイル+RP+オーバーレイ無し -> トグル表示", !els.mobileActionToggle.classList.contains("hidden"));
 t("reveal は隠れたまま", els.mobileReveal.classList.contains("hidden"));
@@ -139,7 +163,7 @@ t("reveal 表示中もトグルは押せる（隠さない）", !els.mobileActio
 t("reveal 表示中はトグルが「✕ 閉じる」になる", els.mobileActionToggle.textContent === "✕ 閉じる");
 els.mobileReveal.classList.add("hidden");
 sandbox.syncActionControlsVisibility();
-t("reveal を閉じたら「操作を表示」に戻る", els.mobileActionToggle.textContent === "操作を表示");
+t("reveal を閉じたら「ツール」に戻る", els.mobileActionToggle.textContent === "ツール");
 body.classList.add("side-open");
 sandbox.syncActionControlsVisibility();
 t("ドロワー中は隠す", els.mobileActionToggle.classList.contains("hidden"));
@@ -175,6 +199,46 @@ documentStub.activeElement = null;
 els.mobileReveal.classList.add("hidden");
 sandbox.syncActionControlsVisibility();
 
+console.log("[2b] 中央の「ツール」は入力中だけ青い「送信」に入れ替わる（左手でも届く送信）");
+els.messageInput.value = "";
+sandbox.attaching = [];
+documentStub.activeElement = els.messageInput;   // 入力中（フォーカスあり）
+sandbox.syncActionControlsVisibility();
+t("入力中でも空ならツール", els.mobileActionToggle.textContent === "ツール");
+t("空なら send-mode は付かない", !els.mobileActionToggle.classList.contains("send-mode"));
+els.messageInput.value = "こんにちは";
+sandbox.syncActionControlsVisibility();
+t("入力中に文字あり -> 送信", els.mobileActionToggle.textContent === "送信");
+t("入力中に文字あり -> send-mode（青くなる）", els.mobileActionToggle.classList.contains("send-mode"));
+sandbox.sending = true;
+sandbox.syncActionControlsVisibility();
+t("送信中は押しても無反応の送信を出さない", els.mobileActionToggle.textContent === "ツール");
+sandbox.sending = false;
+sandbox.hasWaitingInput = () => true;
+sandbox.syncActionControlsVisibility();
+t("応答待ち中もツール", els.mobileActionToggle.textContent === "ツール");
+sandbox.hasWaitingInput = () => false;
+els.messageInput.value = "";
+sandbox.attaching = [{ name: "a.png", file: {} }];
+sandbox.syncActionControlsVisibility();
+t("添付だけでも送信", els.mobileActionToggle.textContent === "送信");
+// 入力を止めれば（キーボードを閉じれば）ツールに戻る＝レアケースのツールはこれで開ける
+documentStub.activeElement = null;
+els.messageInput.value = "こんにちは";
+sandbox.attaching = [];
+sandbox.syncActionControlsVisibility();
+t("入力を止めたらツールに戻る（文字が残っていても）", els.mobileActionToggle.textContent === "ツール");
+t("入力を止めたら send-mode も外れる", !els.mobileActionToggle.classList.contains("send-mode"));
+documentStub.activeElement = null;
+sandbox.attaching = [];
+els.messageInput.value = "こんにちは";
+els.mobileReveal.classList.remove("hidden");
+sandbox.syncActionControlsVisibility();
+t("メニューを開いている間は「✕ 閉じる」が優先", els.mobileActionToggle.textContent === "✕ 閉じる");
+els.mobileReveal.classList.add("hidden");
+els.messageInput.value = "";
+sandbox.syncActionControlsVisibility();
+
 console.log("[3] footBar は「今見えている状態」から配置を導出する");
 mobileOn = false;
 sandbox.syncFootBarPlacement();
@@ -193,14 +257,15 @@ sandbox.syncFootBarPlacement();
 t("デスクトップ復帰: footer へ", els.footBar.parentElement === footer);
 t("attachList より前に戻す", footer.children.indexOf(els.footBar) < footer.children.indexOf(els.attachList));
 
-console.log("[4] 🧩 は担当 IDE 会話があるときだけ出す");
-sandbox.state = { setting: {} };
+mobileOn = true;
+console.log("[4] 🤖 はチャンネル設定があるとき出す（AG / Google）");
+sandbox.state = null;
 sandbox.syncActionControlsVisibility();
-t("ide_session 無し -> .hidden で隠す", els.revealModel.classList.contains("hidden"));
-sandbox.state = { setting: { ide_session: "x" } };
+t("state 無し -> .hidden で隠す", els.revealModel.classList.contains("hidden"));
+sandbox.state = { setting: {} };
 els.revealModel.classList.add("hidden");
 sandbox.syncActionControlsVisibility();
-t("ide_session 有り -> 表示", !els.revealModel.classList.contains("hidden"));
+t("setting 有り -> 表示", !els.revealModel.classList.contains("hidden"));
 
 console.log("[5] reveal は時間経過で消えない");
 mobileOn = true;   // セクション[3] でデスクトップにしていたのを戻す
@@ -250,6 +315,48 @@ for (const id of ["mobileActionToggle", "mobileReveal", "sideBottomSection", "re
 }
 // 浮いているボタンのぶんの下余白がある（値は style.css 側で調整。消し忘れ防止の下限）
 t("#chatLog に下余白がある（浮きボタン用）", declaresNumeric(mediaBlock, "#chatLog", "padding-bottom", 24));
+
+console.log("[7] 中央の「送信」は押した瞬間の役割で動く（押下でフォーカスが外れても送信される）");
+mobileOn = true;
+sandbox.rpMode = true;
+documentStub.activeElement = els.messageInput;
+els.messageInput.value = "こんにちは";
+sandbox.attaching = [];
+els.mobileReveal.classList.add("hidden");
+sandbox.syncActionControlsVisibility();
+t("前提: 入力中は「送信」", els.mobileActionToggle.textContent === "送信");
+// 指を置いた瞬間に入力欄からフォーカスが外れる（ブラウザの実際の順序）
+const prevented = els.mobileActionToggle.fire("pointerdown", { button: 0, clientX: 100, clientY: 100 });
+t("送信の押下では入力欄のフォーカスを手放さない（preventDefault）", prevented === true);
+documentStub.activeElement = els.mobileActionToggle;   // もし blur してもボタンは footer の外
+t("押している間は「送信」のまま（ツールに戻らない）", els.mobileActionToggle.textContent === "送信");
+els.mobileActionToggle.fire("pointerup", { clientX: 100, clientY: 100 });
+t("指を離すと send() が呼ばれる（click が別要素に落ちても送れる）", sendCount === 1);
+els.mobileActionToggle.onclick();   // click が来ても
+t("click が重なっても二重送信しない", sendCount === 1);
+t("ツールのメニューは開かない", els.mobileReveal.classList.contains("hidden"));
+
+// 指を大きく動かした（スクロール）ときは送らない
+els.messageInput.value = "こんにちは";
+documentStub.activeElement = els.messageInput;
+sandbox.attaching = [];
+sandbox.syncActionControlsVisibility();
+els.mobileActionToggle.fire("pointerdown", { button: 0, clientX: 100, clientY: 100 });
+els.mobileActionToggle.fire("pointermove", { clientX: 100, clientY: 50 });
+els.mobileActionToggle.fire("pointerup", { clientX: 100, clientY: 50 });
+els.mobileActionToggle.onclick();
+t("スクロールした指では送らない", sendCount === 1);
+
+fakeNow += 5000;   // スクロール判定の抑止時間を過ぎたあとのタップ
+els.messageInput.value = "";
+documentStub.activeElement = null;
+sandbox.syncActionControlsVisibility();
+t("前提: 入力していないときは「ツール」", els.mobileActionToggle.textContent === "ツール");
+els.mobileActionToggle.fire("pointerdown", { button: 0 });
+els.mobileActionToggle.fire("pointerup");
+els.mobileActionToggle.onclick();
+t("ツールではメニューが開く", !els.mobileReveal.classList.contains("hidden"));
+t("ツールでは send() を呼ばない", sendCount === 1);
 
 console.log(`\n===== PASS ${pass} / FAIL ${fail} =====`);
 process.exit(fail ? 1 : 0);

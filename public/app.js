@@ -31,6 +31,10 @@ let touchStartY = 0;
 let touchMoved = false;
 let isPointerDown = false;
 let lastScrollTime = 0;
+// 前/次ボタンで移動した直後は、下端付近でも自動で最下段へ戻さない。
+// ユーザーが自分で最下段まで戻るか、送信したら解除する。
+let navHoldBottom = false;
+let lastAutoScrolledAsstId = "";            // スマホで本文表示時に上端合わせした最新AI応答のID
 const _initParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 let sid = (_initParams && _initParams.get("sid")) || getStorage("sid") || "";
 let state = null;
@@ -40,6 +44,8 @@ let formSid = "";  // 設定フォームに今入っているのはどのチャ�
 const openChoicesSet = new Set();       // 開いているアコーディオンのメッセージIDを保持
 const userClosedChoicesSet = new Set(); // ユーザーが手動で閉じたアコーディオンのメッセージIDを保持
 const selectedChoiceMap = new Map();    // メッセージID -> 選択中のchoiceインデックス
+const displayChoicesMode = new Map();   // msgKey -> "normal" | "erotic"
+let renderLastAsstId = "";              // 画面表示時点の「最後のAI応答」のID（候補はここだけ出す）
 let lastSelectedChoiceText = "";        // 選択された候補のテキスト（手入力で変わったら選択解除）
 let sessions = [];
 let rpMode = getStorage("rpMode") === "1";
@@ -65,7 +71,9 @@ let ragEditingEntry = null;
 let ragActiveTab = "memory";
 let ragMemEditingId = null;
 let ragMemRegenTimer = null;
+let ragMemRegenBefore = null;   // 一括再生成の開始時件数（進捗・完了表示の差分用）
 let meta = { app: {} };
+let decensorInfo = null;  // 婉曲→直接の辞書（GET /api/decensor の結果）
 let ideSessions = [];
 let ideNewDir = "";  // 「新規会話」で作るフォルダ
 let sysFiles = [];
@@ -81,20 +89,32 @@ const mqTiny   = (typeof window !== "undefined" && window.matchMedia) ? window.m
 function isMobileLayout() {
   return mqMobile ? mqMobile.matches : (typeof window !== "undefined" && window.innerWidth <= 768);
 }
+// 入力操作におけるスマホ判定。
+// スマホ（幅768px以下かつタッチ等のモバイル端末）は Enter 改行（送信は中央/右の送信ボタン）。
+// PC（マウス・物理キーボード環境、またはデスクトップ幅）は常に Enter 送信 / Shift+Enter 改行。
+function isMobileInputDevice() {
+  if (!isMobileLayout()) return false;
+  if (typeof window === "undefined") return true;
+  const hasTouch = (typeof navigator !== "undefined" && navigator.maxTouchPoints > 0) || ("ontouchstart" in window);
+  const hasCoarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  const isPureMouse = !!(window.matchMedia && window.matchMedia("(pointer: fine) and (hover: hover)").matches && !hasCoarse);
+  if (isPureMouse) return false;
+  return hasTouch || hasCoarse;
+}
 const SHORT_STATUS = {
   "サーバー未接続": "未接続", "AI応答待ち": "応答待ち", "AI応答＆候補生成中": "応答＋候補",
   "候補生成中": "候補", "タグ推敲中": "推敲", "記憶整理中": "記憶"
 };
 
-// 入力欄のプレースホルダ。スマホは Enter が改行（送信は送信ボタン）なので文言を分ける
-const PLACEHOLDER_DESKTOP = "入力をEnterで送信";
-const PLACEHOLDER_MOBILE = "セリフや行動を入力…";
+// 入力欄のプレースホルダ。PC は Enter 送信（Shift+Enter で改行）、スマホは Enter 改行。
+const PLACEHOLDER_DESKTOP = "ユーザーのセリフや行動を入力";
+const PLACEHOLDER_MOBILE = "ユーザーのセリフや行動を入力";
 function syncInputPlaceholder() {
   const ta = $("messageInput");
   if (ta) ta.placeholder = isMobileLayout() ? PLACEHOLDER_MOBILE : PLACEHOLDER_DESKTOP;
 }
 
-// ---------------------------------------------------------------- 「操作を表示」と reveal（モバイル）
+// ---------------------------------------------------------------- 「ツール」（旧「操作を表示」）と reveal（モバイル）
 // ドロワー / 設定 / モーダル / ⋯ シート / ライトボックス以外のオーバーレイを「開いている」とみなす
 function isOverlayOpen() {
   const b = document.body;
@@ -107,7 +127,11 @@ function isOverlayOpen() {
   const moreSheetOpen = document.querySelectorAll(".more-sheet").length > 0;   // ★z66/67 も覆う
   return sideOpen || settingsOpen || modalOpen || moreSheetOpen || lightboxOpen;
 }
+// 中央の「送信」を押している間は true。押した瞬間に入力欄のフォーカスが外れても
+// 役割（送信/ツール）と見た目を変えないため、isFooterFocused でも入力中とみなす。
+let actionTogglePressed = false;
 function isFooterFocused() {
+  if (actionTogglePressed) return true;
   const footer = document.querySelector("footer");
   return !!(footer && document.activeElement && footer.contains(document.activeElement));
 }
@@ -126,18 +150,38 @@ function showReveal() {
   const bd = $("revealBackdrop");
   if (bd) bd.classList.remove("hidden");
 }
+// 中央ボタン（#mobileActionToggle）は「入力中だけ」送信になる。
+//   input 中 → send（送信） / それ以外 → tools（ツール） / メニューを開いていれば close
+// 下中央は左右どちらの親指でも届く位置なので、左手持ちでも送信できる。
+// 入力中でもツールを使いたいときは、入力を止めれば（キーボードを閉じれば）ツールに戻る。
+let actionToggleMode = "tools";
+
+// 送れる中身があるか（送信ボタンの disabled と同じ条件）。
+// attaching はこの関数より後で宣言されるので、初期化前でも落ちないようにする
+function hasSendableContent() {
+  const ta = $("messageInput");
+  if (ta && ta.value.trim()) return true;
+  try { return Boolean(attaching && attaching.length); } catch { return false; }
+}
+
+// 今は送れない状態か（送信中/停止中/応答待ち）
+function isSendBlocked() {
+  const waiting = typeof hasWaitingInput === "function" ? hasWaitingInput() : false;
+  return Boolean(sending || stopping || waiting);
+}
+
 // 何度呼んでも安全。開いている間は必ず隠す（z64 が modal より上なので描画させない）
 function syncActionControlsVisibility() {
   // ここでは rpMode を見ない。reveal の 🖼️ で背景表示を切ると「自分の土台」ごと消えて
   // 二度と押せなくなる（しかも localStorage に残って再読込でも戻らない）ため。
   const base = isMobileLayout() && !isOverlayOpen();
   const typing = isFooterFocused();
-  // メニュー（reveal）は入力中だけ畳む。中央の「操作を表示」は常に押せる
+  // メニュー（reveal）は入力中だけ畳む。中央の「ツール」は常に押せる
   if (!base || typing) hideReveal();
   const reveal = $("mobileReveal");
   const revealVisible = !!(reveal && !reveal.classList.contains("hidden"));
   // 前/次はFABと同じ条件（モバイル・入力中でない・オーバーレイなし）で出す。
-  // 入力中も中央の「操作を表示」は残すので、ナビだけを .nav-off で抜く
+  // 入力中も中央の「ツール」は残すので、ナビだけを .nav-off で抜く
   const cluster = $("mobileTurnCluster");
   if (cluster) {
     cluster.classList.toggle("hidden", !base);
@@ -146,11 +190,27 @@ function syncActionControlsVisibility() {
   const toggle = $("mobileActionToggle");
   if (toggle) {
     toggle.classList.toggle("hidden", !base);
-    toggle.textContent = (base && revealVisible) ? "✕ 閉じる" : "操作を表示";
+    // 入力中（入力欄にフォーカスがあり、文字か添付がある）だけ「送信」に入れ替わる。
+    // 応答待ちの間は送れないので「ツール」に戻す（押しても無反応のボタンを出さない）
+    const sendMode = base && typing && !revealVisible && !isSendBlocked() && hasSendableContent();
+    actionToggleMode = (base && revealVisible) ? "close" : (sendMode ? "send" : "tools");
+    const label = actionToggleMode === "close" ? "✕ 閉じる"
+                : actionToggleMode === "send" ? "送信" : "ツール";
+    if (toggle.textContent !== label) toggle.textContent = label;
+    // 4つの操作メニューを開いている間は「閉じる」を青く点灯させる。
+    toggle.classList.toggle("on", base && revealVisible);
+    toggle.classList.toggle("send-mode", actionToggleMode === "send");
+    const hint = actionToggleMode === "send" ? "送信"
+               : actionToggleMode === "close" ? "ツールを閉じる" : "ツールを開く";
+    if (toggle.title !== hint) toggle.title = hint;
+    toggle.setAttribute("aria-label", hint);
   }
-  // 担当IDE会話が無ければ 🤖 を出さない（[hidden] は CSS に負けるので .hidden を使う）
+  // チャンネルが開いていればいつでもモデル選択（AG / Google）を出す
   const model = $("revealModel");
-  if (model) model.classList.toggle("hidden", !(state && state.setting && state.setting.ide_session));
+  if (model) model.classList.toggle("hidden", !(state && state.setting));
+  // 🧑 キャラ（状態）は「直近の応答」用の近道。過去の応答の状態は ⋯ から直す
+  const stateBtn = $("revealState");
+  if (stateBtn) stateBtn.classList.toggle("hidden", !latestStateTarget());
   // 🖼️ は背景表示のオン/オフを切り替えるトグル。今の状態を文言と色に映す
   const rpBtn = $("revealRpToggle");
   if (rpBtn) {
@@ -162,6 +222,56 @@ function syncActionControlsVisibility() {
 }
 
 // スマホ向けレスポンシブ・UIヘルパー
+// スマホの仮想キーボードは、iOS では「見えている範囲（visual viewport）」だけを縮める。
+// position:fixed のモーダルはレイアウト基準のままなので、モーダルの下半分（保存ボタンや
+// 入力欄）がキーボードの裏に丸ごと隠れてしまう。実寸を CSS 変数で渡して、CSS 側で
+// モーダルを「今見えている範囲」にぴったり合わせる（style.css の .modal / body.kb-open）。
+let kbWasOpen = false;
+const rafOnce = (fn) => {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(fn);
+  else setTimeout(fn, 16);
+};
+function syncViewportVars() {
+  const root = typeof document !== "undefined" ? document.documentElement : null;
+  if (!root || !root.style) return;
+  const vv = typeof window !== "undefined" ? window.visualViewport : null;
+  const layoutH = root.clientHeight || (typeof window !== "undefined" ? window.innerHeight : 0) || 0;
+  const vh = vv && vv.height ? Math.round(vv.height) : Math.round(layoutH);
+  const vtop = vv && typeof vv.offsetTop === "number" ? Math.round(vv.offsetTop) : 0;
+  root.style.setProperty("--app-vvh", vh + "px");
+  root.style.setProperty("--app-vvtop", Math.max(0, vtop) + "px");
+  // レイアウトがキーボード分だけ縮まない（＝キーボードが重なる）端末だけ kb-open にする。
+  // resizes-content が効く端末では 100dvh 自体が縮むので、何もする必要がない。
+  const kbOpen = isMobileLayout() && layoutH > 0 && (layoutH - vh) > 120;
+  if (document.body && document.body.classList) document.body.classList.toggle("kb-open", kbOpen);
+  // キーボードが出た瞬間に、フォーカス中の入力欄が画面の外に残らないように寄せる
+  if (kbOpen && !kbWasOpen) rafOnce(keepFocusedVisible);
+  kbWasOpen = kbOpen;
+}
+// キーボードで縮んだあと、フォーカス中の入力欄（記憶の内容など）を必ず見える位置へ
+function keepFocusedVisible() {
+  const ae = typeof document !== "undefined" ? document.activeElement : null;
+  if (!ae || !isMobileLayout() || typeof ae.scrollIntoView !== "function") return;
+  if (typeof document.querySelector !== "function" || !document.querySelector(".modal:not(.hidden)")) return;
+  try { ae.scrollIntoView({ block: "nearest", inline: "nearest" }); }
+  catch { try { ae.scrollIntoView(); } catch { /* 対応していない環境では何もしない */ } }
+}
+function bindViewportWatchers() {
+  if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+  const vv = window.visualViewport;
+  if (vv && typeof vv.addEventListener === "function") {
+    let queued = false;
+    const onViewportChange = () => {
+      if (queued) return;
+      queued = true;
+      rafOnce(() => { queued = false; syncViewportVars(); });
+    };
+    vv.addEventListener("resize", onViewportChange);
+    vv.addEventListener("scroll", onViewportChange);
+  }
+  syncViewportVars();
+}
+
 function updateFooterHeight() {
   const footer = document.querySelector("footer");
   if (!footer) return;
@@ -222,6 +332,11 @@ function updateFabState() {
 
 // FAB/Esc 共通: 最前面の開いているレイヤーを1つ閉じる。閉じたら true
 function closeTopmostLayer() {
+  const hitsModal = $("ragHitsModal");
+  if (hitsModal && !hitsModal.classList.contains("hidden")) {
+    hitsModal.classList.add("hidden");
+    return true;
+  }
   const openModals = typeof document.querySelectorAll === "function"
     ? Array.from(document.querySelectorAll(".modal:not(.hidden)")) : [];
   if (openModals.length > 0) {
@@ -531,6 +646,8 @@ async function switchTo(id) {
   sid = id;
   setStorage("sid", sid);
   lastRev = -1;
+  navHoldBottom = false;
+  lastAutoScrolledAsstId = "";
   state = null;
   rpBgFile = undefined;
   formDirty = false;
@@ -540,6 +657,7 @@ async function switchTo(id) {
   lastSelectedChoiceText = "";
   selectedChoiceMap.clear();
   openChoicesSet.clear();
+  displayChoicesMode.clear();
   $("charList").innerHTML = "";  // 前のチャンネルで編集中だった行は捨てる
   attaching = [];  // 添付は上げたチャンネルの発言にしか付けられない
   renderAttach();
@@ -684,13 +802,15 @@ function fillForm(st, force = false) {
   }
   if ($("f_image_mode") && canSet("f_image_mode")) $("f_image_mode").value = st.image_mode || "always";
   if ($("f_input_mode") && canSet("f_input_mode")) $("f_input_mode").value = st.input_mode || "diff";
-  if ($("f_direct_send") && canSet("f_direct_send")) $("f_direct_send").checked = !!st.direct_send;
   if ($("f_agents_md") && canSet("f_agents_md")) $("f_agents_md").checked = !!st.agents_md;
   if ($("f_ide_revert") && canSet("f_ide_revert")) $("f_ide_revert").checked = st.ide_revert !== false;
   if ($("f_rules_every") && canSet("f_rules_every")) $("f_rules_every").checked = !!st.rules_every;
   if ($("f_rp_state") && canSet("f_rp_state")) $("f_rp_state").checked = !!st.rp_state;
   const suggestEl = $("f_suggest_choices") || $("setting-suggest-choices");
   if (suggestEl && canSet(suggestEl.id)) suggestEl.checked = st.suggest_choices !== false;
+  if ($("f_choices_erotic_auto") && canSet("f_choices_erotic_auto")) $("f_choices_erotic_auto").checked = !!st.choices_erotic_auto;
+  if ($("f_decensor_choices") && canSet("f_decensor_choices")) $("f_decensor_choices").checked = st.decensor_choices !== false;
+  if ($("f_decensor_reply") && canSet("f_decensor_reply")) $("f_decensor_reply").checked = st.decensor_reply !== false;
   const sharedEl = $("f_shared_memories");
   if (sharedEl && canSet("f_shared_memories")) sharedEl.checked = !!st.shared_memories;
   for (const [id, k] of Object.entries(CHAR)) {
@@ -711,11 +831,13 @@ function readForm() {
     if ($("f_" + k)) st[k] = $("f_" + k).value;
   }
   if ($("f_agents_md")) st.agents_md = $("f_agents_md").checked;
-  if ($("f_direct_send")) st.direct_send = $("f_direct_send").checked;
   if ($("f_ide_revert")) st.ide_revert = $("f_ide_revert").checked;
   if ($("f_rules_every")) st.rules_every = $("f_rules_every").checked;
   if ($("f_rp_state")) st.rp_state = $("f_rp_state").checked;
   st.suggest_choices = ($("f_suggest_choices") || $("setting-suggest-choices"))?.checked ?? true;
+  st.choices_erotic_auto = $("f_choices_erotic_auto")?.checked ?? false;
+  st.decensor_choices = $("f_decensor_choices")?.checked ?? true;
+  st.decensor_reply = $("f_decensor_reply")?.checked ?? true;
   st.shared_memories = $("f_shared_memories")?.checked ?? false;
   st.character = st.character || {};
   for (const [id, k] of Object.entries(CHAR)) {
@@ -752,6 +874,7 @@ async function loadOptions() {
   $("sysRoot").textContent = $("sysRoot").title = meta.app?.system_root || "";
   fillFolderRows(strList(meta.app?.file_folders));
   $("app_new_channel_ide").checked = meta.app?.new_channel_ide !== false;
+  await loadDecensor();
   showPhone(meta.phone || {});
   fillSelect($("presetSelect"), presets.map((x) => ({ value: x.id, label: x.name })), $("presetSelect").value, "プリセット…");
   if (state && !formDirty) fillFileOptions(state.setting);
@@ -759,6 +882,14 @@ async function loadOptions() {
 }
 
 // スマホで開くアドレスと QR コード（start_mobile.bat で起動したときだけサーバーが返す）
+// 婉曲→直接の辞書（全チャンネル共通。data/decensor.json）
+async function loadDecensor() {
+  try {
+    decensorInfo = await api("/api/decensor");
+    if ($("app_decensor")) $("app_decensor").value = decensorInfo.text || "";
+  } catch (e) { /* 辞書が読めなくてもアプリは動かす */ }
+}
+
 function showPhone(ph) {
   $("phoneOn").hidden = !ph.url;
   $("phoneOff").hidden = !!ph.url;
@@ -792,8 +923,9 @@ function urlB64ToUint8Array(base64String) {
   return outputArray;
 }
 
-// いま画面中央にある返信を基準に、前/次のロールプレイ返信の本文を画面中央へ即座に寄せる。
-// smooth にせず scrollTop を直接代入するので、押した瞬間に「ピタッ」と止まる。
+// いま画面中央（または上端）にある返信を基準に、前/次のロールプレイ返信の本文先頭を
+// 画面上端へ即座に寄せる。smooth にせず scrollTop を直接代入するので、押した瞬間に「ピタッ」と止まる。
+// 上端まで持っていけない場合だけ、中央寄せにフォールバックする。
 function jumpToAssistantReply(dir) {
   const bubbles = Array.from(log.querySelectorAll(".msg-wrap.assistant .msg.assistant"))
     .filter((b) => (b.textContent || "").trim());
@@ -805,12 +937,46 @@ function jumpToAssistantReply(dir) {
   const scrollable = log.scrollHeight > log.clientHeight + 1;
   // 最上段/最下段では、中央判定ではなく「今見ている端」を基準にする。
   // 端では最後の返信が中央より下に来ることがあり、中央判定だと1つ飛ばすため。
-  const atBottom = scrollable && (log.scrollHeight - log.scrollTop - log.clientHeight <= 100);
+  const atBottom = scrollable && (log.scrollHeight - log.scrollTop - log.clientHeight <= 120);
   const atTop = scrollable && (log.scrollTop <= 60);
   const wraps = Array.from(log.querySelectorAll(".msg-wrap"));
+  const latestBubble = bubbles[bubbles.length - 1];
+  const latestRect = latestBubble.getBoundingClientRect();
+  // 下端補正は「最新の返信がまだ中央以上にある」ときだけ使う。
+  // 前へ移動した結果、最新の返信が中央より下に来たのに下端補正を続けると、
+  // 同じ返信を選び直してしまい、そこで前へ進めなくなる。
+  const latestAtOrAboveCenter = latestRect.top <= centerY;
   let target = -1;
 
-  if (dir < 0 && atBottom) {
+  // 直前の移動で本文先頭を上端に合わせた返信があれば、それを「今」として前/次へ進む。
+  // 中央判定だけで探すと、上端に合わせた短い返信が中央より上にあり、同じ返信を
+  // 選び直してしまうため。
+  // スマホでは #chatLog の padding-top が上のチップ避けの余白になっているので、
+  // その余白の下（本文が実際に見え始める位置）を上端の基準にする。
+  let padTop = 0;
+  try { padTop = parseFloat(getComputedStyle(log).paddingTop) || 0; } catch {}
+  const topOffset = (padTop > 0 ? padTop : 6) + 6;
+  const navTop = logRect.top + topOffset;
+
+  let anchorIndex = -1;
+  for (let i = 0; i < bubbles.length; i++) {
+    const r = bubbles[i].getBoundingClientRect();
+    if (Math.abs(r.top - navTop) <= 8) { anchorIndex = i; break; }
+  }
+
+  // 返信の先頭合わせで移動したあと、最新/最古の返信でさらに同じ方向を押したら、
+  // 返信の外側（画像・タグ・開いた選択肢など）を含む本当の端まで移動する。
+  const jumpToEdge = (toBottom) => {
+    navHoldBottom = false;
+    log.scrollTop = toBottom ? maxScroll : 0;
+    updateRpBg();
+  };
+
+  if (anchorIndex >= 0) {
+    if (dir > 0 && anchorIndex === bubbles.length - 1) { jumpToEdge(true); return; }
+    if (dir < 0 && anchorIndex === 0) { jumpToEdge(false); return; }
+    target = Math.max(0, Math.min(bubbles.length - 1, anchorIndex + dir));
+  } else if (dir < 0 && atBottom && latestAtOrAboveCenter) {
     // 最下段の「今」は、最後のメッセージ（返信ならその返信、ユーザー発言ならその直前の返信）。
     const lastWrap = wraps[wraps.length - 1];
     const lastBubble = lastWrap ? lastWrap.querySelector(".msg.assistant") : null;
@@ -825,9 +991,14 @@ function jumpToAssistantReply(dir) {
     target = firstIsAssistantText ? 1 : 0;
     target = Math.min(target, bubbles.length - 1);
   } else if (dir > 0 && atBottom) {
-    // 最下段の「次」は最新の返信。既に最下段なので、中央判定で手前の返信に
-    // 戻ってしまわないよう、最後の本文へ固定する。
-    target = bubbles.length - 1;
+    // 最新の返信まで来ている（または最下段付近にいる）なら、
+    // これ以上下に返信はないので、画像・タグ・開いた選択肢を含む最下段へ。
+    jumpToEdge(true);
+    return;
+  } else if (dir < 0 && atTop) {
+    // 最古の返信まで来ている（または最上段付近にいる）なら、本当の最上段へ。
+    jumpToEdge(false);
+    return;
   } else if (dir < 0) {
     // 前へ: 中央より上にある「直前の返信」。中央に返信があれば、その1つ前
     for (let i = 0; i < bubbles.length; i++) {
@@ -848,10 +1019,38 @@ function jumpToAssistantReply(dir) {
     target = Math.min(target, bubbles.length - 1);
   }
 
+  // 選んだ返信がすでに中央にあるなら、同じ場所を選び直さず、さらに1つ進む。
+  // （上端まで持っていけず、中央寄せにフォールバックしたときの保険）
+  if (target >= 0) {
+    const picked = bubbles[target];
+    const pr = picked.getBoundingClientRect();
+    if (Math.abs((pr.top + pr.bottom) / 2 - centerY) <= 4) {
+      target = Math.max(0, Math.min(bubbles.length - 1, target + dir));
+    }
+  }
+
   const el = bubbles[target];
+  scrollAssistantToTop(el);
+}
+
+// アシスタント返信の本文上端を、画面上端（スマホではチップ直下）へピタッと寄せる
+function scrollAssistantToTop(el) {
+  if (!el || !log) return;
+  const logRect = log.getBoundingClientRect();
+  const maxScroll = Math.max(0, log.scrollHeight - log.clientHeight);
+  let padTop = 0;
+  try { padTop = parseFloat(getComputedStyle(log).paddingTop) || 0; } catch {}
+  const topOffset = (padTop > 0 ? padTop : 6) + 6;
   const r = el.getBoundingClientRect();
-  const top = log.scrollTop + (r.top - logRect.top) - (log.clientHeight - r.height) / 2;
+  const topAligned = log.scrollTop + (r.top - logRect.top) - topOffset;
+  const centerAligned = log.scrollTop + (r.top - logRect.top) - (log.clientHeight - r.height) / 2;
+  // 本文先頭を上端へ。それが無理なときだけ中央寄せにする。
+  const top = topAligned <= maxScroll ? topAligned : Math.min(centerAligned, maxScroll);
+  // 移動した直後に render が「下端付近だから」と最下段へ引き戻すのを防ぐ。
+  navHoldBottom = true;
   log.scrollTop = Math.min(Math.max(0, top), maxScroll);
+  // 移動先が最下段そのものなら、自動追従は解除したままにする。
+  if (log.scrollHeight - log.scrollTop - log.clientHeight <= 2) navHoldBottom = false;
   updateRpBg();   // 背景表示も、移動先の返信に合わせて即座に切り替える
 }
 function jumpToPrevAssistantReply() { jumpToAssistantReply(-1); }
@@ -1460,53 +1659,302 @@ $("forkClose").onclick = () => { $("forkModal").classList.add("hidden"); updateF
 $("forkModal").addEventListener("click", (e) => { if (e.target === $("forkModal")) { $("forkModal").classList.add("hidden"); updateFabState(); } });
 // 送信に使うモデル。一覧は Antigravity から読む（読めなくても、選んであるモデルは出す）
 let ideModels = null;
+let googleModels = [];
+let googleStatusLoaded = false;
+let googleConfigured = false;
+let googleKeyHint = "";
+
 async function loadModels() {
   try {
     ideModels = await checked("/api/ide/models");
   } catch (e) {
     ideModels = { models: [], error: e.message };
   }
+  try {
+    const d = await checked("/api/google/status");
+    googleConfigured = !!d.configured;
+    googleKeyHint = d.hint || "";
+    googleStatusLoaded = true;
+    if ($("googleKeyState")) {
+      $("googleKeyState").className = d.configured ? "ok" : "warn";
+      $("googleKeyState").textContent = d.configured ? `設定済み（…${d.hint || ""} / ${d.source || ""}）` : "未設定";
+    }
+    if (d.configured) {
+      const gm = await checked("/api/google/models");
+      googleModels = gm.models || [];
+    } else {
+      googleModels = [];
+    }
+  } catch (e) {
+    googleConfigured = false;
+    googleModels = [];
+  }
   renderModels();
+  syncGoogleSettingsUI();
 }
+
 function renderModels() {
   const sel = $("ideModel");
   const selChoices = $("choicesIdeModel");
+  const provider = state?.setting?.ai_provider || "antigravity";
+  const google = provider === "google";
   const rows = ideModels?.models || [];
-  const reset = modelResetText;      // 元のローカル関数と同一文字列（重複排除）
+  const reset = modelResetText;
   const left = (r) => (typeof r.left !== "number" ? ""
     : r.left > 0 ? `（残り${Math.max(1, Math.round(r.left * 100))}%）` : `（使い切り${reset(r)}）`);
-  const opts = [`<option value="">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
-    .concat(rows.map((r) => `<option value="${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels.default ? " ・既定" : ""}</option>`));
+
+  const agOpts = [`<option value="ag:">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
+    .concat(rows.map((r) => `<option value="ag:${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
+  const currentAg = state?.setting?.ide_model || "";
+  if (!google && currentAg && !rows.some((r) => r.model === currentAg)) {
+    agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(currentAg)}（いまは選べない）</option>`);
+  }
+
+  const googleOpts = [];
+  if (googleConfigured && googleModels.length > 0) {
+    for (const m of googleModels) {
+      googleOpts.push(`<option value="google:${esc(m.id)}">${esc(m.label || m.id)}${m.outputTokenLimit ? "（出力上限 " + m.outputTokenLimit + "）" : ""}</option>`);
+    }
+    const currentGoogle = state?.setting?.google_model || "";
+    if (google && currentGoogle && !googleModels.some((m) => m.id === currentGoogle)) {
+      googleOpts.push(`<option value="google:${esc(currentGoogle)}">${esc(currentGoogle)}（一覧にない）</option>`);
+    }
+    googleOpts.push(`<option value="__google_key_modal__">⚙ Google APIキー変更 / 削除…</option>`);
+  } else {
+    googleOpts.push(`<option value="__google_key_modal__">🔑 Google APIキーを設定して利用…</option>`);
+  }
+
+  const optsMain = [
+    `<optgroup label="Antigravity（IDE連携）">${agOpts.join("")}</optgroup>`,
+    `<optgroup label="Google Gemini API">${googleOpts.join("")}</optgroup>`
+  ];
 
   if (sel && state && document.activeElement !== sel) {
-    const want = state.setting?.ide_model || "";
-    const optsMain = opts.slice();
-    if (want && !rows.some((r) => r.model === want)) optsMain.push(`<option value="${esc(want)}">${esc(want)}（いまは選べない）</option>`);
+    const want = google
+      ? (state.setting?.google_model ? `google:${state.setting.google_model}` : "google:")
+      : (state.setting?.ide_model ? `ag:${state.setting.ide_model}` : "ag:");
     const html = optsMain.join("");
     if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; }
     sel.value = want;
-    $("footBar").classList.toggle("hidden", !state.setting?.ide_session);  // 担当の会話がなければ送信もしない
+    if (sel.value !== want && google && googleModels.length > 0) {
+      sel.value = `google:${googleModels[0].id}`;
+    } else if (sel.value !== want && !google) {
+      sel.value = "ag:";
+    }
+    $("footBar")?.classList.toggle("hidden", !state?.setting);
   }
 
-  if (selChoices && state && document.activeElement !== selChoices) {
+  if (!google && selChoices && state && document.activeElement !== selChoices) {
     const wantChoices = state.setting?.choices_ide_model || "";
     const optsChoices = [`<option value="">メインのモデルと同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
-      .concat(rows.map((r) => `<option value="${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels.default ? " ・既定" : ""}</option>`));
+      .concat(rows.map((r) => `<option value="${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
     if (wantChoices && !rows.some((r) => r.model === wantChoices)) optsChoices.push(`<option value="${esc(wantChoices)}">${esc(wantChoices)}（いまは選べない）</option>`);
     const htmlChoices = optsChoices.join("");
     if (selChoices.dataset.html !== htmlChoices) { selChoices.innerHTML = htmlChoices; selChoices.dataset.html = htmlChoices; }
     selChoices.value = wantChoices;
   }
-  updateModelSheetLeft();            // 選択変更・↻・poll すべてで追従
+  updateModelSheetLeft();
 }
-$("ideModel").onchange = async () => {
+
+// ---------------------------------------------------------------- Google Gemini（AI Studio）
+
+function googleModelOptions(selected) {
+  const rows = googleModels || [];
+  const opts = [`<option value="">モデルを選択</option>`]
+    .concat(rows.map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}${m.outputTokenLimit ? "（出力上限 " + m.outputTokenLimit + "）" : ""}</option>`));
+  if (selected && !rows.some((m) => m.id === selected)) opts.push(`<option value="${esc(selected)}">${esc(selected)}（一覧にない）</option>`);
+  return opts.join("");
+}
+
+function syncGoogleSettingsUI() {
+  const st = state?.setting;
+  if (!st) return;
+  const provider = st.ai_provider || "antigravity";
+  if ($("aiProvider") && document.activeElement !== $("aiProvider")) $("aiProvider").value = provider;
+  if ($("googleBox")) $("googleBox").classList.toggle("hidden", provider !== "google");
+  // AGの設定はGoogle時も残す（画像設定なども同じ箱にあるため、丸ごとは隠さない）
+  if ($("googleModel") && document.activeElement !== $("googleModel")) {
+    const html = googleModelOptions(st.google_model || "");
+    if ($("googleModel").dataset.html !== html) { $("googleModel").innerHTML = html; $("googleModel").dataset.html = html; }
+    $("googleModel").value = st.google_model || "";
+  }
+  if ($("googleFetch")) $("googleFetch").checked = st.google_fetch !== false;
+  if ($("googleSafetyOff")) $("googleSafetyOff").checked = st.google_safety_off !== false;
+  if ($("googleMaxTokens")) $("googleMaxTokens").value = st.google_max_output_tokens || 8192;
+}
+
+async function loadGoogleStatus() {
   try {
-    await checked("/api/ide/model", { sid, model: $("ideModel").value, target: "main" });
-    toast("送信のモデル: " + $("ideModel").selectedOptions[0].textContent);
+    const d = await checked("/api/google/status");
+    googleStatusLoaded = true;
+    if ($("googleKeyState")) {
+      $("googleKeyState").className = d.configured ? "ok" : "warn";
+      $("googleKeyState").textContent = d.configured ? `設定済み（…${d.hint || ""} / ${d.source || ""}）` : "未設定";
+    }
+    if (d.configured) await loadGoogleModels(false);
+  } catch (e) {
+    googleStatusLoaded = true;
+    if ($("googleKeyState")) { $("googleKeyState").className = "err"; $("googleKeyState").textContent = e.message; }
+  }
+}
+
+async function loadGoogleModels(force = false) {
+  try {
+    const d = await checked("/api/google/models" + (force ? "?refresh=1" : ""));
+    googleModels = d.models || [];
+    if (d.error && $("googleApplyMsg")) { $("googleApplyMsg").className = "err"; $("googleApplyMsg").textContent = d.error; }
+    syncGoogleSettingsUI();
+  } catch (e) {
+    googleModels = [];
+    if ($("googleApplyMsg")) { $("googleApplyMsg").className = "err"; $("googleApplyMsg").textContent = e.message; }
+    syncGoogleSettingsUI();
+  }
+}
+
+async function applyGoogleSettings() {
+  const provider = $("aiProvider")?.value || "antigravity";
+  const body = { sid, provider };
+  if (provider === "google") {
+    body.model = $("googleModel")?.value || "";
+    body.fetch = !!$("googleFetch")?.checked;
+    body.safety_off = !!$("googleSafetyOff")?.checked;
+    body.max_output_tokens = Number($("googleMaxTokens")?.value || 8192);
+  }
+  if ($("googleApply")) $("googleApply").disabled = true;
+  try {
+    const r = await checked("/api/ai/provider", body);
+    if ($("googleApplyMsg")) { $("googleApplyMsg").className = "ok"; $("googleApplyMsg").textContent = "保存しました"; }
+    flash(provider === "google" ? "Google Gemini に切り替えました" : "Antigravity に切り替えました");
     await poll();
-  } catch (e) { alert(e.message); }
+    await loadModels();
+    if (provider === "google") await loadGoogleStatus();
+    renderModels();
+    syncGoogleSettingsUI();
+  } catch (e) {
+    if ($("googleApplyMsg")) { $("googleApplyMsg").className = "err"; $("googleApplyMsg").textContent = e.message; }
+    alert(e.message);
+  } finally {
+    if ($("googleApply")) $("googleApply").disabled = false;
+  }
+}
+
+function openGoogleKeyModal() {
+  $("googleKeyModal")?.classList.remove("hidden");
+  $("googleKeyMsg").textContent = "";
+  setTimeout(() => $("googleKeyInput")?.focus(), 50);
+}
+function closeGoogleKeyModal() { $("googleKeyModal")?.classList.add("hidden"); }
+
+if ($("aiProvider")) {
+  $("aiProvider").onchange = () => {
+    const google = $("aiProvider").value === "google";
+    $("googleBox")?.classList.toggle("hidden", !google);
+    if (google && !googleStatusLoaded) loadGoogleStatus();
+  };
+}
+if ($("googleApply")) $("googleApply").onclick = applyGoogleSettings;
+if ($("googleKeySet")) $("googleKeySet").onclick = openGoogleKeyModal;
+if ($("googleKeyCancel")) $("googleKeyCancel").onclick = closeGoogleKeyModal;
+if ($("googleKeyModal")) $("googleKeyModal").addEventListener("click", (e) => { if (e.target === $("googleKeyModal")) closeGoogleKeyModal(); });
+if ($("googleKeySave")) {
+  $("googleKeySave").onclick = async () => {
+    const key = $("googleKeyInput").value.trim();
+    if (!key) return alert("APIキーを入れてください");
+    $("googleKeySave").disabled = true;
+    try {
+      const d = await checked("/api/google/key", { key });
+      $("googleKeyInput").value = "";
+      $("googleKeyMsg").className = d.error ? "err" : "ok";
+      $("googleKeyMsg").textContent = d.error ? ("保存しましたが、モデル一覧の取得に失敗: " + d.error) : "保存しました";
+      googleStatusLoaded = true;
+      if ($("googleKeyState")) { $("googleKeyState").className = "ok"; $("googleKeyState").textContent = `設定済み（…${d.hint || ""}）`; }
+      if (d.models) googleModels = d.models;
+      googleConfigured = true;
+      googleKeyHint = d.hint || "";
+      syncGoogleSettingsUI();
+      if (state && sid) {
+        try {
+          const defaultModel = (d.models && d.models[0]?.id) || "";
+          await checked("/api/ai/provider", { sid, provider: "google", model: defaultModel });
+          flash("Google Gemini に切り替えました");
+          await poll();
+        } catch (_) {}
+      }
+      await loadModels();
+      closeGoogleKeyModal();
+    } catch (e) {
+      $("googleKeyMsg").className = "err";
+      $("googleKeyMsg").textContent = e.message;
+    } finally { $("googleKeySave").disabled = false; }
+  };
+}
+if ($("googleKeyDelete")) {
+  $("googleKeyDelete").onclick = async () => {
+    if (!confirm("保存したGoogle APIキーを削除しますか？")) return;
+    try {
+      await checked("/api/google/key/delete", {});
+      googleModels = [];
+      googleConfigured = false;
+      googleKeyHint = "";
+      googleStatusLoaded = true;
+      if ($("googleKeyState")) { $("googleKeyState").className = "warn"; $("googleKeyState").textContent = "未設定"; }
+      syncGoogleSettingsUI();
+      if (state?.setting?.ai_provider === "google" && sid) {
+        try {
+          await checked("/api/ai/provider", { sid, provider: "antigravity" });
+          flash("Antigravity に切り替えました");
+          await poll();
+        } catch (_) {}
+      }
+      await loadModels();
+      flash("Google APIキーを削除しました");
+    } catch (e) { alert(e.message); }
+  };
+}
+if ($("googleModelsReload")) $("googleModelsReload").onclick = () => loadGoogleModels(true);
+
+$("ideModel").onchange = async () => {
+  const val = $("ideModel").value;
+  if (val === "__google_key_modal__") {
+    renderModels();
+    openGoogleKeyModal();
+    return;
+  }
+  if (val.startsWith("google:")) {
+    const model = val.slice("google:".length);
+    if (!googleConfigured) {
+      renderModels();
+      openGoogleKeyModal();
+      return;
+    }
+    try {
+      await checked("/api/ai/provider", { sid, provider: "google", model });
+      const label = $("ideModel").selectedOptions[0]?.textContent || model;
+      toast("Google Gemini: " + label);
+      await poll();
+      renderModels();
+    } catch (e) {
+      if (e.message?.includes("APIキー") || e.code === "google_no_key") {
+        openGoogleKeyModal();
+      } else {
+        alert(e.message);
+      }
+      renderModels();
+    }
+  } else if (val.startsWith("ag:")) {
+    const model = val.slice("ag:".length);
+    try {
+      await checked("/api/ai/provider", { sid, provider: "antigravity", model });
+      const label = $("ideModel").selectedOptions[0]?.textContent || (model || "会話と同じ");
+      toast("Antigravity: " + label);
+      await poll();
+      renderModels();
+    } catch (e) {
+      alert(e.message);
+      renderModels();
+    }
+  }
   $("ideModel").blur();
-  renderModels();
 };
 if ($("choicesIdeModel")) {
   $("choicesIdeModel").onchange = async () => {
@@ -1681,6 +2129,23 @@ $("appSave").onclick = async () => {
     setTimeout(() => ($("appMsg").textContent = ""), 3000);
   } catch (e) { alert(e.message); }
 };
+
+$("appDecensorSave").onclick = async () => {
+  try {
+    const r = await checked("/api/decensor", { text: $("app_decensor").value });
+    $("appDecensorMsg").textContent = r.warnings?.length
+      ? `${r.count}語を保存（注意: ${r.warnings[0]}）`
+      : `${r.count}語を保存しました`;
+    setTimeout(() => ($("appDecensorMsg").textContent = ""), 6000);
+  } catch (e) { alert(e.message); }
+};
+
+// 初期セット（62語）を欄に戻すだけ。ファイルへの反映は「辞書を保存」を押したとき
+$("appDecensorReset").onclick = async () => {
+  if (!confirm("辞書の欄を初期セット（62語）に戻しますか？（保存を押すまで反映されません）")) return;
+  $("app_decensor").value = decensorInfo?.seed_text || "";
+};
+
 $("previewBtn").onclick = async () => {
   if (formDirty && !confirm("未保存の変更があります。保存済みの設定で表示します。")) return;
   const r = await api("/api/prompt-preview?sid=" + encodeURIComponent(sid));
@@ -1690,9 +2155,35 @@ $("previewBtn").onclick = async () => {
 };
 
 // ---------------------------------------------------------------- 汎用テキストモーダル
-function openText(title, hint, body, onSave) {
+function openText(title, hint, body, onSave, meta, onMetaClick = null) {
   $("textTitle").textContent = title;
   $("textHint").textContent = hint;
+  const metaEl = $("textMeta");
+  metaEl.textContent = meta || "";
+  if (onMetaClick && meta) {
+    metaEl.classList.add("is-clickable");
+    metaEl.setAttribute("role", "button");
+    metaEl.tabIndex = 0;
+    metaEl.title = "参照した記憶の内訳を見る";
+    metaEl.onclick = (e) => {
+      e.stopPropagation();
+      onMetaClick();
+    };
+    metaEl.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        e.stopPropagation();
+        onMetaClick();
+      }
+    };
+  } else {
+    metaEl.classList.remove("is-clickable");
+    metaEl.removeAttribute("role");
+    metaEl.removeAttribute("tabindex");
+    metaEl.removeAttribute("title");
+    metaEl.onclick = null;
+    metaEl.onkeydown = null;
+  }
   $("textBody").value = body;
   $("textBody").readOnly = !onSave;
   $("textSave").classList.toggle("hidden", !onSave);
@@ -1749,7 +2240,13 @@ function messageSignature(m, isLast) {
     m.status,
     m.choices_status,
     m.choices_type,
+    displayChoicesMode.get(m.id || ("msg-" + (m.ts || ""))) || "",
     m.choices ? m.choices.map((c) => [c.label, c.text]) : null,
+    m.choices_updated_ts || null,
+    m.choices_erotic ? m.choices_erotic.map((c) => [c.label, c.text]) : null,
+    m.choices_erotic_updated_ts || null,
+    m.choices_notice || null,
+    m.choices_timeout || null,
     m.memory_status,
     m.image_refine_status,
     m.image_refine_mode,
@@ -1764,7 +2261,8 @@ function messageSignature(m, isLast) {
     m.image?.chars || null,
     m.state || null,
     m.files ? m.files.map((f) => [f.name, f.size]) : null,
-    isLast
+    isLast,
+    m.id === renderLastAsstId      // 候補を出す対象か（位置が変わったら作り直す）
   ]);
 }
 
@@ -1837,6 +2335,15 @@ function closeMoreMenu() {
   updateFabState();
 }
 
+// ⋯ メニューのインラインSVGアイコン。
+// 分岐は絵文字だと 🔀（シャッフル）にしか見えないので、
+// Google Fonts Icons（Material Symbols）の "arrow_split" を使う（Apache License 2.0）。
+// https://fonts.google.com/icons?selected=Material+Symbols+Outlined:arrow_split
+const MORE_ICON_BRANCH =
+  '<svg viewBox="0 -960 960 960" aria-hidden="true" focusable="false">' +
+  '<path d="M160-440v-80h304l200-200H560v-80h240v240h-80v-104L496-440H160Zm400 280v-80h104L536-366l58-58 126 128v-104h80v240H560Z"/>' +
+  '</svg>';
+
 // メニューの中身。出す項目はメッセージの状態で変わる
 function buildMoreMenu(m, isLast, s) {
   const menu = document.createElement("div");
@@ -1851,8 +2358,15 @@ function buildMoreMenu(m, isLast, s) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "more-item" + (opts.danger ? " danger" : "");
-    b.textContent = label;
+    b.textContent = label;                 // ラベルは必ずテキストで入れる（HTML は使わない）
     if (opts.title) b.title = opts.title;
+    if (opts.icon) {                       // アイコンは文字の前に差し込む
+      const ic = document.createElement("span");
+      ic.className = "more-ico";
+      ic.innerHTML = opts.icon;            // 渡すのは固定のSVG文字列だけ
+      if (b.firstChild && typeof b.insertBefore === "function") b.insertBefore(ic, b.firstChild);
+      else b.appendChild(ic);
+    }
     b.onclick = () => {
       closeMoreMenu();
       onClick();
@@ -1868,16 +2382,16 @@ function buildMoreMenu(m, isLast, s) {
   }
 
   // 編集系
-  item(m.role === "user" ? "✏️ 編集して再送" : "本文を編集", () => openEdit(m),
+  item(m.role === "user" ? "✏️ 編集して再送" : "📝 本文を編集", () => openEdit(m),
     { title: m.role === "user" ? "この入力を編集して、この発言以降をやり直す" : "この発言の本文を編集する" });
   if (m.role !== "user" && (m.state || s.setting?.rp_state)) {
-    item("キャラの状態", () => openState(m, s.messages), { title: "この応答のときのキャラの状態と内心を直す（次の入力で AI が読む）" });
+    item("🧑 キャラの状態", () => openState(m, s.messages), { title: "この応答のときのキャラの状態と内心を直す（次の入力で AI が読む）" });
   }
   sep();
 
   // 会話系
   if (m.role !== "user" && s.messages.slice(0, s.messages.indexOf(m)).some((x) => x.role === "user")) {
-    item("再生成", async () => {
+    item("🔄 再生成", async () => {
       if (!confirm("この応答以降の会話を削除して、AI応答を作り直しますか？")) return;
       const ch = sid;
       let r;
@@ -1902,13 +2416,13 @@ function buildMoreMenu(m, isLast, s) {
         refreshSessions(); loadIdeSessions();
       }
     } catch (e) { alert("チャンネルは分岐しましたが、Antigravity の会話は分岐できませんでした:\n" + e.message); }
-  }, { title: "ここまでの会話で新しいチャンネルを作る（担当の Antigravity 会話も同じところで分岐して、新しいチャンネルの担当にする）" });
-  item("コピー", () => navigator.clipboard.writeText(m.text || ""));
+  }, { title: "ここまでの会話で新しいチャンネルを作る（担当の Antigravity 会話も同じところで分岐して、新しいチャンネルの担当にする）", icon: MORE_ICON_BRANCH });
+  item("📋 コピー", () => navigator.clipboard.writeText(m.text || ""));
   sep();
 
   // 取り消しにくい操作はまとめて一番下に置く
   if (!isLast) {
-    item("巻き戻し", async () => {
+    item("⏪ 巻き戻し", async () => {
       if (!confirm("このメッセージより後の会話を消して、ここまで戻しますか？（控えは data/trash に残ります）")) return;
       const ch = sid;
       let r;
@@ -1917,7 +2431,7 @@ function buildMoreMenu(m, isLast, s) {
       await revertIde(r, ch);
     });
   }
-  item("削除", async () => {
+  item("🗑️ 削除", async () => {
     if (!confirm("このメッセージを削除？")) return;
     const ch = sid, r = await post("/api/delete", { id: m.id });
     await poll();
@@ -1959,6 +2473,49 @@ function toggleMoreMenu(anchorBtn, m, isLast, s) {
   updateFabState();   // ⋯ シート（z66/67）は FAB を覆うので、ここで表示を導出し直す
 }
 
+function textDecensorLine(m, s) {
+  const dec = m.text_decensor || {};
+  const applied = dec.applied || [];
+  const total = applied.reduce((n, a) => n + (a.count || 0), 0);
+  const el = document.createElement("div");
+  el.className = "msg-notice";
+  el.textContent = `婉曲表現を${total}か所 自動で戻しました`;
+  el.title = applied.map((a) => `${a.from} → ${a.to}（${a.count}）`).join("\n")
+    + "\n\n「戻す」でAIが書いた元の文面に戻せます";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "choices-undo-btn";
+  btn.textContent = "戻す";
+  btn.title = "自動置換を取り消して、AIが書いた元の文面に戻します";
+  btn.onclick = async (e) => {
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    btn.disabled = true;
+    try {
+      const r = await api("/api/message/undo-decensor", {
+        sid: s?.id || (typeof sid !== "undefined" ? sid : ""),
+        id: m.id,
+        kind: "text",
+      });
+      if (r && r.error) {
+        // 再起動・別枝分岐・20件超過などで記録が無い（404）場合はボタンを静かに消す（ゾンビ防止）
+        btn.remove();
+        const is404 = r.error === "戻せる置換がありません" || r.error === "no such assistant message" || r.error === "no such message" || r.error === "no such session";
+        if (!is404) {
+          alert("戻せませんでした: " + r.error);
+        }
+        return;
+      }
+      m.text_decensor = null;
+      el.remove();
+      if (typeof poll === "function") await poll();
+    } catch (err) {
+      btn.remove();
+    }
+  };
+  el.appendChild(btn);
+  return el;
+}
+
 function createMessageWrap(m, isLast, s) {
   const wrap = document.createElement("div");
   wrap.className = "msg-wrap " + m.role;
@@ -1990,9 +2547,17 @@ function createMessageWrap(m, isLast, s) {
     tag.textContent = "改変済";
     wrap.appendChild(tag);
   }
+  if (m.role === "assistant" && m.text_decensor?.applied?.length) {
+    wrap.appendChild(textDecensorLine(m, s));
+  }
 
   const hasImage = !!m.image;
-  const hasChoices = m.role !== "user" && ((Array.isArray(m.choices) && m.choices.length > 0) || m.choices_status);
+  const hasChoices = m.role !== "user" && (
+    (Array.isArray(m.choices) && m.choices.length > 0) ||
+    (Array.isArray(m.choices_erotic) && m.choices_erotic.length > 0) ||
+    m.choices_status || m.choices_notice || m.choices_timeout ||
+    // 🔞を既定にしているチャンネル: 先読みが失敗して候補ゼロでも ↻ で作り直せるようにする
+    (m.id === renderLastAsstId && !!s?.setting?.choices_erotic_auto));
 
   // 画像本体（背景表示ではCSSで非表示にして背景で使用）
   if (hasImage && m.image.status === "done" && m.image.file && !m.image_refine_status) {
@@ -2017,7 +2582,7 @@ function createMessageWrap(m, isLast, s) {
   if (hasImage) {
     const im = m.image;
     // 画像まわりの状態（生成中・生成待ち・タグ推敲中）は、
-    // 「🔁画像」ボタン1つのラベルを入れ替えて表す（押してもボタンは増やさない）
+    // 「🔁」ボタン1つのラベルを入れ替えて表す（押してもボタンは増やさない）
     const refineBusy = (m.image_refine_status === "pending" || m.image_refine_status === "processing");
     const genBusy = (im.status === "queued" || im.status === "generating");
     const isErr = (im.status === "error" || m.image_refine_status === "error");
@@ -2036,23 +2601,24 @@ function createMessageWrap(m, isLast, s) {
     // 完成した画像の「🔍 拡大」は ⋯ の中に入れた（画像本体のクリックでも拡大できる）
 
     // タグはそのままで、シードだけランダムに変えて作り直す
-    const RG_IDLE_LABEL = "🔁画像";
-    const RG_IDLE_TITLE = "タグはそのままで、新しいシードで作り直します（タグを変えるときは 🎨タグ）";
-    const RG_GEN_LABEL = "🎨 生成中…";
-    const RG_GEN_TITLE = "画像を生成しています（終わると「🔁画像」に戻ります）";
+    // アイドル時はアイコンだけ（文字は状態のときだけ出す）
+    const RG_IDLE_LABEL = "🔁";
+    const RG_IDLE_TITLE = "タグはそのままで、新しいシードで画像を作り直す（タグを変えるときは 🎨）";
+    const RG_GEN_LABEL = "⏳ 生成中…";
+    const RG_GEN_TITLE = "画像を生成しています（終わると 🔁 に戻ります）";
 
     let rgLabel = RG_IDLE_LABEL;
     let rgTitle = RG_IDLE_TITLE;
     if (refineBusy) {
       // プロンプト画面の「✨ タグ推敲」からの推敲中
-      rgLabel = "✨ タグ推敲中…";
+      rgLabel = "✨ 推敲中…";
       rgTitle = "AIがプロンプトを推敲しています";
     } else if (genBusy) {
       rgLabel = RG_GEN_LABEL;
       rgTitle = RG_GEN_TITLE;
     } else if (waitingGen) {
       rgLabel = "⏳ 生成待ち…";
-      rgTitle = "画像の生成待ちです（終わると「🔁画像」に戻ります。タップで作り直す）";
+      rgTitle = "画像の生成待ちです（終わると 🔁 に戻ります。タップで作り直す）";
     }
 
     const rg = document.createElement("button");
@@ -2060,6 +2626,7 @@ function createMessageWrap(m, isLast, s) {
     rg.className = "btn-img-refine" + ((refineBusy || genBusy || waitingGen) ? " busy" : "");
     rg.textContent = rgLabel;
     rg.title = rgTitle;
+    rg.setAttribute("aria-label", rgTitle);
     if (refineBusy || genBusy) rg.disabled = true;
     rg.onclick = async () => {
       if (rg.disabled) return;
@@ -2068,6 +2635,7 @@ function createMessageWrap(m, isLast, s) {
       rg.className = "btn-img-refine busy";
       rg.textContent = RG_GEN_LABEL;
       rg.title = RG_GEN_TITLE;
+      rg.setAttribute("aria-label", RG_GEN_TITLE);
       try {
         const res = await post("/api/regen", { id: m.id });
         if (res && res.error) throw new Error(res.error);
@@ -2075,6 +2643,7 @@ function createMessageWrap(m, isLast, s) {
         rg.className = "btn-img-refine";
         rg.textContent = RG_IDLE_LABEL;
         rg.title = RG_IDLE_TITLE;
+        rg.setAttribute("aria-label", RG_IDLE_TITLE);
         rg.disabled = false;
         toast("再生成リクエストに失敗しました: " + e.message);
       }
@@ -2086,7 +2655,9 @@ function createMessageWrap(m, isLast, s) {
     const pe = document.createElement("button");
     pe.type = "button";
     pe.className = "btn-prompt";
-    pe.textContent = "🎨タグ";
+    pe.textContent = "🎨";
+    pe.title = "画像プロンプト（タグ）を開いて編集する";
+    pe.setAttribute("aria-label", "画像プロンプト（タグ）を編集");
     pe.onclick = () => openPrompt(m);
     bar.appendChild(pe);
   }
@@ -2113,6 +2684,22 @@ function createMessageWrap(m, isLast, s) {
 
   // ユーザー発言の「✏️ 編集して再送」は ⋯ の中に集約した（ツールバーには出さない）
 
+  // エラー状態のユーザー発言にはエラーバッジと再送ボタンを表示
+  if (m.role === "user" && m.status === "error") {
+    const errBadge = document.createElement("span");
+    errBadge.className = "img-status-badge err";
+    errBadge.textContent = "送信エラー: " + (m.error || "応答を受信できませんでした");
+    bar.appendChild(errBadge);
+
+    const retryBtn = document.createElement("button");
+    retryBtn.type = "button";
+    retryBtn.className = "btn-stop-wait";
+    retryBtn.textContent = "✏ 再送";
+    retryBtn.title = "本文を開いて送り直す";
+    retryBtn.onclick = () => openEdit(m);
+    bar.appendChild(retryBtn);
+  }
+
   // 送信中の発言には、その場からも止められるボタンを出す
   if (m.role === "user" && (m.status === "pending" || m.status === "processing")) {
     const stopBtn = document.createElement("button");
@@ -2124,14 +2711,8 @@ function createMessageWrap(m, isLast, s) {
     bar.appendChild(stopBtn);
   }
 
-  // 「送信済」は出さない（送信中は ■ 停止 があるので分かる）
-  const st = m.role === "user" && m.status === "processing" ? "読込済" : "";
-  if (st) {
-    const info = document.createElement("div");
-    info.className = "meta";
-    info.textContent = st;
-    bar.appendChild(info);
-  }
+  // 送信状態のテキストは表示しない。
+  // 送信中かどうかは ■ 停止 ボタン自身で分かる。
 
   // その他の操作（⋯）。常に右端。狭い画面で2段目に落ちても右端に寄せる
   const moreBtn = document.createElement("button");
@@ -2307,21 +2888,30 @@ function updateModelSheetLeft() {
   const el = $("modelSheetLeft");
   if (!el) return;
   const sheet = $("modelSheet");
-  if (!sheet || sheet.classList.contains("hidden")) return;      // 閉じているときは書かない
-  const model = $("ideModel") ? $("ideModel").value : "";
+  if (!sheet || sheet.classList.contains("hidden")) return;
+  const google = state?.setting?.ai_provider === "google";
+  if (google) {
+    el.textContent = googleConfigured ? `Google Gemini API（…${googleKeyHint}）` : "Google Gemini API（APIキー未設定）";
+    el.classList.remove("hidden");
+    return;
+  }
+  const val = $("ideModel") ? $("ideModel").value : "";
+  const model = val.startsWith("ag:") ? val.slice(3) : val;
   const r = (ideModels?.models || []).find((x) => x.model === model);
   const txt = r ? modelLeftText(r) : "";
-  el.textContent = txt ? `このモデルの残量: ${txt}` : "";
+  el.textContent = txt ? `残り利用可能: ${txt}` : "";
   el.classList.toggle("hidden", !txt);
 }
 function openModelSheet() {
-  if (!state || !state.setting || !state.setting.ide_session) { toast("担当の IDE 会話がありません", 6000); syncActionControlsVisibility(); return; }
+  if (!state || !state.setting) {
+    toast("チャンネルを開いてください", 4000); syncActionControlsVisibility(); return;
+  }
   hideReveal();
   $("modelSheet").classList.remove("hidden");
   syncFootBarPlacement();     // #ideModel をシートへ移す（DOM は1つだけ）
   updateModelSheetLeft();
   updateFabState();
-  loadModels();               // 開いた時点で残量％を最新化（失敗しても既存表示のまま）
+  loadModels();               // 開いた時点で残量％を最新化
 }
 function closeModelSheet() {
   const el = $("modelSheet");
@@ -2333,13 +2923,20 @@ function closeModelSheet() {
 
 function render() {
   const s = state;
+  syncGoogleSettingsUI();
+  if (s?.setting?.ai_provider === "google" && !googleStatusLoaded) loadGoogleStatus();
+  // 候補（8択）を出すのは「最新のAI応答」だけ。過去の応答では開閉ボタンも出さない
+  renderLastAsstId = "";
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    if (s.messages[i].role === "assistant" && s.messages[i].id) { renderLastAsstId = s.messages[i].id; break; }
+  }
   // poll のたびにメッセージを作り直すので、開いている「⋯」は閉じる
   closeMoreMenu();
   $("title").textContent = s.setting?.title || "RP Image Chat";
   $("ragCount").textContent = (s.setting?.rag_collections || []).length;
   updateElapsedTimeUI(s.setting?.elapsed_time);
   document.title = (s.setting?.title || "") + " - RP Image Chat";
-  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+  const nearBottom = !navHoldBottom && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
 
   const existingMap = new Map();
   for (const child of log.children) {
@@ -2395,7 +2992,7 @@ function render() {
       t.innerHTML = "選択肢を生成しています<span>.</span><span>.</span><span>.</span>";
     }
     desiredChildren.push(t);
-    if (s.setting?.ide_session || s.setting?.choices_ide_session) {
+    if (s.setting?.ide_session || s.setting?.choices_ide_session || s.setting?.ai_provider === "google") {
       let p = $("progress");
       if (!p) {
         p = document.createElement("div");
@@ -2441,7 +3038,26 @@ function render() {
   $("rpToggle").classList.toggle("on", rpMode);
   updateHeaderAndSideStatus();
 
-  if (nearBottom) log.scrollTop = log.scrollHeight;
+  // スマホ限定：AIから新しい返信が届いた瞬間に、本文をすぐ読めるよう上部チップ直下にカード上端を寄せる
+  let didAutoScroll = false;
+  if (isMobileLayout() && nearBottom && renderLastAsstId && renderLastAsstId !== lastAutoScrolledAsstId) {
+    const latestAsstMsg = s.messages.find((m) => m.id === renderLastAsstId && m.role === "assistant" && (m.text || "").trim());
+    if (latestAsstMsg) {
+      const wrap = document.getElementById("msg-" + renderLastAsstId);
+      const bubble = wrap?.querySelector(".msg.assistant") || wrap;
+      if (bubble) {
+        lastAutoScrolledAsstId = renderLastAsstId;
+        scrollAssistantToTop(bubble);
+        didAutoScroll = true;
+        const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
+        raf(() => {
+          scrollAssistantToTop(bubble);
+        }, 0);
+      }
+    }
+  }
+
+  if (!didAutoScroll && nearBottom) log.scrollTop = log.scrollHeight;
   updateRpBg();
   renderIde();
 }
@@ -2474,6 +3090,11 @@ function updateRpBg() {
 log.addEventListener("scroll", () => {
   lastScrollTime = Date.now();
   touchMoved = true;
+  // ナビ移動で止めた位置から、ユーザー自身が最下段まで戻ったら自動追従を再開する。
+  if (navHoldBottom) {
+    const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
+    if (gap <= 2) navHoldBottom = false;
+  }
   if (!rpMode || rpTick) return;
   const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
   rpTick = raf(() => { rpTick = 0; updateRpBg(); }, 0);
@@ -2507,6 +3128,10 @@ async function poll() {
       const first = lastRev === -1;
       lastRev = key;
       state = s;
+      window.currentSession = s;
+      if (typeof PromptToolbar !== "undefined") {
+        PromptToolbar.syncWithSession(s);
+      }
       if (s.setting?.rotation_notice && s.setting.rotation_notice !== lastRotationNotice) {
         lastRotationNotice = s.setting.rotation_notice;
         if (!first) {
@@ -2514,7 +3139,11 @@ async function poll() {
         }
       }
       render();
-      if (first) log.scrollTop = log.scrollHeight;
+      if (first) {
+        navHoldBottom = false;
+        log.scrollTop = log.scrollHeight;
+        lastAutoScrolledAsstId = renderLastAsstId || "";
+      }
       fillForm(s.setting, first || !formDirty); formSid = s.id;
       renderChars();
       checkPromptModalRefine(s);
@@ -2531,7 +3160,7 @@ async function poll() {
 let progressHtml = "", progressSid = "", progressBusy = false;
 async function pollProgress() {
   const s = state;
-  if ((typeof document !== "undefined" && document.hidden) || progressBusy || !s || s.id !== sid || !(s.setting?.ide_session || s.setting?.choices_ide_session) || !$("progress")) return;
+  if ((typeof document !== "undefined" && document.hidden) || progressBusy || !s || s.id !== sid || !(s.setting?.ide_session || s.setting?.choices_ide_session || s.setting?.ai_provider === "google") || !$("progress")) return;
   progressBusy = true;
   try {
     const r = await api("/api/ide/progress?sid=" + encodeURIComponent(s.id));
@@ -2552,7 +3181,7 @@ async function pollProgress() {
     progressSid = s.id;
     const box = $("progress");
     if (box && box.innerHTML !== progressHtml) {
-      const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+      const nearBottom = !navHoldBottom && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
       box.innerHTML = progressHtml;
       if (nearBottom) log.scrollTop = log.scrollHeight;
     }
@@ -2571,14 +3200,27 @@ function syncSendButton(waiting = hasWaitingInput()) {
     // 応答待ちの間は「送信」と「停止」を入れ替える（スマホでも入力欄が狭くならない）
     sendBtn.classList.toggle("hidden", waiting);
     sendBtn.disabled = waiting || sending || stopping;
-    sendBtn.textContent = sending ? "送信中…" : "送信";
+    // 表示は丸い上矢印（CSS）。文字は読み上げ用なので、差し替えても見た目は崩れない
+    const sendLabel = sending ? "送信中…" : "送信";
+    sendBtn.classList.toggle("sending", Boolean(sending));
+    sendBtn.setAttribute("aria-label", sendLabel);
+    sendBtn.title = sendLabel;
+    const sendText = sendBtn.querySelector(".send-text");
+    if (sendText) sendText.textContent = sendLabel;
+    else sendBtn.textContent = sendLabel;
   }
   const stopBtn = $("stopBtn");
   if (stopBtn) {
     stopBtn.classList.toggle("hidden", !waiting);
     stopBtn.disabled = stopping || sending;
-    stopBtn.textContent = stopping ? "停止中…" : "■ 停止";
+    // 見た目は ■ だけ（文字は読み上げ/ツールチップで伝える）
+    const stopLabel = stopping ? "停止中…" : "送信を停止";
+    stopBtn.textContent = "■";
+    stopBtn.title = stopLabel;
+    stopBtn.setAttribute("aria-label", stopLabel);
   }
+  // 応答待ちになると中央の「送信」は「ツール」に戻る（render からも毎回ここを通る）
+  syncActionControlsVisibility();
 }
 
 async function send() {
@@ -2608,6 +3250,8 @@ async function send() {
       await poll();
     }
     wakePoll();
+    navHoldBottom = false;
+    lastAutoScrolledAsstId = "";
     log.scrollTop = log.scrollHeight;
   } catch (e) {
     // 通信が切れたときもボタンが「送信中」のまま固まらないようにする
@@ -2734,6 +3378,7 @@ function renderAttach() {
     list.appendChild(chip);
   }
   updateFooterHeight();
+  syncActionControlsVisibility();   // 添付だけでも中央ボタンが「送信」になる
 }
 
 function readDataUrl(file) {
@@ -2773,11 +3418,10 @@ function closeChoicesAccordions() {
   if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
     document.querySelectorAll(".choices-toggle-btn").forEach((btn) => {
       btn.classList.remove("is-open");
-      btn.textContent = (btn.textContent || "").replace(/▲/g, "▼");
       if (typeof btn.setAttribute === "function") btn.setAttribute("aria-expanded", "false");
     });
-    document.querySelectorAll(".choices-grid").forEach((grid) => {
-      grid.classList.remove("is-open");
+    document.querySelectorAll(".choices-panel").forEach((pl) => {
+      pl.classList.remove("is-open");
     });
     document.querySelectorAll(".choice-item-btn").forEach((btn) => {
       btn.classList.remove("is-selected");
@@ -2785,169 +3429,286 @@ function closeChoicesAccordions() {
   }
 }
 
+function choicesNoticeText(n) {
+  const ic = (n && n.slot === "normal") ? "💬" : "🔞";
+  switch (n && n.kind) {
+    case "filter": return `${ic} フィルタで1回停止 → 自動で回避して出力`;
+    case "suspect": return `${ic} の候補: 健全な内容に差し替わった可能性あり`;
+    case "placeholder": return `${ic} の候補: プレースホルダーを一部自動置換しました`;
+    case "timeout": return `${ic} の候補: 生成がタイムアウト（応答が届いていません）`;
+    case "rescued": return `${ic} の候補: 生成結果を回収しました（.tmp から復元）`;
+    default: return "";
+  }
+}
+
+function choicesDecensorLine(dec, mode) {
+  if (!dec || dec.slot !== mode || !(dec.applied || []).length) return null;
+  const total = dec.applied.reduce((n, a) => n + (a.count || 0), 0);
+  const el = document.createElement("div");
+  el.className = "choices-notice is-ok";
+  el.textContent = `${mode === "normal" ? "💬" : "🔞"} の候補: 婉曲表現を${total}か所 自動で戻しました`;
+  el.title = dec.applied.map((a) => `${a.from} → ${a.to}（${a.count}）`).join("\n") + "\n\n「戻す」でAIが書いた元の文面に戻せます";
+  return el;
+}
+
 function choicesBox(m, targetContainer) {
-  const validChoices = (m.choices || []).filter((c) => c && typeof c === "object" && typeof c.text === "string" && c.text.trim());
-  if (validChoices.length === 0 && !m.choices_status) return targetContainer || document.createDocumentFragment();
+  const norm = (arr) => (arr || []).filter((c) => c && typeof c === "object" && typeof c.text === "string" && c.text.trim());
+  const normalChoices = norm(m.choices);
+  const eroticChoices = norm(m.choices_erotic);
+  const hasErotic = eroticChoices.length > 0;
+  const autoErotic = !!(typeof state !== "undefined" && state && state.setting && state.setting.choices_erotic_auto);
+  if (!normalChoices.length && !hasErotic && !m.choices_status && !m.choices_notice && !m.choices_decensor && !m.choices_timeout && !autoErotic) {
+    return targetContainer || document.createDocumentFragment();
+  }
 
   const msgKey = m.id || ("msg-" + (m.ts || Math.random()));
+  // 最新のAI応答以外は候補を出さない（古い候補は返信に使えないので、触れないほうが事故が少ない）
+  if (typeof renderLastAsstId !== "undefined" && renderLastAsstId && m.id && m.id !== renderLastAsstId) return targetContainer || document.createDocumentFragment();
   const isPending = m.choices_status === "pending" || m.choices_status === "processing";
   const isEroticRegen = isPending && m.choices_type === "erotic";
-  const isNormalLoading = isPending && m.choices_type !== "erotic";
 
-  if (isPending && !userClosedChoicesSet.has(msgKey)) {
-    openChoicesSet.add(msgKey);
+  // 表示モード: 手で切り替えた記憶 > 🔞生成中 > 「🔞が通常より新しければ🔞」
+  let mode = displayChoicesMode.get(msgKey);
+  if (!mode) {
+    const eTs = m.choices_erotic_updated_ts || "";
+    const nTs = m.choices_updated_ts || "";
+    mode = (hasErotic && eTs && eTs > nTs) ? "erotic" : "normal";
+    if (autoErotic && !normalChoices.length) mode = "erotic";   // 🔞既定のチャンネル
   }
+  if (mode === "erotic" && !hasErotic && !isEroticRegen && !autoErotic) mode = "normal";
+  if (isEroticRegen) mode = "erotic";
+  const choices = mode === "erotic" ? eroticChoices : normalChoices;
+
+  if (isPending && !userClosedChoicesSet.has(msgKey)) openChoicesSet.add(msgKey);
   const isOpen = openChoicesSet.has(msgKey);
 
-  const choicesWrap = targetContainer || document.createElement("div");
-  if (!targetContainer) choicesWrap.className = "choices-container";
+  const wrap = targetContainer || document.createElement("div");
+  if (!targetContainer) wrap.className = "choices-container";
 
-  // 開閉トグルボタン
-  const toggleBtn = document.createElement("button");
-  toggleBtn.type = "button";
-  toggleBtn.className = "choices-toggle-btn" + (isOpen ? " is-open" : "");
-  const countLabel = isNormalLoading && validChoices.length === 0 ? " (生成中…)" : "";
-  toggleBtn.textContent = `💡選択肢${countLabel} ${isOpen ? "▲" : "▼"}`;
-  if (typeof toggleBtn.setAttribute === "function") toggleBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  // 状態をまとめて更新してから render する（旧DOMを触らない）
+  const commit = (patch) => {
+    if (patch.mode) displayChoicesMode.set(msgKey, patch.mode);
+    if (patch.open) { openChoicesSet.add(msgKey); userClosedChoicesSet.delete(msgKey); }
+    render();
+  };
 
-  // 選択肢リスト（グリッド）
-  const listEl = document.createElement("div");
-  listEl.className = "choices-grid" + (isOpen ? " is-open" : "");
-
-  // ドスケベ再生成ボタン
-  const regenBtn = document.createElement("button");
-  regenBtn.type = "button";
-  regenBtn.className = "choices-regen-btn" + (isEroticRegen ? " is-loading" : "");
-  regenBtn.textContent = isEroticRegen ? "⌛ 生成中…" : "🔞";
-  regenBtn.title = "ドスケベ再生成";
-  regenBtn.disabled = isPending;
-  if (typeof regenBtn.setAttribute === "function") regenBtn.setAttribute("aria-busy", isEroticRegen ? "true" : "false");
-
-  toggleBtn.addEventListener("click", () => {
-    const nowOpen = !listEl.classList.contains("is-open");
-    listEl.classList.toggle("is-open", nowOpen);
-    toggleBtn.classList.toggle("is-open", nowOpen);
-    const countText = isNormalLoading && validChoices.length === 0 ? " (生成中…)" : "";
-    toggleBtn.textContent = `💡選択肢${countText} ${nowOpen ? "▲" : "▼"}`;
-    if (typeof toggleBtn.setAttribute === "function") toggleBtn.setAttribute("aria-expanded", nowOpen ? "true" : "false");
-    if (nowOpen) {
-      openChoicesSet.add(msgKey);
-      userClosedChoicesSet.delete(msgKey);
-    } else {
-      openChoicesSet.delete(msgKey);
-      userClosedChoicesSet.add(msgKey);
+  // 通知（折りたたみ時も見える）
+  const notice = m.choices_notice || (m.choices_timeout ? { kind: "timeout", slot: m.choices_slot || m.choices_type || "normal" } : null);
+  if (notice) {
+    const txt = choicesNoticeText(notice);
+    if (txt) {
+      const el = document.createElement("div");
+      el.className = "choices-notice" + (notice.kind === "suspect" ? " is-warn" : "");
+      el.textContent = txt;
+      el.title = notice.kind === "filter"
+        ? "生成中に自動フィルタで1回止まりましたが、回避して出力しました"
+        : "生成結果についての注意です（候補はそのまま使えます）";
+      wrap.appendChild(el);
     }
-  });
-
-  regenBtn.addEventListener("click", async (e) => {
-    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-    if (regenBtn.disabled || m.choices_status === "pending" || m.choices_status === "processing") return;
-    regenBtn.disabled = true;
-    regenBtn.textContent = "⌛ 生成中…";
-    regenBtn.classList.add("is-loading");
-    if (typeof regenBtn.setAttribute === "function") regenBtn.setAttribute("aria-busy", "true");
-    m.choices_status = "pending";
-    m.choices_type = "erotic";
-
-    // 以前の選択ハイライトをクリア
-    if (selectedChoiceMap.has(msgKey)) {
-      selectedChoiceMap.delete(msgKey);
-      lastSelectedChoiceText = "";
-    }
-    listEl.querySelectorAll(".choice-item-btn.is-selected").forEach((btn) => btn.classList.remove("is-selected"));
-
-    // アコーディオンを自動で展開
-    userClosedChoicesSet.delete(msgKey);
-    openChoicesSet.add(msgKey);
-    listEl.classList.add("is-open");
-    toggleBtn.classList.add("is-open");
-    toggleBtn.textContent = `💡選択肢 ▲`;
-    if (typeof toggleBtn.setAttribute === "function") toggleBtn.setAttribute("aria-expanded", "true");
-
-    try {
-      const curSid = (typeof state !== "undefined" && state && state.id) ? state.id : (typeof sid !== "undefined" ? sid : "");
-      const res = await api("/api/message/regenerate-choices", { sid: curSid, id: m.id, type: "erotic" });
-      if (res && res.error) {
-        alert("再生成エラー: " + res.error);
-        delete m.choices_status;
-        delete m.choices_type;
-        regenBtn.disabled = false;
-        regenBtn.textContent = "🔞";
-        regenBtn.classList.remove("is-loading");
-        if (typeof regenBtn.setAttribute === "function") regenBtn.setAttribute("aria-busy", "false");
-      } else {
+  }
+  // 婉曲表現を戻した記録（通知とは別枠。ここだけ「戻す」できる）
+  const decEl = choicesDecensorLine(m.choices_decensor, mode);
+  if (decEl) {
+    const undoBtn = document.createElement("button");
+    undoBtn.type = "button";
+    undoBtn.className = "choices-undo-btn";
+    undoBtn.textContent = "戻す";
+    undoBtn.title = "自動置換を取り消して、AIが書いた元の文面に戻します";
+    undoBtn.addEventListener("click", async (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+      try {
+        const r = await checked("/api/message/undo-decensor", { sid: (typeof sid !== "undefined" ? sid : ""), id: m.id });
+        if (r && r.error) return alert(r.error);
+        m.choices_decensor = null;
         if (typeof poll === "function") await poll();
-        if (typeof wakePoll === "function") wakePoll();
+      } catch (err) {
+        alert("戻せませんでした: " + err.message);
       }
-    } catch (err) {
-      alert("通信エラー: " + (err.message || err));
-      delete m.choices_status;
-      delete m.choices_type;
-      regenBtn.disabled = false;
-      regenBtn.textContent = "🔞";
-      regenBtn.classList.remove("is-loading");
-      if (typeof regenBtn.setAttribute === "function") regenBtn.setAttribute("aria-busy", "false");
-    }
-  });
-
-  if (validChoices.length === 0 && isPending) {
-    const loadingNotice = document.createElement("div");
-    loadingNotice.className = "choices-loading-hint";
-    loadingNotice.textContent = isEroticRegen ? "🔞 ドスケベな返答候補を生成中…" : "💡 返答候補を生成中…";
-    listEl.appendChild(loadingNotice);
+    });
+    decEl.appendChild(undoBtn);
+    wrap.appendChild(decEl);
   }
 
-  validChoices.forEach((choice, cIdx) => {
+  // 一覧パネル（左上に ↻、右上にモードスイッチ）
+  const panel = document.createElement("div");
+  panel.className = "choices-panel" + (isOpen ? " is-open" : "");
+
+  const headRow = document.createElement("div");
+  headRow.className = "choices-head-row";
+
+  // ↻ 表示中の候補を作り直す
+  const rerollBtn = document.createElement("button");
+  rerollBtn.type = "button";
+  rerollBtn.className = "choices-reroll-btn";
+  rerollBtn.textContent = isPending ? "⌛ 生成中" : "↻ 作り直す";
+  rerollBtn.title = mode === "erotic" ? "🔞の候補を作り直す" : "💬の候補を作り直す";
+  rerollBtn.setAttribute("aria-label", rerollBtn.title);
+  rerollBtn.disabled = isPending;   // 候補が空でも「↻ 作り直す」で生成できる
+  rerollBtn.addEventListener("click", async (e) => {
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    if (!rerollBtn.disabled) await startChoicesRegen(mode);
+  });
+
+  // iOS風スイッチ: ノブ（白い円）が今のモードのアイコンになる
+  const sw = document.createElement("button");
+  sw.type = "button";
+  sw.className = "choices-switch" + (mode === "erotic" ? " is-erotic" : "")
+    + (hasErotic ? "" : " has-no-erotic") + (isPending ? " is-busy" : "");
+  sw.setAttribute("role", "switch");
+  sw.setAttribute("aria-checked", mode === "erotic" ? "true" : "false");
+  sw.setAttribute("aria-label", "🔞の候補を表示する");
+  sw.title = isPending ? "生成中です"
+    : mode === "erotic" ? "通常の候補に戻す"
+    : hasErotic ? "🔞の候補を表示する" : "🔞の候補を生成する";
+  sw.disabled = isPending;
+
+  const icNormal = document.createElement("span");
+  icNormal.className = "choices-ic ic-normal";
+  icNormal.textContent = "💬";
+  icNormal.setAttribute("aria-hidden", "true");
+  const icErotic = document.createElement("span");
+  icErotic.className = "choices-ic ic-erotic";
+  icErotic.textContent = isEroticRegen ? "⌛" : "🔞";
+  icErotic.setAttribute("aria-hidden", "true");
+  const knob = document.createElement("span");
+  knob.className = "choices-knob";
+  knob.setAttribute("aria-hidden", "true");
+
+  sw.appendChild(icNormal);
+  sw.appendChild(icErotic);
+  sw.appendChild(knob);
+  sw.addEventListener("click", async (e) => {
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    if (sw.disabled || m.choices_status) return;
+    if (mode === "erotic") { commit({ mode: "normal" }); return; }
+    if (hasErotic) { commit({ mode: "erotic", open: true }); return; }
+    await startChoicesRegen("erotic");
+  });
+
+  const spacer = document.createElement("span");
+  spacer.className = "choices-head-sp";
+  headRow.appendChild(rerollBtn);
+  headRow.appendChild(spacer);
+  // このチャンネルが「🔞を最初から作る」設定かどうかを、その場で分かるように出す
+  if (autoErotic) {
+    const badge = document.createElement("span");
+    badge.className = "choices-auto-badge";
+    badge.textContent = "🔞既定";
+    badge.title = "このチャンネルは新しいターンでも🔞の候補を作ります（設定で変更）";
+    headRow.appendChild(badge);
+  }
+  headRow.appendChild(sw);
+
+  async function startChoicesRegen(kind) {
+    const type = kind === "erotic" ? "erotic" : "normal";
+    // 1) 先に状態を全部決める
+    m.choices_status = "pending";
+    m.choices_type = type;
+    m.choices_notice = null;
+    m.choices_decensor = null;
+    delete m.choices_timeout;
+    sw.disabled = true;
+    rerollBtn.disabled = true;
+    selectedChoiceMap.delete(`${msgKey}:normal`);
+    selectedChoiceMap.delete(`${msgKey}:erotic`);
+    displayChoicesMode.set(msgKey, type);
+    openChoicesSet.add(msgKey);
+    userClosedChoicesSet.delete(msgKey);
+    render();                       // 2) ここで1回だけ（⌛・開いたまま・スイッチ無効）
+    try {
+      const curSid = (typeof state !== "undefined" && state && state.id) ? state.id : (typeof sid !== "undefined" ? sid : "");
+      const res = await api("/api/message/regenerate-choices", { sid: curSid, id: m.id, type });
+      if (res && res.error) alert("再生成エラー: " + res.error);
+      if (typeof poll === "function") await poll();
+      if (typeof wakePoll === "function") wakePoll();
+    } catch (err) {
+      alert("通信エラー: " + (err.message || err));
+    }
+  }
+
+  // ツールバーの開閉ボタン（🔁 🎨 の隣、⋯ の手前）
+  const toggleBtn = document.createElement("button");
+  toggleBtn.type = "button";
+  toggleBtn.className = "choices-toggle-btn" + (isOpen ? " is-open" : "") + (mode === "erotic" ? " is-erotic" : "");
+  toggleBtn.title = "返答候補の一覧を開閉";
+  toggleBtn.setAttribute("aria-label", "返答候補の一覧を開閉");
+  toggleBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  const tIc = document.createElement("span");
+  tIc.className = "choices-mode-ic";
+  tIc.textContent = (isPending && !isOpen) ? "⌛" : (mode === "erotic" ? "🔞" : "💬");
+  const tCv = document.createElement("span");
+  tCv.className = "cv";
+  tCv.textContent = isOpen ? "▴" : "▾";
+  toggleBtn.appendChild(tIc);
+  toggleBtn.appendChild(tCv);
+  toggleBtn.addEventListener("click", () => {
+    const nowOpen = !panel.classList.contains("is-open");
+    panel.classList.toggle("is-open", nowOpen);
+    toggleBtn.classList.toggle("is-open", nowOpen);
+    toggleBtn.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+    tCv.textContent = nowOpen ? "▴" : "▾";
+    if (nowOpen) { openChoicesSet.add(msgKey); userClosedChoicesSet.delete(msgKey); }
+    else { openChoicesSet.delete(msgKey); userClosedChoicesSet.add(msgKey); }
+  });
+
+  const listEl = document.createElement("div");
+  listEl.className = "choices-grid";
+
+  if (!choices.length && isPending) {
+    const hint = document.createElement("div");
+    hint.className = "choices-loading-hint";
+    hint.textContent = isEroticRegen ? "🔞 ドスケベな返答候補を生成中…" : "💬 返答候補を生成中…";
+    listEl.appendChild(hint);
+  } else if (!choices.length) {
+    // 🔞を既定にしているチャンネルでは通常の候補が無いので、作り方を案内する
+    const hint = document.createElement("div");
+    hint.className = "choices-loading-hint";
+    hint.textContent = mode === "erotic"
+      ? "🔞の候補はまだありません（↻ 作り直すで生成）"
+      : "通常の候補はありません（↻ 作り直すで生成）";
+    listEl.appendChild(hint);
+  }
+
+  choices.forEach((choice, cIdx) => {
+    const key = `${msgKey}:${mode}`;
     const itemBtn = document.createElement("button");
     itemBtn.type = "button";
-    const isSelected = selectedChoiceMap.get(msgKey) === cIdx;
-    itemBtn.className = "choice-item-btn" + (isSelected ? " is-selected" : "");
+    itemBtn.className = "choice-item-btn" + (selectedChoiceMap.get(key) === cIdx ? " is-selected" : "");
 
     const badge = document.createElement("span");
     badge.className = "choice-label-badge";
     badge.textContent = choice.label || "候補";
-
     const textSpan = document.createElement("span");
     textSpan.className = "choice-text-body";
     textSpan.textContent = choice.text || "";
-
     itemBtn.appendChild(badge);
     itemBtn.appendChild(textSpan);
 
     itemBtn.addEventListener("click", () => {
-      // 入力欄に上書きセット＆フォーカス
       const inputEl = $("messageInput") || document.getElementById("message-input");
-      if (inputEl) {
-        lastSelectedChoiceText = choice.text || "";
-        inputEl.value = choice.text || "";
-        inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-        autoResizeInput();
-        inputEl.focus();
-        // カーソルを末尾へ移動
-        const len = inputEl.value.length;
-        inputEl.setSelectionRange(len, len);
-      }
-
-      // 選択中ハイライトの更新（単一選択化 & 全体で排他）
+      if (!inputEl) return;
+      lastSelectedChoiceText = choice.text || "";
+      inputEl.value = choice.text || "";
+      inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+      autoResizeInput();
+      inputEl.focus();
+      const len = inputEl.value.length;
+      inputEl.setSelectionRange(len, len);
       selectedChoiceMap.clear();
-      selectedChoiceMap.set(msgKey, cIdx);
+      selectedChoiceMap.set(key, cIdx);
       if (typeof document.querySelectorAll === "function") {
-        document.querySelectorAll(".choice-item-btn.is-selected").forEach((btn) => {
-          btn.classList.remove("is-selected");
-        });
+        document.querySelectorAll(".choice-item-btn.is-selected").forEach((b) => b.classList.remove("is-selected"));
       }
-      listEl.querySelectorAll(".choice-item-btn").forEach((btn) => {
-        btn.classList.toggle("is-selected", btn === itemBtn);
-      });
+      listEl.querySelectorAll(".choice-item-btn").forEach((b) => b.classList.toggle("is-selected", b === itemBtn));
     });
-
     listEl.appendChild(itemBtn);
   });
 
-  choicesWrap.appendChild(toggleBtn);
-  choicesWrap.appendChild(listEl);
-  choicesWrap.appendChild(regenBtn);
-  return choicesWrap;
+  panel.appendChild(headRow);
+  panel.appendChild(listEl);
+  wrap.appendChild(toggleBtn);
+  wrap.appendChild(panel);
+  return wrap;
 }
 
 // ---------------------------------------------------------------- キャラの状態
@@ -3083,14 +3844,30 @@ function parseState(text) {
   }
   return out;
 }
+// 「ツール」の 🧑 キャラ（状態）が開く対象。直近の「状態を持つAI応答」、無ければ最後のAI応答。
+// （状態は応答ごとのデータなので、過去の応答を直すときは ⋯ の「キャラの状態」を使う）
+function latestStateTarget() {
+  const msgs = (state && state.messages) || [];
+  if (!msgs.length) return null;
+  const isAi = (x) => x && x.role !== "user";
+  const withState = msgs.slice().reverse().find((x) => isAi(x) && Array.isArray(x.state) && x.state.length > 0);
+  if (withState) return withState;
+  if (!(state.setting && state.setting.rp_state)) return null;
+  return msgs.slice().reverse().find(isAi) || null;
+}
+
 async function openState(m, msgs) {
   let curState = m.state;
-  if (!curState && sid && m.id) {
+  let ragHits = null;
+  if (sid && m.id) {
     try {
       const res = await (await fetch(`/api/message/state?sid=${encodeURIComponent(sid)}&mid=${encodeURIComponent(m.id)}&fallback=1`)).json();
-      if (res && res.ok && Array.isArray(res.state) && res.state.length > 0) {
-        curState = res.state;
-        m.state = curState;
+      if (res && res.ok) {
+        ragHits = res.rag_hits || null;
+        if (!curState && Array.isArray(res.state) && res.state.length > 0) {
+          curState = res.state;
+          m.state = curState;
+        }
       }
     } catch (e) {
       console.warn("fetch state error:", e);
@@ -3098,6 +3875,11 @@ async function openState(m, msgs) {
   }
   // この応答に無ければ、それより前に記録した状態から始める（サーバーの state_before と同じ）
   const prev = curState || msgs.slice(0, msgs.indexOf(m)).reverse().find((x) => x.role === "assistant" && Array.isArray(x.state))?.state || [];
+  // 重要＝類似度に関係なく毎回渡す枠（ルール・ピン留め呼称等。呼称はピン留め時のみ重要枠、通常は関連枠）／関連＝今回の会話に近い記憶と未達の約束
+  // 件数はモーダル左下に小さく添える（タイトルには入れない）
+  const hitsMeta = ragHits
+    ? `🧠 （重要${ragHits.tier1 || 0}・関連${ragHits.tier2 || 0}）`
+    : "";
   openText("キャラの状態（この応答のとき）",
     "「■ 名前」の下に「衣装＆露出状態:」「上着＆露出状態:」「下着＆露出状態:」「装具＆大人のおもちゃ:」「挿入・結合状態:」「身体痕跡・付着物:」「体勢:」「表情:」「場所:」「構図:」と、今の状態を「- 」で1行ずつ、「内心:」の後に内心を書く。キャラを消すときはその塊ごと消す。保存すると、次の入力で AI がこの状態を読む。",
     stateText(prev) || "■ キャラ名\n衣装＆露出状態: \n上着＆露出状態: \n下着＆露出状態: \n装具＆大人のおもちゃ: なし\n挿入・結合状態: なし\n身体痕跡・付着物: なし\n体勢: \n表情: \n場所: \n構図: \n- 今の状態\n内心: ",
@@ -3106,7 +3888,161 @@ async function openState(m, msgs) {
       await checked("/api/message/state", { sid, id: m.id, state: parsed });
       m.state = parsed;
       await poll();
-    });
+    },
+    hitsMeta,
+    ragHits ? () => openRagHitsModal(sid, m.id) : null
+  );
+}
+
+let ragHitsReqSeq = 0;
+
+function buildRagHitCardNode(item) {
+  const normCat = (c) => (c === "taboo" || c === "rule_taboo" ? "rule" : (c === "item_status" ? "item" : (c || "event")));
+  const cat = normCat(item.category);
+
+  const card = document.createElement("div");
+  card.className = `rag-entry rag-entry-${cat}`;
+  if (item.missing || (item.status && item.status !== "active")) {
+    card.classList.add("rag-entry-resolved");
+  }
+
+  const header = document.createElement("div");
+  header.className = "rag-entry-head";
+
+  const badges = document.createElement("div");
+  badges.className = "rag-entry-badges";
+
+  if (!item.missing) {
+    const catBadge = document.createElement("span");
+    catBadge.className = `badge-cat badge-cat-${cat}`;
+    catBadge.textContent = (typeof CAT_LABELS !== "undefined" && CAT_LABELS[cat]) ? CAT_LABELS[cat] : (cat || "記憶");
+    badges.appendChild(catBadge);
+
+    if (item.elapsed_time) {
+      const meta = document.createElement("span");
+      meta.className = "rag-mem-meta";
+      if (typeof item.elapsed_time === "object") {
+        const d = item.elapsed_time.day != null ? `${item.elapsed_time.day}日目` : "";
+        const p = item.elapsed_time.period || "";
+        meta.textContent = d && p ? `${d}・${p}` : (d || p);
+      } else {
+        meta.textContent = String(item.elapsed_time || "").trim();
+      }
+      if (meta.textContent) {
+        badges.appendChild(meta);
+      }
+    }
+  } else {
+    const meta = document.createElement("span");
+    meta.className = "rag-mem-meta";
+    meta.textContent = "参照不可";
+    badges.appendChild(meta);
+  }
+
+  const scoreEl = document.createElement("span");
+  scoreEl.className = "rag-hits-score";
+  const hasScore = item.score !== null && item.score !== undefined && !Number.isNaN(Number(item.score));
+  scoreEl.textContent = hasScore ? Number(item.score).toFixed(2) : "--";
+  scoreEl.title = hasScore ? `スコア: ${Number(item.score).toFixed(4)}` : "スコア未記録";
+
+  header.append(badges, scoreEl);
+
+  const body = document.createElement("div");
+  body.className = "rag-mem-content";
+  body.style.whiteSpace = "pre-wrap";
+  body.textContent = item.content || "";
+
+  card.append(header, body);
+  return card;
+}
+
+async function openRagHitsModal(targetSid, targetMid) {
+  const modal = $("ragHitsModal");
+  const body = $("ragHitsBody");
+  if (!modal || !body || !targetSid) return;
+
+  const seq = ++ragHitsReqSeq;
+  modal.classList.remove("hidden");
+  updateFabState();
+  body.scrollTop = 0;
+  body.innerHTML = `<div class="muted" style="padding:12px;">記憶を読み込み中...</div>`;
+
+  try {
+    const url = `/api/rag/hits?sid=${encodeURIComponent(targetSid)}&mid=${encodeURIComponent(targetMid || "")}`;
+    const res = await (await fetch(url)).json();
+    if (seq !== ragHitsReqSeq) return;
+    if (!res || !res.ok) throw new Error(res?.error || "取得失敗");
+
+    const t1 = Array.isArray(res.tier1) ? res.tier1 : [];
+    const t2 = Array.isArray(res.tier2) ? res.tier2 : [];
+    const t1Count = res.tier1_count ?? t1.length;
+    const t2Count = res.tier2_count ?? t2.length;
+
+    body.innerHTML = "";
+
+    const renderGroup = (labelTitle, count, list) => {
+      const group = document.createElement("div");
+      group.className = "rag-hits-group";
+      const label = document.createElement("div");
+      label.className = "rag-hits-group-label";
+      label.textContent = `${labelTitle} ${count}件`;
+      group.appendChild(label);
+
+      if (!list.length) {
+        const empty = document.createElement("div");
+        empty.className = "muted";
+        empty.style.padding = "4px 2px";
+        empty.textContent = "なし";
+        group.appendChild(empty);
+      } else {
+        for (const item of list) {
+          group.appendChild(buildRagHitCardNode(item));
+        }
+      }
+      return group;
+    };
+
+    body.appendChild(renderGroup("重要", t1Count, t1));
+    body.appendChild(renderGroup("関連", t2Count, t2));
+    body.scrollTop = 0;
+  } catch (e) {
+    if (seq !== ragHitsReqSeq) return;
+    body.innerHTML = `<div class="danger" style="padding:12px;">記憶の取得に失敗しました</div>`;
+  }
+}
+
+function closeRagHitsModal() {
+  const modal = $("ragHitsModal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  updateFabState();
+}
+
+if ($("ragHitsClose")) {
+  $("ragHitsClose").onclick = (e) => {
+    e.stopPropagation();
+    closeRagHitsModal();
+  };
+}
+if ($("ragHitsModal")) {
+  $("ragHitsModal").addEventListener("click", (e) => {
+    if (e.target === $("ragHitsModal")) {
+      e.stopPropagation();
+      closeRagHitsModal();
+    }
+  });
+}
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" || e.key === "Esc") {
+      const m = $("ragHitsModal");
+      if (m && !m.classList.contains("hidden")) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        closeRagHitsModal();
+      }
+    }
+  }, true);
 }
 
 let promptUndoValue = null;
@@ -3129,6 +4065,7 @@ async function checkPromptModalRefine(s) {
       } else if (liveM.image?.refined_prompt) {
         $("promptEdit").value = liveM.image.refined_prompt;
         updatePromptQuickTagsActive();
+        if (typeof PromptToolbar !== "undefined") PromptToolbar.syncTextareaUI($("promptEdit"));
         if ($("promptUndo")) $("promptUndo").classList.remove("hidden");
         toast("✨ プロンプトの推敲が完了しました");
       } else if (sid && liveM.id) {
@@ -3139,6 +4076,7 @@ async function checkPromptModalRefine(s) {
             Object.assign(liveM.image, res.image);
             $("promptEdit").value = res.image.refined_prompt;
             updatePromptQuickTagsActive();
+            if (typeof PromptToolbar !== "undefined") PromptToolbar.syncTextareaUI($("promptEdit"));
             if ($("promptUndo")) $("promptUndo").classList.remove("hidden");
             toast("✨ プロンプトの推敲が完了しました");
             return;
@@ -3174,6 +4112,9 @@ async function openPrompt(m) {
   isPromptRefining = (m.image_refine_mode === "modal" && isBusy);
   $("promptEdit").value = m.image?.prompt || "";
   updatePromptQuickTagsActive();
+  if (typeof PromptToolbar !== "undefined") {
+    PromptToolbar.syncTextareaUI($("promptEdit"));
+  }
   const who = m.image?.chars?.length ? `固定キャラ: ${m.image.chars.join(", ")}（外見タグは再生成時も今の設定で付く）\n\n` : "";
   const prevP = m.image?.prev_prompt ? `推敲前 prompt:\n${m.image.prev_prompt}\n\n` : "";
   $("promptFinal").textContent = prevP + who + (m.image?.final_positive
@@ -3252,14 +4193,160 @@ async function saveEdit() {
   await revertIde(r, ch);
 }
 
+// =============================================================================
+// 長期記憶（RAG）5段階優先度定義＆ヘルパー関数群
+// =============================================================================
+const MEMORY_PRIORITY_LEVELS = [
+  {
+    key: "pinned",
+    label: "📌 ピン留め",
+    short: "📌 ピン留め (常時)",
+    actionLabel: "📌固定▼",
+    desc: "スコアに関係なく常時前提枠（最大4枠）に最優先で固定します"
+  },
+  {
+    key: "highest",
+    label: "▲▲ 最優先 (×1.25)",
+    short: "▲▲ 最優先 (×1.25)",
+    actionLabel: "📍最優先▼",
+    desc: "なかなか出ない記憶用。単語の直接一致がなくても文脈が近ければ優先想起されます"
+  },
+  {
+    key: "high",
+    label: "▲ 優先 (×1.12)",
+    short: "▲ 優先 (×1.12)",
+    actionLabel: "📍優先▼",
+    desc: "惜しくも選ばれにくい記憶を出やすくし、標準の記憶より一歩優先します"
+  },
+  {
+    key: "default",
+    label: "― 標準 (×1.00)",
+    short: "― 標準 (×1.00)",
+    actionLabel: "📍標準▼",
+    desc: "通常のハイブリッド検索スコアで評価します"
+  },
+  {
+    key: "low",
+    label: "▼ 抑制 (×0.82)",
+    short: "▼ 抑制 (×0.82)",
+    actionLabel: "📍抑制▼",
+    desc: "普段は控えめに沈め、明確に関連する話題が出た時だけ想起させます"
+  },
+];
+
+function resolveMemoryPriorityKey(mem) {
+  const p = mem && mem.priority;
+  if (p === "slightly_high") return "high";
+  if (p && MEMORY_PRIORITY_LEVELS.some(item => item.key === p)) return p;
+  const b = Number((mem && mem.boost) || 0);
+  if (b >= 0.08) return "pinned";
+  if (b >= 0.03) return "highest";
+  if (b > 1e-6) return "high";
+  if (b < -1e-6) return "low";
+  return "default";
+}
+
+function ensurePriorityFieldMounted() {
+  if (document.getElementById("memPriorityPills")) return;
+  const contentEl = document.getElementById("ragMemContent");
+  if (!contentEl) return;
+  const parentGroup = contentEl.closest(".form-group") || contentEl.parentElement;
+  if (!parentGroup || !parentGroup.parentElement) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "form-group";
+  wrap.innerHTML = `
+    <label>想起の優先度</label>
+    <div id="memPriorityPills" class="mem-priority-pills"></div>
+    <div id="memPriorityHint" class="mem-prio-hint"></div>
+    <input type="hidden" id="memPriorityInput" value="default">
+  `;
+  parentGroup.parentElement.insertBefore(wrap, parentGroup);
+}
+
+function renderPriorityPills(selectedKey = "default") {
+  ensurePriorityFieldMounted();
+  const container = document.getElementById("memPriorityPills");
+  const hint = document.getElementById("memPriorityHint");
+  const hiddenInput = document.getElementById("memPriorityInput");
+  if (!container || !hiddenInput) return;
+
+  const normKey = resolveMemoryPriorityKey({ priority: selectedKey });
+  hiddenInput.value = normKey;
+  container.innerHTML = "";
+
+  const currentObj = MEMORY_PRIORITY_LEVELS.find(p => p.key === normKey) || MEMORY_PRIORITY_LEVELS[3];
+  if (hint) hint.textContent = currentObj.desc;
+
+  for (const p of MEMORY_PRIORITY_LEVELS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const isActive = p.key === normKey;
+    btn.className = `mem-prio-pill mem-prio-${p.key}` + (isActive ? " active" : "");
+    btn.textContent = p.label;
+    btn.onclick = () => renderPriorityPills(p.key);
+    container.appendChild(btn);
+  }
+}
+
+function createInlinePrioritySelect(sessionId, mem) {
+  const select = document.createElement("select");
+  const currentKey = resolveMemoryPriorityKey(mem);
+  select.className = `rag-entry-priority-select mem-priority-select mem-prio-${currentKey}` + (currentKey === "pinned" ? " is-pinned" : "");
+  const currentObj = MEMORY_PRIORITY_LEVELS.find(p => p.key === currentKey) || MEMORY_PRIORITY_LEVELS[3];
+  select.title = `想起の優先度を変更（現在: ${currentObj.label}）`;
+  select.setAttribute("aria-label", `想起の優先度: ${currentObj.label}`);
+  select.addEventListener("click", (e) => e.stopPropagation());
+
+  for (const p of MEMORY_PRIORITY_LEVELS) {
+    const opt = document.createElement("option");
+    opt.value = p.key;
+    opt.textContent = p.actionLabel || p.short;
+    if (p.key === currentKey) opt.selected = true;
+    select.appendChild(opt);
+  }
+
+  select.addEventListener("change", async (e) => {
+    e.stopPropagation();
+    const newKey = e.target.value;
+    const prevKey = resolveMemoryPriorityKey(mem);
+    select.className = `rag-entry-priority-select mem-priority-select mem-prio-${newKey}` + (newKey === "pinned" ? " is-pinned" : "");
+    select.disabled = true;
+    try {
+      const res = await fetch(`/api/rag/memories/${encodeURIComponent(mem.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          priority: newKey
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "更新失敗");
+      if (data.memory && data.memory.priority) {
+        mem.priority = data.memory.priority;
+      } else {
+        delete mem.priority;
+      }
+      delete mem.boost;
+      await loadRagMemories();
+    } catch (err) {
+      alert(`優先度の変更に失敗しました: ${err.message}`);
+      select.value = prevKey;
+      select.className = `rag-entry-priority-select mem-priority-select mem-prio-${prevKey}` + (prevKey === "pinned" ? " is-pinned" : "");
+    } finally {
+      select.disabled = false;
+    }
+  });
+
+  return select;
+}
+
 const CAT_LABELS = {
   calling: "🏷️ 呼称",
-  rule: "📜 ルール",
-  taboo: "🚫 タブー",
-  rule_taboo: "⚖️ 規則・禁忌",
+  rule: "📜 ルール・禁忌",
   item: "🎁 アイテム",
   status: "💫 状態",
-  item_status: "💍 アイテム",
   promise: "🤙 約束",
   char_fact: "🗝️ キャラ",
   user_fact: "👤 好み",
@@ -3269,19 +4356,83 @@ const CAT_LABELS = {
 
 let ragMemFilter = "all";
 let ragAllMemories = [];
+// 並び順：desc = 追加日時の新しい順（デフォルト）、asc = 古い順
+let ragMemSortDir = "desc";
+
+// 記憶の追加日時（UNIX秒）。無い古いデータは更新日時で代用する
+function ragMemTimestamp(mem) {
+  if (!mem) return null;
+  const raw = mem.created_at != null ? mem.created_at : (mem.updated_at != null ? mem.updated_at : null);
+  if (raw == null) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  const num = Number(raw);
+  if (Number.isFinite(num) && String(raw).trim() !== "") return num;
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? null : parsed / 1000;
+}
+
+function compareRagMemories(a, b) {
+  // ピン留め（pinned）は常に最上位に表示
+  const pa = (a && resolveMemoryPriorityKey(a) === "pinned") ? 1 : 0;
+  const pb = (b && resolveMemoryPriorityKey(b) === "pinned") ? 1 : 0;
+  if (pa !== pb) return pb - pa;
+
+  const ta = ragMemTimestamp(a);
+  const tb = ragMemTimestamp(b);
+  let diff;
+  if (ta != null && tb != null) {
+    diff = ta - tb;
+  } else if (ta != null) {
+    diff = 1;   // 日時ありを新しい側に寄せる
+  } else if (tb != null) {
+    diff = -1;
+  } else {
+    diff = 0;
+  }
+  // 日時が同じ（同時刻）ならターン番号で安定させる
+  if (diff === 0) {
+    const sa = Number(a && a.turn_idx);
+    const sb = Number(b && b.turn_idx);
+    if (Number.isFinite(sa) && Number.isFinite(sb) && sa !== sb) diff = sa - sb;
+  }
+  return ragMemSortDir === "asc" ? diff : -diff;
+}
+
+function updateRagMemSortBtn() {
+  const btn = $("ragMemSortBtn");
+  if (!btn) return;
+  const desc = ragMemSortDir === "desc";
+  btn.textContent = desc ? "⬇ 新しい順" : "⬆ 古い順";
+  btn.title = desc
+    ? "追加日時の新しい順（クリックで古い順に切替）"
+    : "追加日時の古い順（クリックで新しい順に切替）";
+  btn.classList.toggle("asc", !desc);
+  btn.setAttribute("aria-pressed", desc ? "true" : "false");
+}
 
 function setupRagFilterTabs() {
   const container = $("ragMemFilterTabs");
-  if (!container || container._bound) return;
-  container._bound = true;
-  container.querySelectorAll(".rag-filter-btn").forEach(btn => {
-    btn.onclick = () => {
-      container.querySelectorAll(".rag-filter-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      ragMemFilter = btn.getAttribute("data-cat") || "all";
+  if (container && !container._bound) {
+    container._bound = true;
+    container.querySelectorAll(".rag-filter-btn").forEach(btn => {
+      btn.onclick = () => {
+        container.querySelectorAll(".rag-filter-btn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        ragMemFilter = btn.getAttribute("data-cat") || "all";
+        renderRagMemories();
+      };
+    });
+  }
+  const sortBtn = $("ragMemSortBtn");
+  if (sortBtn && !sortBtn._bound) {
+    sortBtn._bound = true;
+    sortBtn.onclick = () => {
+      ragMemSortDir = ragMemSortDir === "desc" ? "asc" : "desc";
+      updateRagMemSortBtn();
       renderRagMemories();
     };
-  });
+  }
+  updateRagMemSortBtn();
 }
 
 async function openRag() {
@@ -3291,6 +4442,7 @@ async function openRag() {
   ragMemEditingId = null;
   $("ragEditor").classList.add("hidden");
   $("ragMemEditor").classList.add("hidden");
+  syncRagMemEditingClass();
   updateFabState();
   setupRagFilterTabs();
   await loadRagCollections();
@@ -3320,6 +4472,23 @@ function switchRagTab(tab) {
     if (customView) customView.classList.remove("hidden");
     renderRagCollections();
     renderRagEntries();
+  }
+  syncRagMemEditingClass();
+  syncRagModeBtn(tab);
+}
+
+// 上の2つのタブ（記憶 / 知識）のうち、今見ている面を点灯させる
+function syncRagModeBtn(tab) {
+  const custom = tab !== "memory";
+  const memBtn = $("ragTabMemoryTop");
+  const knBtn = $("ragTabKnowledge");
+  if (memBtn) {
+    memBtn.classList.toggle("active", !custom);
+    memBtn.setAttribute("aria-selected", String(!custom));
+  }
+  if (knBtn) {
+    knBtn.classList.toggle("active", custom);
+    knBtn.setAttribute("aria-selected", String(custom));
   }
 }
 
@@ -3351,46 +4520,47 @@ function renderRagMemories(memories = null) {
   const list = $("ragMemEntries");
   if (!list) return;
   list.innerHTML = "";
-  const displayList = ragMemFilter === "all" ? ragAllMemories : ragAllMemories.filter(m => {
-    const c = m.category || "promise";
+  // 旧データ（taboo / rule_taboo）は rule に寄せて表示する
+  const normCat = (c) => (c === "taboo" || c === "rule_taboo" ? "rule" : (c === "item_status" ? "item" : (c || "promise")));
+  const filtered = ragMemFilter === "all" ? ragAllMemories : ragAllMemories.filter(m => {
+    const c = normCat(m.category);
     if (c === ragMemFilter) return true;
-    if (ragMemFilter === "rule" && (c === "rule" || c === "rule_taboo")) return true;
-    if (ragMemFilter === "taboo" && (c === "taboo" || c === "rule_taboo")) return true;
-    if (ragMemFilter === "rule_taboo" && (c === "rule" || c === "taboo" || c === "rule_taboo")) return true;
-    if (ragMemFilter === "item" && (c === "item" || c === "item_status")) return true;
-    if (ragMemFilter === "status" && (c === "status" || c === "item_status")) return true;
-    if (ragMemFilter === "item_status" && (c === "item" || c === "status" || c === "item_status")) return true;
     return false;
   });
+  // 追加日時で並び替え（デフォルトは新しい順）
+  const displayList = (filtered || []).slice().sort(compareRagMemories);
   if (!displayList || !displayList.length) {
     list.innerHTML = `<p class="muted" style="padding:12px;">${ragMemFilter === "all" ? "記憶はまだありません。会話が進むと自動で蓄積されます（手動追加も可能）。" : "このカテゴリの記憶はありません。"}</p>`;
     return;
   }
   for (const mem of displayList) {
-    const cat = mem.category || "promise";
+    const cat = normCat(mem.category);
+    const pKey = resolveMemoryPriorityKey(mem);
     const card = document.createElement("div");
     card.className = `rag-entry rag-entry-${cat}`;
+    if (pKey === "pinned") card.classList.add("rag-entry-pinned");
+    // 達成済（解決済み）の記憶は薄く見せる（バッジは下で付ける）
+    if ((mem.status || "active") !== "active") card.classList.add("rag-entry-resolved");
 
     const header = document.createElement("div");
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.marginBottom = "6px";
+    header.className = "rag-entry-head";
 
     const badges = document.createElement("div");
-    badges.style.display = "flex";
-    badges.style.alignItems = "center";
-    badges.style.gap = "6px";
+    badges.className = "rag-entry-badges";
 
     const catBadge = document.createElement("span");
     catBadge.className = `badge-cat badge-cat-${cat}`;
     catBadge.textContent = CAT_LABELS[cat] || cat || "記憶";
 
+    badges.append(catBadge);
+
     const srcBadge = document.createElement("span");
     srcBadge.className = `badge-source badge-source-${mem.source || "auto"}`;
-    srcBadge.textContent = mem.source === "manual" ? "手動" : "自動";
-
-    badges.append(catBadge, srcBadge);
+    // 自動 = ロボット / 手動 = パー（文字だと折り返しの原因になる）
+    const manual = mem.source === "manual";
+    srcBadge.textContent = manual ? "✋" : "🤖";
+    srcBadge.title = manual ? "手動で追加" : "会話から自動で抽出";
+    srcBadge.setAttribute("aria-label", manual ? "手動" : "自動");
 
     if (mem.status === "fulfilled") {
       const fBadge = document.createElement("span");
@@ -3415,30 +4585,50 @@ function renderRagMemories(memories = null) {
     if (mem.character_name) metaParts.push(`[${mem.character_name}]`);
     meta.textContent = metaParts.join(" ");
 
-    badges.appendChild(meta);
+    // 自動/手動のアイコンと日時は 1段下の行に置く
+    const sub = document.createElement("div");
+    sub.className = "rag-entry-sub";
+    sub.append(srcBadge, meta);
 
     const actions = document.createElement("div");
     actions.className = "rag-entry-actions";
 
+    // 優先度ドロップダウン（固定/優先度を統合したボタン）
+    actions.appendChild(createInlinePrioritySelect(sid, mem));
+
+    const jumpBtn = document.createElement("button");
+    jumpBtn.type = "button";
+    jumpBtn.className = "sub rag-jump-btn";
+    jumpBtn.textContent = "💬";
+    jumpBtn.setAttribute("aria-label", "会話へ");
     if (mem.mid) {
-      const jumpBtn = document.createElement("button");
-      jumpBtn.type = "button";
-      jumpBtn.className = "sub rag-jump-btn";
       jumpBtn.title = "この記憶が抽出された会話へジャンプ";
-      jumpBtn.textContent = "💬 会話へ";
       jumpBtn.onclick = () => {
         $("ragModal").classList.add("hidden");
         scrollToMessage(mem.mid);
       };
-      actions.appendChild(jumpBtn);
+    } else {
+      jumpBtn.title = "会話画面へ戻る";
+      jumpBtn.onclick = () => {
+        $("ragModal").classList.add("hidden");
+      };
     }
+    actions.appendChild(jumpBtn);
 
     const editBtn = document.createElement("button");
-    editBtn.textContent = "編集";
+    editBtn.type = "button";
+    editBtn.className = "rag-entry-edit";
+    editBtn.textContent = "✏️";
+    editBtn.title = "編集";
+    editBtn.setAttribute("aria-label", "編集");
     editBtn.onclick = () => openRagMemEditor(mem);
 
     const delBtn = document.createElement("button");
-    delBtn.textContent = "削除";
+    delBtn.type = "button";
+    delBtn.className = "rag-entry-del";
+    delBtn.textContent = "🗑";
+    delBtn.title = "削除";
+    delBtn.setAttribute("aria-label", "削除");
     delBtn.onclick = async () => {
       if (!confirm(`この記憶を削除しますか？\n「${mem.content}」`)) return;
       try {
@@ -3450,7 +4640,7 @@ function renderRagMemories(memories = null) {
     };
 
     actions.append(editBtn, delBtn);
-    header.append(badges, actions);
+    header.append(badges, actions, sub);
 
     const body = document.createElement("div");
     body.className = "rag-mem-content";
@@ -3504,21 +4694,35 @@ function openRagMemEditor(mem = null) {
   if ($("ragMemStatus")) {
     $("ragMemStatus").value = mem ? (mem.status || "active") : "active";
   }
-  $("ragMemContent").value = mem ? mem.content : "";
+  $("ragMemContent").value = mem ? (mem.content || "") : "";
+  renderPriorityPills(mem ? resolveMemoryPriorityKey(mem) : "default");
   $("ragMemView").classList.add("hidden");
   $("ragMemEditor").classList.remove("hidden");
+  syncRagMemEditingClass();
   $("ragMemContent").focus();
+  if (isMobileLayout()) rafOnce(keepFocusedVisible);
+}
+
+// 編集中かどうかを body クラスに映す（スマホは編集中だけシートを中身の高さに縮める）
+function syncRagMemEditingClass() {
+  const el = $("ragMemEditor");
+  const on = !!(el && !el.classList.contains("hidden"));
+  if (document.body && document.body.classList) document.body.classList.toggle("rag-mem-editing", on);
 }
 
 function closeRagMemEditor() {
   ragMemEditingId = null;
+  // キーボードを閉じてから一覧へ戻す（開いたままだと一覧が半分しか見えない）
+  if ($("ragMemContent") && typeof $("ragMemContent").blur === "function") $("ragMemContent").blur();
   $("ragMemEditor").classList.add("hidden");
   $("ragMemView").classList.remove("hidden");
+  syncRagMemEditingClass();
 }
 
 async function saveRagMem() {
   const category = $("ragMemCategory").value;
   const content = $("ragMemContent").value.trim();
+  const priority = $("memPriorityInput") ? $("memPriorityInput").value : ($("ragMemPriority") ? $("ragMemPriority").value : "default");
   const status = $("ragMemStatus") ? $("ragMemStatus").value : "active";
   if (!content) {
     alert("記憶の内容を入力してください。");
@@ -3530,14 +4734,16 @@ async function saveRagMem() {
         session_id: sid,
         category,
         content,
-        status
+        status,
+        priority
       }, "PUT");
     } else {
       await checked("/api/rag/memories", {
         session_id: sid,
         category,
         content,
-        status
+        status,
+        priority
       }, "POST");
     }
     closeRagMemEditor();
@@ -3547,9 +4753,23 @@ async function saveRagMem() {
   }
 }
 
-function startRegenStatusPolling() {
+function regenDiffLabel(before, after) {
+  const a = Number(after) || 0;
+  if (before === null || before === undefined || !Number.isFinite(Number(before))) return `記憶 ${a}件`;
+  const b = Number(before);
+  const d = a - b;
+  return `記憶 ${a}件（開始時 ${b}件 / ${d >= 0 ? "+" : ""}${d}件）`;
+}
+
+function setRegenButtonsDisabled(disabled) {
   const btn = $("ragMemRegenBtn");
-  if (btn) btn.disabled = true;
+  const resetBtn = $("ragMemRegenReset");
+  if (btn) btn.disabled = disabled;
+  if (resetBtn) resetBtn.disabled = disabled;
+}
+
+function startRegenStatusPolling() {
+  setRegenButtonsDisabled(true);
   const progressBox = $("ragMemProgress");
   const progressBar = $("ragMemProgressBar");
   const progressText = $("ragMemProgressText");
@@ -3561,21 +4781,28 @@ function startRegenStatusPolling() {
     try {
       const st = await checked("/api/rag/memories/regenerate/status?session_id=" + encodeURIComponent(sid));
       if (!st) return;
+      if (st.before !== null && st.before !== undefined) ragMemRegenBefore = Number(st.before);
       const pct = Math.min(100, Math.max(0, st.progress || 0));
       if (progressBar) progressBar.style.width = pct + "%";
-      if (progressText) progressText.textContent = `記憶を再構築中... (${st.processed_chunks || 0}/${st.total_chunks || 0} チャンク) - 記憶 ${st.memories_count || 0}件`;
+      if (progressText) progressText.textContent = `記憶を再構築中... (${st.processed_chunks || 0}/${st.total_chunks || 0} チャンク) - ${regenDiffLabel(ragMemRegenBefore, st.memories_count)}`;
 
       if (st.status === "completed" || st.status === "done" || st.status === "idle") {
         clearInterval(ragMemRegenTimer);
         ragMemRegenTimer = null;
-        if (btn) btn.disabled = false;
+        setRegenButtonsDisabled(false);
         if (progressBox) progressBox.classList.add("hidden");
-        flash("記憶の再生成が完了しました");
+        const hasAfter = st.after !== null && st.after !== undefined;
+        const after = Number(hasAfter ? st.after : st.memories_count) || 0;
+        const before = ragMemRegenBefore;
+        const diff = (before === null || !hasAfter) ? null : after - Number(before);
+        flash(diff === null
+          ? (hasAfter ? `記憶の再生成が完了しました（記憶 ${after}件）` : "記憶の再生成が完了しました")
+          : `記憶の再生成が完了しました（${diff >= 0 ? "+" : ""}${diff}件 / 記憶 ${after}件）`);
         await loadRagMemories();
       } else if (st.status === "error") {
         clearInterval(ragMemRegenTimer);
         ragMemRegenTimer = null;
-        if (btn) btn.disabled = false;
+        setRegenButtonsDisabled(false);
         if (progressBox) progressBox.classList.add("hidden");
         alert("記憶の再生成でエラーが発生しました: " + (st.error || ""));
       }
@@ -3585,12 +4812,21 @@ function startRegenStatusPolling() {
   }, 1500);
 }
 
-async function regenerateRagMemories() {
+async function regenerateRagMemories(reset = false) {
   if (!sid) return;
-  if (!confirm("現在の会話ログを再分析して記憶を一括再生成しますか？\n（手動で追加した記憶は保持されます）")) return;
+  const isReset = reset === true;
+  if (isReset) {
+    if (!confirm(
+      "🗑 自動記憶を全消しして、会話ログから作り直しますか？\n\n" +
+      "・自動記憶を削除します（手動で追加した記憶は残ります）\n" +
+      "・達成済みの手動記憶は「有効」に戻ります\n" +
+      "・削除前の内容は data/trash にバックアップされます"
+    )) return;
+  } else {
+    if (!confirm("会話ログを再分析して記憶を追加します。\n既存の記憶は消しません（同じ内容は自動で除外）。")) return;
+  }
 
-  const btn = $("ragMemRegenBtn");
-  btn.disabled = true;
+  setRegenButtonsDisabled(true);
   const progressBox = $("ragMemProgress");
   const progressBar = $("ragMemProgressBar");
   const progressText = $("ragMemProgressText");
@@ -3600,11 +4836,12 @@ async function regenerateRagMemories() {
   progressText.textContent = "記憶の再構築を開始中...";
 
   try {
-    await checked("/api/rag/memories/regenerate", { session_id: sid });
+    const res = await checked("/api/rag/memories/regenerate", { session_id: sid, reset: isReset });
+    ragMemRegenBefore = (res && res.before !== null && res.before !== undefined) ? Number(res.before) : null;
     startRegenStatusPolling();
   } catch (e) {
     alert("再生成の開始に失敗しました: " + e.message);
-    btn.disabled = false;
+    setRegenButtonsDisabled(false);
     progressBox.classList.add("hidden");
   }
 }
@@ -3669,7 +4906,7 @@ function openRagEditor(entry = null) {
 async function renderRagEntries() {
   const list = $("ragEntries");
   list.innerHTML = "";
-  if (!ragSelected) { list.textContent = "左のコレクションを選択してください。"; return; }
+  if (!ragSelected) { list.textContent = "コレクションを選択してください。"; return; }
   try {
     const col = (await checked("/api/rag/collection?id=" + encodeURIComponent(ragSelected))).collection;
     const add = document.createElement("button");
@@ -3684,10 +4921,17 @@ async function renderRagEntries() {
       const body = document.createElement("div");
       body.textContent = entry.content;
       const edit = document.createElement("button");
-      edit.textContent = "編集";
+      edit.type = "button";
+      edit.textContent = "✏️";
+      edit.title = "編集";
+      edit.setAttribute("aria-label", "編集");
       edit.onclick = () => openRagEditor(entry);
       const del = document.createElement("button");
-      del.textContent = "削除";
+      del.type = "button";
+      del.className = "rag-entry-del";
+      del.textContent = "🗑";
+      del.title = "削除";
+      del.setAttribute("aria-label", "削除");
       del.onclick = async () => {
         if (!confirm(`「${entry.title}」を削除しますか？`)) return;
         try { await checked("/api/rag/entry/delete", { id: ragSelected, entry_id: entry.id }); await loadRagCollections(); }
@@ -3721,19 +4965,33 @@ $("sendBtn").addEventListener("keydown", (e) => {
     closeChoicesAccordions();
   }
 });
+let inputIsComposing = false;
+let inputComposingTimer = null;
+$("messageInput").addEventListener("compositionstart", () => {
+  inputIsComposing = true;
+  if (inputComposingTimer) { clearTimeout(inputComposingTimer); inputComposingTimer = null; }
+});
+$("messageInput").addEventListener("compositionend", () => {
+  if (inputComposingTimer) clearTimeout(inputComposingTimer);
+  inputComposingTimer = setTimeout(() => {
+    inputIsComposing = false;
+    inputComposingTimer = null;
+  }, 20);
+});
 $("messageInput").addEventListener("keydown", (e) => {
-  // Enter で送信するのは PC だけ。スマホは仮想キーボードなので Enter は改行のままにして、
-  // 送信は「送信」ボタンにまかせる。
+  // PC は Enter 送信（Shift+Enter は改行）、スマホは Enter 改行。
   // 日本語IMEの変換確定 Enter では送らない（isComposing / keyCode 229 は変換中）
   if (e.key !== "Enter") return;
-  if (e.isComposing || e.keyCode === 229) return;
-  if (e.shiftKey) return;                 // Shift+Enter は改行（PC）
-  if (isMobileLayout()) return;           // スマホは改行
+  if (e.isComposing || inputIsComposing || e.keyCode === 229) return;
+  if (e.shiftKey) return;                 // Shift+Enter は改行
+  // スマホ（幅768px以下かつモバイル端末）では Enter は改行（送信は送信ボタン）。PC は Enter 送信。
+  if (isMobileInputDevice()) return;
   e.preventDefault();
   send();
 });
 $("messageInput").addEventListener("input", () => {
   autoResizeInput();
+  syncActionControlsVisibility();   // 中央ボタンを「ツール」↔「送信」に切り替える
   if (selectedChoiceMap.size > 0 && $("messageInput").value !== lastSelectedChoiceText) {
     selectedChoiceMap.clear();
     lastSelectedChoiceText = "";
@@ -3749,10 +5007,12 @@ $("messageInput").addEventListener("focus", () => {
   updateFabState();
 });
 $("messageInput").addEventListener("blur", () => {
+  inputIsComposing = false;
+  if (inputComposingTimer) { clearTimeout(inputComposingTimer); inputComposingTimer = null; }
   setTypingInput(false);
   updateFabState();
 });
-// 添付ボタン上フリック送信 & タップでファイル選択
+// 添付ボタン下フリック送信 & タップでファイル選択
 function setupAttachFlickSend() {
   const btn = $("attachBtn");
   const input = $("attachInput");
@@ -3777,7 +5037,7 @@ function setupAttachFlickSend() {
   }
 
   // 誤判定防止の数値基準
-  const FLICK_THRESHOLD_Y = 35; // 上方向に35px以上でフリックとみなす
+  const FLICK_THRESHOLD_Y = 35; // 下方向に35px以上でフリックとみなす
   const MAX_SWAY_X = 40;        // 横ブレ40px以上はキャンセル
   const TAP_THRESHOLD = 10;     // 移動量10px未満は通常タップ
 
@@ -3865,21 +5125,21 @@ function setupAttachFlickSend() {
       touchMaxDist = currentDist;
     }
 
-    const upDist = -deltaY;
+    const downDist = deltaY;
     const absDeltaX = Math.abs(deltaX);
     const isSwayed = absDeltaX >= MAX_SWAY_X;
 
-    // 上方向へのリアルタイムスライド（transform: translateY）
+    // 下方向へのリアルタイムスライド（transform: translateY）
     let visualY = 0;
-    if (deltaY < 0) {
-      visualY = Math.max(-75, deltaY);
+    if (deltaY > 0) {
+      visualY = Math.min(75, deltaY);
     }
     btn.style.transform = visualY !== 0 ? `translateY(${visualY}px)` : "";
 
     // 送信ブルー（#3b5bdb: rgb(59, 91, 219)）への滑らかな変化
     let progress = 0;
-    if (upDist > 0 && !isSwayed) {
-      progress = Math.min(1, upDist / FLICK_THRESHOLD_Y);
+    if (downDist > 0 && !isSwayed) {
+      progress = Math.min(1, downDist / FLICK_THRESHOLD_Y);
     }
 
     if (progress > 0) {
@@ -3906,7 +5166,7 @@ function setupAttachFlickSend() {
     }
 
     // タップ判定閾値（10px）以上動いた場合のみスクロール防止
-    if (upDist >= TAP_THRESHOLD && e.cancelable) {
+    if (downDist >= TAP_THRESHOLD && e.cancelable) {
       e.preventDefault();
     }
   }, { passive: false });
@@ -3925,14 +5185,14 @@ function setupAttachFlickSend() {
 
     const deltaX = touch.clientX - touchStartX;
     const deltaY = touch.clientY - touchStartY;
-    const upDist = -deltaY;
+    const downDist = deltaY;
     const absDeltaX = Math.abs(deltaX);
     const endDist = Math.hypot(deltaX, deltaY);
     if (endDist > touchMaxDist) {
       touchMaxDist = endDist;
     }
 
-    const isFlick = (upDist >= FLICK_THRESHOLD_Y) && (absDeltaX < MAX_SWAY_X);
+    const isFlick = (downDist >= FLICK_THRESHOLD_Y) && (absDeltaX < MAX_SWAY_X);
     const isTap = (touchMaxDist < TAP_THRESHOLD) && (endDist < TAP_THRESHOLD);
 
     if (isFlick) {
@@ -3945,12 +5205,12 @@ function setupAttachFlickSend() {
       const isSendDisabled = Boolean($("sendBtn")?.disabled);
 
       if (hasContent && !isSendDisabled) {
-        // [あり] 上空へシュッと飛び立ちながらフェードアウト
+        // [あり] 下方へシュッと飛び去りながらフェードアウト
         clearTimers();
         isLaunching = true;
         btn.style.pointerEvents = "none";
         btn.style.transition = "transform 0.22s cubic-bezier(0.1, 0.8, 0.2, 1), opacity 0.22s ease-out";
-        btn.style.transform = "translateY(-95px)";
+        btn.style.transform = "translateY(95px)";
         btn.style.opacity = "0";
 
         // メッセージ送信
@@ -4058,7 +5318,12 @@ if ($("settingsCloseBtn")) {
 }
 $("sessionFilter").oninput = renderSessions;
 $("ragToggle").onclick = openRag;
-$("ragClose").onclick = () => { $("ragModal").classList.add("hidden"); updateFabState(); };
+$("ragClose").onclick = () => {
+  $("ragModal").classList.add("hidden");
+  // 編集中のまま閉じても body クラスが残らないようにする（次のモーダルを縮めない）
+  if ($("ragMemEditor") && !$("ragMemEditor").classList.contains("hidden")) closeRagMemEditor();
+  updateFabState();
+};
 $("ragCreate").onclick = async () => {
   const name = $("ragName").value.trim();
   if (!name) return;
@@ -4073,8 +5338,11 @@ $("ragName").onkeydown = (e) => { if (e.key === "Enter") $("ragCreate").click();
 $("ragEntrySave").onclick = saveRagEntry;
 $("ragEditCancel").onclick = () => $("ragEditor").classList.add("hidden");
 if ($("ragTabMemory")) $("ragTabMemory").onclick = () => switchRagTab("memory");
+if ($("ragTabMemoryTop")) $("ragTabMemoryTop").onclick = () => switchRagTab("memory");
+if ($("ragTabKnowledge")) $("ragTabKnowledge").onclick = () => switchRagTab("custom");
 if ($("ragMemAddBtn")) $("ragMemAddBtn").onclick = () => openRagMemEditor();
-if ($("ragMemRegenBtn")) $("ragMemRegenBtn").onclick = regenerateRagMemories;
+if ($("ragMemRegenBtn")) $("ragMemRegenBtn").onclick = () => regenerateRagMemories(false);
+if ($("ragMemRegenReset")) $("ragMemRegenReset").onclick = () => regenerateRagMemories(true);
 if ($("ragMemCancel")) $("ragMemCancel").onclick = closeRagMemEditor;
 if ($("ragMemSave")) $("ragMemSave").onclick = saveRagMem;
 $("editSave").onclick = saveEdit;
@@ -4114,6 +5382,52 @@ if ($("mobileFab")) {
     updateFabState();
   };
 }
+// タップが速すぎても青い反応が見えるように、押下時に一瞬だけ青いクラスを付ける。
+// CSS の :active だけだと、指を離すのが速い端末では色がほぼ見えない。
+function flashTapButton(btn) {
+  if (!btn) return;
+  btn.classList.remove("tap-flash");
+  void btn.offsetWidth;                 // 連続タップでもクラスを付け直す
+  btn.classList.add("tap-flash");
+  clearTimeout(btn._tapFlashTimer);
+  btn._tapFlashTimer = setTimeout(() => {
+    btn.classList.remove("tap-flash");
+    btn._tapFlashTimer = 0;
+  }, 220);
+}
+function bindTurnTapFlash(id) {
+  const btn = $(id);
+  if (!btn) return;
+  btn.addEventListener("pointerdown", (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    flashTapButton(btn);
+  }, { passive: true });
+  // キーボード（Enter/Space）でも反応が見えるように。pointerdown 直後の click では二重にしない
+  btn.addEventListener("click", () => {
+    if (!btn.classList.contains("tap-flash")) flashTapButton(btn);
+  });
+}
+bindTurnTapFlash("mobileTurnPrev");
+bindTurnTapFlash("mobileTurnNext");
+
+// 「ツール / 閉じる」「選択肢」は動的に作られることもあるので、
+// document への委譲で拾って同じ青フラッシュを付ける。
+const TAP_FLASH_SELECTOR = "#mobileActionToggle, .choices-toggle-btn, .choices-switch, .choices-reroll-btn, .choice-item-btn, .btn-img-refine, .btn-prompt, .btn-more";
+function tapFlashTarget(e) {
+  if (!e.target || typeof e.target.closest !== "function") return null;
+  const btn = e.target.closest(TAP_FLASH_SELECTOR);
+  if (!btn || btn.disabled) return null;
+  return btn;
+}
+document.addEventListener("pointerdown", (e) => {
+  if (e.button !== undefined && e.button !== 0) return;
+  const btn = tapFlashTarget(e);
+  if (btn) flashTapButton(btn);
+}, { passive: true });
+document.addEventListener("click", (e) => {
+  const btn = tapFlashTarget(e);
+  if (btn && !btn.classList.contains("tap-flash")) flashTapButton(btn);
+});
 if ($("mobileTurnPrev")) {
   $("mobileTurnPrev").onclick = () => {
     hideReveal();
@@ -4128,13 +5442,92 @@ if ($("mobileTurnNext")) {
     jumpToNextAssistantReply();
   };
 }
+// 中央ボタン: 入力中は「送信」、それ以外は「ツール」
 if ($("mobileActionToggle")) {
-  $("mobileActionToggle").onclick = () => {
+  const actionToggle = $("mobileActionToggle");
+  // 表示は「送信」なのに押しても送信されないバグの対策。
+  //  1) 押した瞬間の役割を覚えておく（ボタンはフッターの外なので、触れた時点で
+  //     入力欄のフォーカスが外れ、actionToggleMode が「ツール」に戻ってしまう）
+  //  2) 押下で preventDefault（フォーカスを手放さない＝キーボードが閉じて
+  //     ボタンが指の下から動くのを防ぐ）
+  //  3) 送信は pointerup で行う（click が別要素に落ちても送れる）
+  let pressedMode = "";
+  let pressedClearTimer = null;
+  let pressStartX = 0;
+  let pressStartY = 0;
+  let pressMoved = false;
+  let suppressClickUntil = 0;   // pointerup で送ったあとに来る click で二重送信しない
+  const TAP_SLOP = 10;          // これ以上動いたらタップではなくスクロール扱い
+  const clearPressed = () => {
+    pressedMode = "";
+    actionTogglePressed = false;
+    if (pressedClearTimer) { clearTimeout(pressedClearTimer); pressedClearTimer = null; }
+  };
+  // click が来なかったときのために、押下状態を遅れて戻す（押しっぱなしでも送信のまま）
+  const scheduleRelease = (delay) => {
+    if (pressedClearTimer) clearTimeout(pressedClearTimer);
+    pressedClearTimer = setTimeout(() => {
+      pressedClearTimer = null;
+      if (!actionTogglePressed) return;
+      pressedMode = "";
+      actionTogglePressed = false;
+      syncActionControlsVisibility();
+    }, delay);
+  };
+  actionToggle.addEventListener("pointerdown", (e) => {
+    if (e && e.button !== undefined && e.button !== 0) return;   // 右クリック等は無視
+    pressedMode = actionToggleMode;
+    actionTogglePressed = true;
+    pressStartX = e.clientX || 0;
+    pressStartY = e.clientY || 0;
+    pressMoved = false;
+    // 「送信」のときは入力欄のフォーカスを保つ。フォーカスが外れるとキーボードが閉じ、
+    // 画面下に固定したこのボタンが指の下から動いてしまい、タップが成立しなくなる（送信されない）。
+    if (pressedMode === "send" && typeof e.preventDefault === "function") e.preventDefault();
+    scheduleRelease(4000);
+  }, { passive: false });
+  actionToggle.addEventListener("pointermove", (e) => {
+    if (!actionTogglePressed) return;
+    const dx = (e.clientX || 0) - pressStartX;
+    const dy = (e.clientY || 0) - pressStartY;
+    if (Math.hypot(dx, dy) > TAP_SLOP) pressMoved = true;
+  }, { passive: true });
+  // 「送信」は pointerup で送る。ボタン自体が動いて click が別要素に落ちても送れるように。
+  // （ツール/閉じるは今まで通り click で開閉する）
+  actionToggle.addEventListener("pointerup", () => {
+    if (!actionTogglePressed) { scheduleRelease(600); return; }
+    const mode = pressedMode;
+    const sendNow = mode === "send" && !pressMoved;
+    pressedMode = "";
+    // 送ったあと／スクロールしたあとに同じジェスチャの click が来ても何もしない
+    if (sendNow || pressMoved) suppressClickUntil = Date.now() + 600;
+    if (sendNow) {
+      clearPressed();
+      send();
+      syncActionControlsVisibility();
+      return;
+    }
+    scheduleRelease(600);
+  }, { passive: true });
+  actionToggle.addEventListener("pointercancel", () => {
+    clearPressed();
+    syncActionControlsVisibility();
+  }, { passive: true });
+  actionToggle.onclick = () => {
+    if (Date.now() < suppressClickUntil) return;   // pointerup で送信済み
+    const mode = pressedMode || actionToggleMode;   // 押した瞬間の役割で動く
+    clearPressed();
+    if (mode === "send") {
+      // 中央の送信。キーボードは閉じない（続けて打てるように blur しない）
+      send();
+      syncActionControlsVisibility();
+      return;
+    }
     const ae = document.activeElement;                       // ★15: 入力の focus が残っていると押しても無反応になる
     const footer = document.querySelector("footer");
     if (ae && footer && footer.contains(ae) && typeof ae.blur === "function") ae.blur();
     const el = $("mobileReveal");
-    // もう一度押したら閉じる（トグル）。開いたままだと「操作を表示」に戻れなくなるため
+    // もう一度押したら閉じる（トグル）。開いたままだと「ツール」に戻れなくなるため
     if (el && !el.classList.contains("hidden")) hideReveal();
     else showReveal();
     syncActionControlsVisibility();
@@ -4142,6 +5535,13 @@ if ($("mobileActionToggle")) {
 }
 if ($("revealRpToggle")) $("revealRpToggle").onclick = () => { hideReveal(); $("rpToggle").click(); syncActionControlsVisibility(); };
 if ($("revealRag"))      $("revealRag").onclick      = () => { hideReveal(); openRag(); syncActionControlsVisibility(); };
+if ($("revealState"))    $("revealState").onclick    = () => {
+  hideReveal();
+  const target = latestStateTarget();
+  if (!target) { toast("まだキャラの状態がありません"); syncActionControlsVisibility(); return; }
+  openState(target, (state && state.messages) || []);
+  syncActionControlsVisibility();
+};
 if ($("revealSettings")) $("revealSettings").onclick = () => { hideReveal(); if ($("settingsToggle")) $("settingsToggle").click(); syncActionControlsVisibility(); };
 if ($("revealModel"))    $("revealModel").onclick    = () => { hideReveal(); openModelSheet(); syncActionControlsVisibility(); };
 
@@ -4187,6 +5587,7 @@ if (typeof document.querySelectorAll === "function") {
 }
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("resize", () => {
+    syncViewportVars();
     syncFootBarPlacement();
     autoResizeInput();
     updateFooterHeight();
@@ -4200,6 +5601,7 @@ function onLayoutChange() {
     if ($("elapsedModal")) $("elapsedModal").classList.add("hidden");
   }
   syncFootBarPlacement();
+  syncViewportVars();
   updateFabState();
   updateHeaderAndSideStatus();
   syncInputPlaceholder();
@@ -4316,6 +5718,68 @@ $("settingSave").onclick = async () => {
     refreshSessions();
   } catch (e) { flash("画像設定のJSONエラー: " + e.message); }
 };
+const memoAsInitialEl = $("memoAsInitial");
+if (memoAsInitialEl) {
+  memoAsInitialEl.onclick = async () => {
+    if (!state || formSid !== sid || state.id !== sid) {
+      flash("設定の読み込みが追いついていません。少し待ってからもう一度保存してください");
+      poll();
+      return;
+    }
+    try {
+      const r = await post("/api/setting", {
+        setting: readForm(),
+        memo_as_initial: true,
+      });
+      if (r.error) {
+        flash("初期memoの保存に失敗: " + r.error);
+        return;
+      }
+      if (r.ok) {
+        flash("現在のmemoを初期値にも保存しました");
+        formDirty = false;
+        dirtyFields.clear();
+        await poll();
+      }
+    } catch (e) {
+      flash("初期memoの保存に失敗: " + e.message);
+    }
+  };
+}
+// 🔞を既定にするフラグは「切り替えたらすぐ効く」ように、その場で保存する
+// （保存ボタンを押し忘れて「通常の候補が出る」と混乱しやすいため）
+const eroticAutoEl = $("f_choices_erotic_auto");
+if (eroticAutoEl) {
+  eroticAutoEl.addEventListener("change", async () => {
+    if (!state || state.id !== sid) return;
+    if (eroticAutoEl.checked && state.setting && state.setting.suggest_choices === false) {
+      eroticAutoEl.checked = false;
+      flash("「返答候補（8択）を生成する」がオフなので、先にオンにしてください");
+      return;
+    }
+    const next = JSON.parse(JSON.stringify(state.setting || {}));
+    next.choices_erotic_auto = !!eroticAutoEl.checked;
+    // 先読みは「選択肢担当の会話」で走るので、未設定なら効かないことを伝える
+    const par = !!(next.choices_ide_session && next.choices_ide_session !== next.ide_session);
+    try {
+      await post("/api/setting", { setting: next });
+      state.setting = next;
+      dirtyFields.delete("f_choices_erotic_auto");
+      if (next.choices_erotic_auto && !par) {
+        flash("オンにしました。ただし「選択肢担当の会話」が未設定のため、いまは効きません");
+      } else {
+        flash(next.choices_erotic_auto
+          ? "🔞の候補を最初から作る：オン（通常の候補は作りません）"
+          : "🔞の候補を最初から作る：オフ");
+      }
+      await poll();
+    } catch (e) {
+      eroticAutoEl.checked = !eroticAutoEl.checked;
+      flash("保存できませんでした: " + e.message);
+    }
+  });
+}
+
 // 新規: 動作・画像設定のみを引き継いで、真っ白な新しいチャンネルを始める
 $("newSession").onclick = async () => {
   let base = null;
@@ -4528,6 +5992,16 @@ $("promptRegen").onclick = async () => {
 
 (async () => {
   initPromptQuickTags();
+  if (typeof PromptToolbar !== "undefined") {
+    PromptToolbar.observe({
+      selector: "#promptEdit, textarea.image-prompt-input, textarea[data-role='image-prompt']",
+      getSessionContext: () => ({
+        sessionId: typeof sid !== "undefined" ? sid : window.currentSession?.id,
+        channelSetting: typeof state !== "undefined" && state?.setting ? state.setting : window.currentSession?.setting,
+      }),
+    });
+  }
+  bindViewportWatchers();
   syncFootBarPlacement();
   autoResizeInput();
   syncInputPlaceholder();

@@ -124,6 +124,19 @@ class TestTagDictionary(unittest.TestCase):
         self.assertIn("black hair", res)
         self.assertIn("swimsuit", res)
 
+    def test_11b_ascii_tags_in_outfit_and_fluids(self):
+        """辞書に無い衣装・下着・体液は英語タグとしてそのまま拾う"""
+        st = [{"name": "A", "outfit": "blue dress, white thighhighs",
+               "underwear": "white panties", "body_fluids": "sweat"}]
+        res = server.sanitize_prompt("1girl", state=st, allow_inject=True)
+        for tag in ("blue dress", "white thighhighs", "white panties", "sweat"):
+            self.assertIn(tag, res)
+        # 日本語で辞書にヒットする場合は二重に拾わない
+        st2 = [{"name": "A", "outfit": "全裸"}]
+        res2 = server.sanitize_prompt("1girl", state=st2, allow_inject=True)
+        self.assertIn("completely nude", res2)
+        self.assertNotIn("全裸", res2)
+
     def test_12_general_does_not_false_positive_on_place(self):
         """state.place='ベッドルーム' で general の「ベッド→bed」が誤爆しない"""
         st = [{"name": "A", "place": "ベッドルーム"}]
@@ -131,6 +144,41 @@ class TestTagDictionary(unittest.TestCase):
         tags = [t.strip() for t in res.split(",")]
         self.assertIn("bedroom", tags)
         self.assertNotIn("bed", tags)
+
+    def test_13_m_legs_maps_to_danbooru_tag(self):
+        """M字開脚・観音開きは Danbooru の m_legs タグに変換される"""
+        for pose in ("M字開脚", "観音開き"):
+            st = [{"name": "A", "pose": pose}]
+            res = server.sanitize_prompt("1girl", state=st, state_turn=st, allow_inject=True)
+            self.assertIn("m legs", res, pose)
+        # 単なる開脚は m legs にしない
+        st = [{"name": "A", "pose": "脚を開いた"}]
+        res = server.sanitize_prompt("1girl", state=st, state_turn=st, allow_inject=True)
+        self.assertNotIn("m legs", res)
+        self.assertIn("spread legs", res)
+
+    def test_14_text_tag_misses_collects_unknown_nouns(self):
+        """本文の未登録名詞だけを text_tag_misses.log に記録する"""
+        orig_data = server.DATA
+        p = os.path.join(self.tmp, "text_tag_misses.log")
+        server.DATA = self.tmp
+        try:
+            setting = {"character": {"name": "ラピ"}, "user_name": "あなた"}
+            text = "ラピは宇宙遊泳している。M字開脚で座り、シャンプーボトルを持っている。"
+            server.collect_text_tag_misses(text, "ai", setting)
+            with open(p, encoding="utf-8") as f:
+                body = f.read()
+            self.assertIn("宇宙遊泳", body)
+            self.assertNotIn("M字開脚", body)          # 既知語
+            self.assertNotIn("シャンプーボトル", body)  # 既知語
+            self.assertNotIn("ラピ", body)              # キャラ名は除外
+            # 同じ内容を再投入しても増えない
+            n = len(body.splitlines())
+            server.collect_text_tag_misses(text, "ai", setting)
+            with open(p, encoding="utf-8") as f:
+                self.assertEqual(len(f.read().splitlines()), n)
+        finally:
+            server.DATA = orig_data
 
     def test_09_order_preserved(self):
         """先頭エントリがJSONの先頭と一致する（並び順が保たれる）"""

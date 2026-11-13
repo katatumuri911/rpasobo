@@ -37,9 +37,12 @@ class TestParallelChoices(unittest.TestCase):
         self.orig_new_ide_dir = server.NEW_IDE_DIR
         self.orig_ide_known = server.IDE_KNOWN
         self.orig_known_ides = server.known_ides
+        self.orig_sent = server.SENT
 
         server.DATA = os.path.join(self.test_dir, "data")
         os.makedirs(server.DATA, exist_ok=True)
+        server.SENT = os.path.join(server.DATA, "sent")
+        os.makedirs(server.SENT, exist_ok=True)
         server.SESS_DIR = os.path.join(server.DATA, "sessions")
         os.makedirs(server.SESS_DIR, exist_ok=True)
         server.CHOICES_DIR = os.path.join(server.DATA, "choices")
@@ -73,6 +76,7 @@ class TestParallelChoices(unittest.TestCase):
         self.httpd.shutdown()
         self.httpd.server_close()
         server.DATA = self.orig_data_dir
+        server.SENT = self.orig_sent
         server.SESS_DIR = self.orig_sess_dir
         server.DONE = self.orig_s_done
         server.AGENTS_LOG = self.orig_agents_log
@@ -483,10 +487,9 @@ class TestParallelChoices(unittest.TestCase):
         self.assertEqual(s_after["setting"].get("total_turns"), 0)
         pending = self.api_get("/api/pending?ide=conv-stop&check=1")
         self.assertIsNone(pending.get("pending"))
-        # 担当IDEが読んだあとの停止は、次の入力を全部送り直して「無かったこと」にする
+        # 担当IDEが読んだあとの停止は、確定状態へロールバック（reset: True にしない）
         sent = server.read_sent(sid)
-        self.assertTrue(sent.get("reset"))
-        self.assertIn("停止", sent.get("why", ""))
+        self.assertFalse(sent.get("reset"))
 
         # 停止後にAIの応答が届いても、取り込まれない（outbox 側で stale になる）
         late = os.path.join(server.OUTBOX, f"{sid}_user_1700000999.json")
@@ -505,10 +508,9 @@ class TestParallelChoices(unittest.TestCase):
         server.save(s_prev)
         res_send2 = self.api_post("/api/send", {"sid": sid, "text": "2ターン目（止める）"})
         self.assertEqual(server.load(sid)["setting"].get("total_turns"), 2)
-        # 停止後の次の入力は、停止した発言を無かったものとして全部送り直す
+        # 停止後の次の入力は、reset: True による full 強制を行わず安全に処理される
         ctx = self.api_post("/api/context", {"sid": sid, "id": res_send2["id"]})
-        self.assertEqual(ctx.get("mode"), "full")
-        self.assertIn("停止", ctx.get("reason", ""))
+        self.assertNotIn("停止", ctx.get("reason", ""))
         # 発言ごとの停止ボタンと同じく id を指定して止める
         self.api_post("/api/send/stop", {"sid": sid, "id": res_send2["id"]})
         s_prev = server.load(sid)
@@ -770,7 +772,7 @@ class TestParallelChoices(unittest.TestCase):
             except SystemExit:
                 pass
         out_sub = f_sub.getvalue()
-        self.assertIn("読むのはこの表示だけ", out_sub)
+        self.assertIn("直ちに outbox の JSON を write_file で1回だけ書くこと", out_sub)
         self.assertNotIn("read_past_messages.py", out_sub)
 
         ctx_main = {"mode": "full", "sections": [], "reason": "test"}
@@ -781,7 +783,8 @@ class TestParallelChoices(unittest.TestCase):
             except SystemExit:
                 pass
         out_main = f_main.getvalue()
-        self.assertIn("read_past_messages.py", out_main)
+        self.assertNotIn("read_past_messages.py", out_main)
+        self.assertIn("直ちに outbox の JSON を write_file で1回だけ書くこと", out_main)
 
     def test_write_sent_and_mark_choices_sent(self):
         sid = "sid-sent-tracker"

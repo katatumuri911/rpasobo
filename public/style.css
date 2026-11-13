@@ -1,3 +1,12 @@
+/* 選択肢（🔞）の共通色。開閉ボタンとモードスイッチで同じ値を使う */
+:root {
+  --choices-erotic-bg: linear-gradient(180deg, rgba(196, 24, 96, 0.72), rgba(118, 0, 56, 0.72));
+  --choices-erotic-bg-hover: linear-gradient(180deg, rgba(224, 36, 114, 0.82), rgba(140, 0, 66, 0.82));
+  --choices-erotic-edge: rgba(255, 186, 222, 0.90);
+  /* 入力欄・添付・送信・停止の高さ（丸い送信ボタンと揃える） */
+  --composer-h: 44px;
+}
+
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -38,7 +47,8 @@ header h1#title { cursor: pointer; }
   line-height: 1.5; box-shadow: 0 4px 16px rgba(0,0,0,.4); white-space: pre-wrap; cursor: pointer; }
 @media (max-width: 768px) {
   header { display: none !important; }
-  #sidebar { position: fixed; left: -320px; top: 0; bottom: 0; width: min(300px, 84vw); z-index: 50; transition: left .22s cubic-bezier(0.16, 1, 0.3, 1); }
+  /* ドロワー幅。狭い端末では 78vw で頭打ち（left は必ず幅より大きくして隠す） */
+  #sidebar { position: fixed; left: -320px; top: 0; bottom: 0; width: min(270px, 74vw); z-index: 50; transition: left .22s cubic-bezier(0.16, 1, 0.3, 1); }
   body.side-open #sidebar { left: 0; }
   #sideToggle { display: none; }
   /* 一覧の右側を覆う透明に近い幕。タップで一覧を閉じる（下の会話を誤って触らないように） */
@@ -323,26 +333,72 @@ button.mini { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 footer textarea {
   flex: 1; resize: none; background: #2c2c32; color: #e6e6e6; border: 1px solid #44444c;
   border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 14px; line-height: 1.4;
-  height: 38px; min-height: 38px; max-height: 120px; box-sizing: border-box; overflow-y: hidden;
+  height: var(--composer-h); min-height: var(--composer-h); max-height: 120px; box-sizing: border-box; overflow-y: hidden;
   transition: border-color 0.15s ease;
 }
 footer textarea:focus { border-color: #6889f5; outline: none; }
-#sendBtn { background: #3b5bdb; color: #fff; padding: 0 20px; border-radius: 8px; height: 38px; transition: background .15s ease; }
-#sendBtn:hover { background: #4c6ef5; }   /* マウスホバーで明るい青に */
-#sendBtn:disabled { opacity: .55; cursor: default; }
-/* 応答待ちの間に出る停止ボタン */
+/* 送信ボタン（右下）。最近のチャットUIと同じ、丸くて大きめの上矢印。
+   文字（送信/送信中…）は読み上げ用に残して .send-text で見えなくしている。 */
+#sendBtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--composer-h);
+  min-width: var(--composer-h);
+  height: var(--composer-h);
+  padding: 0;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #5c7cfa, #3b5bdb);
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(59, 91, 219, .38);
+  flex-shrink: 0;
+  transition: background .15s ease, transform .12s ease, box-shadow .15s ease, opacity .15s ease;
+}
+#sendBtn:hover:not(:disabled) { background: linear-gradient(180deg, #6b8afb, #4c6ef5); box-shadow: 0 3px 16px rgba(76, 110, 245, .5); }
+#sendBtn:active:not(:disabled) { transform: scale(.92); }
+#sendBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
+#sendBtn:disabled { opacity: .5; cursor: default; box-shadow: none; }
+#sendBtn .send-icon {
+  width: 22px; height: 22px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.4;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+#sendBtn .send-text {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+/* 送信中は矢印をくるくる回るリングに差し替える */
+#sendBtn.sending .send-icon { display: none; }
+#sendBtn.sending::after {
+  content: ""; width: 18px; height: 18px;
+  border: 2px solid rgba(255, 255, 255, .35); border-top-color: #fff; border-radius: 50%;
+  animation: sendSpin .7s linear infinite;
+}
+@keyframes sendSpin { to { transform: rotate(360deg); } }
+/* 応答待ちの間に出る停止ボタン。送信と同じ大きさの丸に ■ だけを置く */
 #stopBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--composer-h);
+  min-width: var(--composer-h);
+  height: var(--composer-h);
+  padding: 0;
+  border-radius: 50%;
   background: #a33a3a;
   color: #fff;
-  padding: 0 16px;
-  border-radius: 8px;
-  height: 38px;
-  font-size: 13px;
+  font-size: 0;              /* 文字は読み上げ用（aria-label/title）だけに使う */
+  line-height: 1;
+  box-shadow: 0 2px 10px rgba(163, 58, 58, .35);
   flex-shrink: 0;
-  transition: background .15s ease;
+  transition: background .15s ease, transform .12s ease, box-shadow .15s ease, opacity .15s ease;
 }
-#stopBtn:hover:not(:disabled) { background: #c44b4b; }
-#stopBtn:disabled { opacity: .65; cursor: default; }
+#stopBtn::before { content: ""; width: 11px; height: 11px; border-radius: 2px; background: currentColor; }
+#stopBtn:hover:not(:disabled) { background: #c44b4b; box-shadow: 0 3px 14px rgba(196, 75, 75, .45); }
+#stopBtn:active:not(:disabled) { transform: scale(.92); }
+#stopBtn:focus-visible { outline: 2px solid #ff9a9a; outline-offset: 2px; }
+#stopBtn:disabled { opacity: .65; cursor: default; box-shadow: none; }
 /* 添付（送る前の一覧と、発言に付いたもの） */
 #attachBtn {
   position: relative;
@@ -352,7 +408,7 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
   padding: 0 10px;
   border-radius: 8px;
   font-size: 18px;
-  height: 38px;
+  height: var(--composer-h);
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
@@ -363,6 +419,7 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
 .attach-flick-hint { display: none; }
 @media (max-width: 768px) {
   footer {
+    --composer-h: 40px;
     padding: 3px 5px;
     padding-bottom: max(3px, env(safe-area-inset-bottom));
     gap: 4px;
@@ -371,8 +428,8 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
     gap: 6px;
   }
   #attachBtn {
-    min-width: 38px;
-    height: 38px;
+    min-width: var(--composer-h);
+    height: var(--composer-h);
     padding: 0;
     display: inline-flex;
     align-items: center;
@@ -386,7 +443,7 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
     -webkit-user-select: none;
     z-index: 15;
   }
-  /* 上フリック送信のヒント。小さい矢印をバッジにして見えるように */
+  /* 下フリック送信のヒント。小さい矢印をバッジにして見えるように */
   .attach-flick-hint {
     display: flex;
     align-items: center;
@@ -408,17 +465,18 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
     -webkit-user-select: none;
   }
   #sendBtn {
-    min-width: 52px;
-    height: 38px;
-    padding: 0 12px;
-    font-size: 13px;
+    width: var(--composer-h);
+    min-width: var(--composer-h);
+    height: var(--composer-h);
+    padding: 0;
     flex-shrink: 0;
   }
+  #sendBtn .send-icon { width: 20px; height: 20px; }
   #stopBtn {
-    min-width: 52px;
-    height: 38px;
-    padding: 0 10px;
-    font-size: 13px;
+    width: var(--composer-h);
+    min-width: var(--composer-h);
+    height: var(--composer-h);
+    padding: 0;
     flex-shrink: 0;
   }
 }
@@ -551,6 +609,192 @@ footer button:disabled { opacity: .5; cursor: default; }
 .modal-content { background: #26262c; border: 1px solid #44444c; border-radius: 10px; padding: 18px; width: 90%; max-width: 680px; }
 .modal-content h2 { margin: 0 0 8px; font-size: 15px; }
 #promptEdit { width: 100%; height: 160px; background: #1a1a1e; color: #e6e6e6; border: 1px solid #44444c; border-radius: 6px; padding: 10px; font: 12px Consolas, monospace; }
+/* ==========================================================================
+   Image Prompt Enhancer Toolbar Styles (public/style.css)
+   ========================================================================== */
+.rp-prompt-toolbar,
+.prompt-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  background: rgba(30, 32, 42, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  font-size: 12px;
+  user-select: none;
+}
+
+.rp-pt-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: #e6e8f0;
+  background: #2b2e3d;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease, opacity 0.15s ease;
+}
+
+.rp-pt-btn:hover:not(:disabled) {
+  background: #383c50;
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.rp-pt-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.rp-pt-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.rp-pt-caret {
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+/* ドロップダウンメニュー */
+.rp-pt-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.rp-pt-dropdown-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1000;
+  min-width: 310px;
+  max-width: min(410px, 92vw);
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #1e202b;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+}
+
+.rp-pt-dropdown.is-open .rp-pt-dropdown-menu {
+  display: block;
+}
+
+.rp-pt-menu-header {
+  padding: 6px 8px 3px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #9aa2c0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin-top: 4px;
+}
+
+.rp-pt-menu-header:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
+.rp-pt-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: #eef0f7;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.rp-pt-menu-item:hover {
+  background: rgba(110, 140, 255, 0.18);
+}
+
+.rp-pt-item-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.rp-pt-item-tags {
+  font-size: 10.5px;
+  color: #a5adc9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+  line-height: 1.3;
+}
+
+/* POV 切り替えボタングループ */
+.rp-pt-pov-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+}
+
+.rp-pt-pov-toggle.is-active {
+  background: rgba(56, 139, 253, 0.25);
+  border-color: #58a6ff;
+  color: #ffffff;
+}
+
+.rp-pov-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6e7681;
+  display: inline-block;
+}
+
+.rp-pov-dot.is-on {
+  background: #3fb950;
+  box-shadow: 0 0 6px #3fb950;
+}
+
+.rp-pov-default-select {
+  padding: 4px 6px;
+  font-size: 11.5px;
+  color: #dce0ee;
+  background: #232634;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.rp-pt-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #c5cbe0;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.rp-pt-inline-check input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.rp-pt-undo-btn {
+  margin-left: auto;
+}
 .prompt-quick-tags {
   display: flex;
   flex-wrap: wrap;
@@ -590,8 +834,68 @@ footer button:disabled { opacity: .5; cursor: default; }
 }
 #promptFinal { margin-top: 8px; font: 11px Consolas, monospace; max-height: 120px; overflow: auto; white-space: pre-wrap; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+/* 記憶モーダルの見出し行：左に「記憶 / 知識」のタブ、右端に赤い ✕ */
+.rag-head { display: flex; align-items: center; justify-content: flex-start; gap: 8px; margin: 0 0 8px; flex-shrink: 0; }
+.rag-head-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
+/* 右上の閉じるは赤い ✕ */
+button.rag-close-x {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: #6b2b2b;
+  color: #ffb8b8;
+  border: 1px solid rgba(255, 120, 130, 0.5);
+  font-size: 15px;
+  line-height: 1;
+}
+button.rag-close-x:hover { background: #8a3030; color: #fff; border-color: #ff9aa4; }
+button.rag-close-x:active { transform: scale(0.94); }
+/* 「記憶 / 知識」は1つのトラックに収めたセグメント型タブ（切り替えだと一目で分かる形） */
+.rag-top-tabs {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 3px;
+  background: #17171c;
+  border: 1px solid #3a3a44;
+  border-radius: 11px;
+  min-width: 0;
+}
+button.rag-top-tab {
+  flex-shrink: 0;
+  padding: 6px 15px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  border-radius: 8px;
+  background: transparent;
+  color: #9aa0b0;
+  border: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+button.rag-top-tab:hover { background: rgba(255, 255, 255, 0.07); color: #fff; }
+button.rag-top-tab:active { transform: none; }
+/* 選択中の面は青の「つまみ」として乗せる */
+button.rag-top-tab.active {
+  background: #3b5bdb;
+  color: #fff;
+  box-shadow: 0 1px 6px rgba(59, 91, 219, 0.45), inset 0 0 0 1px rgba(140, 170, 255, 0.35);
+}
+button.rag-top-tab.active:hover { background: #4262e8; }
+/* 上のタブと重複するので、左カラムの「記憶」チップは出さない（タブに一本化） */
+#ragTabMemory { display: none; }
 .modal-actions button { background: #3b5bdb; color: #fff; }
 .modal-actions button.sub { background: #44444c; }
+/* 左下に添える補足（記憶の件数など） */
+.modal-meta { flex: 1 1 auto; min-width: 0; margin-right: auto; align-self: center; color: #8a8a94; font-size: 12px; line-height: 1.4; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.modal-meta:empty { display: none; }
 .modal-textarea, .rag-modal input, .rag-modal textarea {
   width: 100%; background: #1a1a1e; color: #e6e6e6; border: 1px solid #44444c;
   border-radius: 6px; padding: 8px; font: inherit; font-size: 13px; resize: vertical;
@@ -645,15 +949,34 @@ footer button:disabled { opacity: .5; cursor: default; }
 .rag-entry-user_fact { border-left: 3px solid #22c55e !important; }
 .rag-entry-relationship { border-left: 3px solid #ec4899 !important; }
 .rag-entry-event { border-left: 3px solid #f97316 !important; }
+/* 達成済（解決済み）の記憶は薄く見せる。消えた痕跡が「今もある」と誤読されないように */
+.rag-entry-resolved { opacity: .55; }
 
 .rag-entry strong { display: block; color: #e6e6e6; margin-bottom: 5px; }
 .rag-entry-actions { float: right; display: flex; gap: 4px; }
-.rag-entry-actions button { font-size: 11px; padding: 2px 6px; }
+.rag-entry-actions button { font-size: 12px; padding: 2px 7px; min-width: 26px; line-height: 1.5; }
+button.rag-entry-del { background: #4a2b2b; color: #f0b8b8; }
+button.rag-entry-del:hover { background: #6b2b2b; color: #fff; }
+
+/* 記憶カードの見出し行：バッジと操作ボタンを折り返しても崩れないようにする。
+   （.rag-entry は white-space:pre-wrap なので、何もしないと「2日目・夕/方」みたいに
+     単語の途中で折り返してしまう） */
+.rag-entry-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-bottom: 6px; }
+.rag-entry-head .rag-entry-actions { float: none; margin-left: auto; flex-shrink: 0; }
+.rag-entry-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
+.rag-entry-badges > * { margin-right: 0; white-space: nowrap; }
+/* 自動/手動のアイコンと日時はカテゴリの下の行（左寄せ） */
+.rag-entry-sub { flex: 1 0 100%; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rag-entry-sub > * { margin-right: 0; white-space: nowrap; }
+.rag-entry-badges .rag-mem-meta,
+.rag-entry-sub .rag-mem-meta { margin-top: 0; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #ragEditor { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 #ragEditor.hidden { display: none; }
 .rag-divider { font-size: 11px; color: #888; margin: 12px 0 6px 4px; border-bottom: 1px solid #3a3a42; padding-bottom: 2px; }
 .rag-tab { cursor: pointer; font-weight: 600; margin-bottom: 6px; }
 .rag-mem-toolbar { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+button.rag-mem-danger { font-size: 11px; padding: 4px 8px; background: #4a2b2b; color: #f0b8b8; }
+button.rag-mem-danger:hover { background: #6b2b2b; }
 .rag-progress-box { background: #232738; border: 1px solid #465485; border-radius: 6px; padding: 10px; margin-bottom: 10px; font-size: 12px; color: #ccd; }
 .rag-progress-bar-wrap { height: 6px; background: #141724; border-radius: 3px; overflow: hidden; margin-top: 6px; }
 .rag-progress-bar { height: 100%; width: 0%; background: #6889f5; transition: width 0.3s ease; }
@@ -661,6 +984,9 @@ footer button:disabled { opacity: .5; cursor: default; }
 .rag-filter-btn { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: #222228; color: #aaa; border: 1px solid #383842; cursor: pointer; transition: all 0.15s ease; }
 .rag-filter-btn:hover { background: #2e2e38; color: #e0e0e0; }
 .rag-filter-btn.active { background: #3a3f58; color: #fff; border-color: #6889f5; font-weight: 600; }
+.rag-sort-btn { margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 4px; background: #222228; color: #aaa; border: 1px solid #383842; cursor: pointer; white-space: nowrap; transition: all 0.15s ease; }
+.rag-sort-btn:hover { background: #2e2e38; color: #e0e0e0; }
+.rag-sort-btn.asc { color: #cfd8f5; border-color: #465485; }
 
 .badge-cat {
   display: inline-flex;
@@ -707,12 +1033,70 @@ footer button:disabled { opacity: .5; cursor: default; }
 .badge-cat-relationship { background: #500724; color: #f472b6; border: 1px solid #db2777; }
 .badge-source { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-right: 5px; }
 .badge-source-auto { background: #33333d; color: #999; }
+.badge-source-manual { background: #33333d; color: #ddd; }
 .rag-mem-meta { font-size: 11px; color: #777; margin-top: 4px; }
 .badge-status-fulfilled { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 600; margin-right: 5px; background: #1b4332; color: #74c69d; border: 1px solid #2d6a4f; }
 .rag-mem-history { margin-top: 6px; font-size: 11px; background: #19191d; border: 1px solid #2d2d35; border-radius: 4px; padding: 4px 8px; }
 .rag-mem-history summary { cursor: pointer; color: #888; user-select: none; }
 .rag-mem-history-item { margin-top: 4px; padding: 4px 0; border-top: 1px dashed #2d2d35; color: #bbb; }
-.rag-jump-btn { font-size: 10px !important; padding: 2px 6px !important; margin-right: 4px; }
+.rag-jump-btn { font-size: 12px; }
+
+/* 優先度（Boost / ピン留め）バッジとカード装飾 */
+.rag-entry-pinned {
+  border-right: 3px solid #f59e0b;
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.08) 0%, rgba(37, 37, 44, 0.95) 40%);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.15);
+}
+.badge-priority {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  margin-right: 5px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+.badge-priority-pinned {
+  background: #451a03;
+  color: #fbbf24;
+  border: 1px solid #d97706;
+}
+.badge-priority-highest {
+  background: #3b0764;
+  color: #f472b6;
+  border: 1px solid #db2777;
+}
+.badge-priority-high {
+  background: #1e1b4b;
+  color: #818cf8;
+  border: 1px solid #6366f1;
+}
+.badge-priority-low {
+  background: #27272a;
+  color: #a1a1aa;
+  border: 1px solid #52525b;
+}
+button.rag-entry-pin {
+  font-size: 11px;
+  padding: 2px 6px;
+  background: #2a2a32;
+  color: #aaa;
+  border: 1px solid #444450;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button.rag-entry-pin:hover {
+  background: #383844;
+  color: #fbbf24;
+  border-color: #f59e0b;
+}
+button.rag-entry-pin.is-pinned {
+  background: #451a03;
+  color: #fbbf24;
+  border-color: #d97706;
+}
 
 /* Elapsed time dropdown */
 .elapsed-time-container { position: relative; display: inline-flex; align-items: center; margin-left: 8px; }
@@ -730,6 +1114,13 @@ footer button:disabled { opacity: .5; cursor: default; }
   .modal {
     align-items: flex-end;
     padding: 0;
+    /* キーボードが出ている間もモーダルを「今見えている範囲」に合わせる。
+       iOS はキーボードでレイアウト（100dvh）が縮まないので、固定 height のままだと
+       下半分（保存ボタンや入力欄）がキーボードの裏に隠れる。
+       --app-vvh / --app-vvtop は app.js の syncViewportVars() が visualViewport から更新する */
+    top: var(--app-vvtop, 0px);
+    bottom: auto;
+    height: var(--app-vvh, 100dvh);
   }
   .modal-content {
     width: 100vw;
@@ -793,6 +1184,34 @@ footer button:disabled { opacity: .5; cursor: default; }
     border-bottom: 1px solid #44444c;
     padding: 0 0 10px;
   }
+  /* 記憶モーダルの左カラム（カスタム知識）は、知識を開いているときだけ出す。
+     記憶の画面では「記憶 / 知識」タブと重複する帯になるので丸ごと省く。
+     （同じ .rag-left を使う IDE 選択モーダルには影響させない） */
+  #ragModal .rag-left { display: none; }
+  #ragModal:has(#ragCustomView:not(.hidden)) .rag-left {
+    flex: 0 0 auto;
+    max-height: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0 0 8px;
+  }
+  #ragModal .rag-left .rag-divider { flex: 0 0 auto; font-size: 10px; margin: 0 2px 0 6px; padding: 0; border: 0; white-space: nowrap; }
+  #ragModal .rag-tab { margin: 0; flex: 0 0 auto; }
+  #ragModal .rag-create { margin: 0; flex: 0 0 auto; }
+  #ragModal .rag-create input { width: 112px; height: 34px; padding: 0 8px; font-size: 16px; }
+  #ragModal .rag-create button { flex: 0 0 auto; height: 34px; padding: 0 10px; }
+  #ragCollections { display: flex; flex-wrap: nowrap; gap: 6px; min-width: 0; overflow-x: auto; }
+  #ragCollections .rag-collection { flex: 0 0 auto; margin: 0; }
+  /* 説明文はスマホでは場所の無駄なので畳む（各ボタンは title で説明を持つ） */
+  #ragModal > .modal-content > p.hint { display: none; }
+  /* カテゴリ絞り込みはスマホでは1行スクロール（3段に折り返して縦を食わない） */
+  #ragMemFilterTabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+  #ragMemFilterTabs .rag-filter-btn,
+  #ragMemFilterTabs .rag-sort-btn { flex: 0 0 auto; }
   .rag-right {
     flex: 1;
     min-height: 0;
@@ -811,6 +1230,52 @@ footer button:disabled { opacity: .5; cursor: default; }
     padding: 8px 16px;
     font-size: 14px;
   }
+
+  /* ---- 記憶の編集は「その場で編集」専用の面にする ----
+     一覧（左のカテゴリ）を畳み、内容の textarea に場所を渡す。
+     保存／キャンセルは常に本文の下（＝スクロールしなくても見える位置）。 */
+  #ragModal:has(#ragMemEditor:not(.hidden)) .rag-left { display: none; }
+  #ragMemEditor { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #ragMemEditor .rag-mem-fields { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  #ragMemEditor .rag-mem-content-field { flex: 0 0 auto; display: flex; flex-direction: column; }
+  #ragMemContent {
+    /* 画面いっぱいに広げず、シートのおよそ半分まで（それ以上はスクロール） */
+    flex: 0 0 auto;
+    height: 24dvh;
+    min-height: 88px;
+    max-height: 220px;
+    resize: none;
+  }
+  /* 本文はカテゴリ・状態（12px）に合わせて小さめに。
+     ここだけ 16px にしていると本文だけ不自然に大きく見える。 */
+  #ragMemContent,
+  #ragEntryContent { font-size: 13px; line-height: 1.6; }
+  /* カテゴリ・状態も本文と同じ 13px に揃える */
+  #ragMemCategory,
+  #ragMemStatus { font-size: 13px; }
+  #ragMemEditor .modal-actions { flex-shrink: 0; margin-top: 8px; }
+  /* iOS は 16px 未満の入力欄にフォーカスすると自動で拡大し、画面が半分切れる */
+  .rag-modal input,
+  .rag-modal select:not(.rag-entry-priority-select),
+  .rag-modal textarea { font-size: 16px; }
+
+  /* 編集中（キーボードなし）はシートを中身の高さに縮めて、下に空きを作らない */
+  body.rag-mem-editing #ragModal > .modal-content { height: auto; max-height: 92dvh; }
+
+  /* キーボード表示中は「今の作業」に場所を全部渡す */
+  body.kb-open .modal-content {
+    height: 100%;
+    max-height: 100%;
+    padding-top: max(10px, env(safe-area-inset-top));
+    padding-bottom: 10px;
+  }
+  body.kb-open #ragModal > .modal-content > .rag-head,
+  body.kb-open #ragModal > .modal-content > p.hint { display: none; }
+  body.kb-open #ragModal .rag-layout { gap: 0; overflow: hidden; }
+  /* ID 付きの「編集時は中身の高さ」より優先させる（キーボード中は見えている範囲いっぱい） */
+  body.kb-open #ragModal > .modal-content { height: 100%; max-height: 100%; }
+  /* モーダルの下に敷かれているフッター（入力欄・ツール）は触れないので、場所を空ける */
+  body:has(.modal:not(.hidden)) footer { display: none; }
 }
 .folder-rows { display: flex; flex-direction: column; gap: 4px; }
 .folder-row { display: flex; gap: 6px; align-items: center; }
@@ -858,9 +1323,16 @@ footer button:disabled { opacity: .5; cursor: default; }
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 14px;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
   transition: background 0.2s, border-color 0.2s;
   font-family: inherit;
   box-sizing: border-box;
+}
+
+/* メッセージ下のツールバーは、ブラウザ標準の四角いタップハイライトを出さない */
+.choices-container button,
+.btn-more {
+  -webkit-tap-highlight-color: transparent;
 }
 
 .choices-container .btn-img-refine:hover:not(:disabled),
@@ -874,6 +1346,7 @@ footer button:disabled { opacity: .5; cursor: default; }
 
 /* 送信中の取り消し（ユーザー発言の下） */
 .choices-container .btn-stop-wait {
+  order: 2;                 /* ⋯ と同じ並び順にし、DOM順で ⋯ のすぐ左へ */
   color: #ffb3b3;
   border-color: rgba(255, 120, 120, 0.35);
   background: rgba(140, 40, 40, 0.22);
@@ -889,9 +1362,12 @@ footer button:disabled { opacity: .5; cursor: default; }
   color: #888;
 }
 
-/* 「🔁画像」ボタン1つのラベルが、タグ推敲中／生成中／生成待ちに入れ替わる
-   （ボタンは増やさない。ラベルの長さで幅が変わりすぎないよう最小幅を揃える） */
+/* 「🔁」ボタン1つのラベルが、タグ推敲中／生成中／生成待ちに入れ替わる
+   （ボタンは増やさない。ふだんはアイコンだけなので、状態のときだけ幅を確保する） */
 .choices-container .btn-img-refine {
+  min-width: 0;
+}
+.choices-container .btn-img-refine.busy {
   min-width: 5.4em;
 }
 .choices-container .btn-img-refine.busy {
@@ -935,7 +1411,7 @@ footer button:disabled { opacity: .5; cursor: default; }
 }
 
 .choices-container .thumbs {
-  order: 4;
+  order: 5;
   flex-basis: 100%;
   margin-top: 4px;
 }
@@ -955,73 +1431,241 @@ footer button:disabled { opacity: .5; cursor: default; }
   text-shadow: var(--rp-outline);
 }
 
+/* 返答候補: 開閉ボタンはツールバー（🔁 🎨 の隣）、中身は一覧パネル */
 .choices-toggle-btn {
-  order: 1;
+  order: 1;                 /* 🔁 🎨 の後ろ、⋯ の手前 */
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 26px;
   padding: 4px 10px;
-  font-size: 0.78rem;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  font-family: inherit;
   color: #ccc;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 14px;
+  box-sizing: border-box;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
-  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-backdrop-filter: blur(8px) saturate(130%);
+  backdrop-filter: blur(8px) saturate(130%);
+  transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
 }
-
+/* ホバーと「開いている」は同じ青（他のツールバーボタンのホバー色に合わせる） */
 .choices-toggle-btn:hover,
 .choices-toggle-btn.is-open {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.28);
   color: #fff;
+  background: rgba(59, 91, 219, 0.85);
+  border-color: #5c7cfa;
+}
+.choices-toggle-btn.is-open {
+  box-shadow: 0 0 12px rgba(59, 91, 219, 0.45), inset 0 0 10px rgba(140, 170, 255, 0.18);
+}
+/* 🔞（閉じているとき）: 色味だけ残して、ふつうのボタンと同じ薄さに */
+.choices-toggle-btn.is-erotic {
+  color: #ffc0e0;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 121, 198, 0.38);
+  box-shadow: none;
+  text-shadow: none;
+}
+.choices-toggle-btn.is-erotic:hover {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 121, 198, 0.6);
+}
+/* 🔞（開いているとき）: ガラスのまま、輪郭を“ネオン管”っぽく光らせる */
+.choices-toggle-btn.is-open.is-erotic {
+  color: #ffeaf4;
+  background: var(--choices-erotic-bg);
+  border-color: var(--choices-erotic-edge);
+  /* 外側: 近い光→広い光 / 内側: 管の内側のにじみ＋上辺のハイライト */
+  box-shadow:
+    0 0 3px rgba(255, 226, 242, 0.85),
+    0 0 9px rgba(255, 48, 122, 0.75),
+    0 0 20px rgba(255, 40, 118, 0.45),
+    inset 0 0 10px rgba(255, 140, 200, 0.35),
+    inset 0 1px 0 rgba(255, 232, 246, 0.38);
+  text-shadow:
+    0 0 4px rgba(255, 186, 222, 0.90),
+    0 0 10px rgba(255, 90, 160, 0.55);
+}
+/* アイコンも光らせる（絵文字は色を変えられないのでドロップシャドウで） */
+.choices-toggle-btn.is-open.is-erotic .choices-mode-ic {
+  filter: drop-shadow(0 0 4px rgba(255, 140, 200, 0.85)) drop-shadow(0 0 9px rgba(255, 45, 120, 0.55));
+}
+.choices-toggle-btn.is-open.is-erotic:hover {
+  background: var(--choices-erotic-bg-hover);
+  border-color: rgba(255, 208, 232, 1);
+  box-shadow:
+    0 0 4px rgba(255, 236, 248, 0.95),
+    0 0 13px rgba(255, 48, 122, 0.85),
+    0 0 28px rgba(255, 40, 118, 0.55),
+    inset 0 0 12px rgba(255, 160, 210, 0.42),
+    inset 0 1px 0 rgba(255, 240, 250, 0.45);
+}
+.choices-toggle-btn .cv {
+  font-size: 0.6rem;
+  opacity: 0.8;
 }
 
-.choices-regen-btn {
-  order: 2;
+/* 一覧パネル（左上に ↻、右上にスイッチ） */
+.choices-panel {
+  order: 4;
+  display: none;
+  flex-basis: 100%;
+  width: 100%;
+  margin-top: 6px;
+  box-sizing: border-box;
+}
+.choices-panel.is-open {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.choices-head-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.choices-head-sp { flex: 1; }
+.choices-auto-badge {
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #ffc0e0;
+  background: rgba(255, 121, 198, 0.14);
+  border: 1px solid rgba(255, 121, 198, 0.35);
+  white-space: nowrap;
+}
+
+/* 💬 ⇄ 🔞 スイッチ。ノブ（白い円）が今のモードのアイコンになる */
+.choices-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  font-size: 0.78rem;
-  color: #ff79c6;
-  background: rgba(255, 121, 198, 0.1);
-  border: 1px solid rgba(255, 121, 198, 0.3);
-  border-radius: 14px;
+  justify-content: space-between;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.13);
+  /* border ではなく内側の線にして、ノブの余白を上下左右2pxで揃える */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.20);
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s, opacity 0.2s;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.choices-switch.is-erotic {
+  background: var(--choices-erotic-bg);
+  box-shadow:
+    inset 0 0 0 1px var(--choices-erotic-edge),
+    inset 0 0 8px rgba(255, 140, 200, 0.30),
+    0 0 3px rgba(255, 226, 242, 0.55),
+    0 0 10px rgba(255, 48, 122, 0.55),
+    0 0 20px rgba(255, 40, 118, 0.30);
+}
+.choices-switch:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.choices-ic {
+  position: relative;
+  z-index: 2;
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1;
+  /* 絵文字は色を指定できないので、非選択側はグレースケール＋半透明で沈める */
+  opacity: 0.5;
+  filter: grayscale(1);
+  transition: opacity 0.2s, filter 0.2s;
+}
+/* ノブの上に乗っている側（＝今のモード）だけ鮮やかに */
+.choices-switch:not(.is-erotic) .ic-normal,
+.choices-switch.is-erotic .ic-erotic {
+  opacity: 1;
+  filter: none;
+}
+
+/* 🔞がまだ無い: 右側の🔞をほんのり光らせて「押せる」ことを示す */
+.choices-switch.has-no-erotic:not(.is-erotic) .ic-erotic {
+  opacity: 0.95;
+  filter: drop-shadow(0 0 5px rgba(255, 121, 198, 0.85));
+}
+
+.choices-knob {
+  position: absolute;
+  z-index: 1;
+  top: 2px;
+  left: 2px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.choices-switch.is-erotic .choices-knob { transform: translateX(30px); }
+
+/* ↻ 作り直す（一覧の左上） */
+.choices-reroll-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 3px 10px;
+  font-size: 0.74rem;
   font-family: inherit;
+  color: #eaf4ff;
+  /* ↻ の色（水色）に合わせた濃いガラス（写真の上でも透けない） */
+  background: linear-gradient(180deg, rgba(62, 110, 182, 0.72), rgba(34, 62, 112, 0.72));
+  border: 1px solid rgba(150, 196, 255, 0.55);
+  border-radius: 999px;
+  box-sizing: border-box;
+  box-shadow: 0 0 9px rgba(70, 130, 220, 0.35), inset 0 0 10px rgba(160, 205, 255, 0.14);
+  text-shadow: 0 0 5px rgba(140, 190, 255, 0.45);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-backdrop-filter: blur(8px) saturate(130%);
+  backdrop-filter: blur(8px) saturate(130%);
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
+}
+.choices-reroll-btn:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(84, 140, 216, 0.81), rgba(44, 78, 138, 0.81));
+  border-color: rgba(185, 222, 255, 0.75);
+  box-shadow: 0 0 14px rgba(80, 145, 240, 0.5), inset 0 0 12px rgba(190, 225, 255, 0.2);
+}
+.choices-reroll-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
-.choices-regen-btn:hover:not(:disabled) {
-  background: rgba(255, 121, 198, 0.2);
-  border-color: rgba(255, 121, 198, 0.5);
-  color: #ff92d0;
+/* 通知はボタン行の直下に全幅で配置 */
+.choices-notice {
+  order: 3;
+  flex-basis: 100%;
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #ffc46b;
 }
-
-.choices-regen-btn:disabled,
-.choices-regen-btn.is-loading {
-  opacity: 0.6;
-  cursor: not-allowed;
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.15);
-  color: #aaa;
+.choices-notice.is-warn {
+  color: #ff9c9c;
 }
 
 .choices-grid {
-  order: 3;
-  display: none;
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin-top: 8px;
   width: 100%;
-  flex-basis: 100%;
   box-sizing: border-box;
-}
-
-.choices-grid.is-open {
-  display: grid;
   animation: choicesFadeIn 0.18s ease-out;
 }
 
@@ -1059,6 +1703,7 @@ footer button:disabled { opacity: .5; cursor: default; }
   border-radius: 8px;
   color: #eaeaea;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
   width: 100%;
   box-sizing: border-box;
@@ -1136,25 +1781,73 @@ footer button:disabled { opacity: .5; cursor: default; }
   border-color: rgba(255, 255, 255, 0.25);
   color: #d6d9ea;
 }
-#chatLog.rp .choices-toggle-btn {
-  background: rgba(30, 30, 38, 0.85);
-  border-color: rgba(255, 255, 255, 0.2);
+#chatLog.rp .choices-switch {
+  background: rgba(30, 30, 38, 0.90);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
-/* 他のツールバーボタン（🔁画像 / 🎨タグ / ⋯）と同じ青ホバーに揃える */
+#chatLog.rp .choices-switch.is-erotic {
+  background: var(--choices-erotic-bg);
+  box-shadow:
+    inset 0 0 0 1px var(--choices-erotic-edge),
+    inset 0 0 8px rgba(255, 140, 200, 0.30),
+    0 0 3px rgba(255, 226, 242, 0.55),
+    0 0 10px rgba(255, 48, 122, 0.55),
+    0 0 20px rgba(255, 40, 118, 0.30);
+}
+/* 他のツールバーボタン（🔁 / 🎨 / ⋯）と同じ青ホバーに揃える */
+#chatLog.rp .choices-toggle-btn {
+  background: rgba(30, 30, 38, 0.70);
+  border-color: rgba(255, 255, 255, 0.18);
+}
 #chatLog.rp .choices-toggle-btn:hover,
 #chatLog.rp .choices-toggle-btn.is-open {
   background: rgba(59, 91, 219, 0.85);
   border-color: #5c7cfa;
   color: #fff;
 }
-#chatLog.rp .choices-regen-btn {
-  background: rgba(45, 20, 35, 0.85);
-  border-color: rgba(255, 121, 198, 0.35);
-  color: #ff79c6;
+#chatLog.rp .choices-toggle-btn.is-open {
+  box-shadow: 0 0 12px rgba(59, 91, 219, 0.45), inset 0 0 10px rgba(140, 170, 255, 0.18);
 }
-#chatLog.rp .choices-regen-btn:hover:not(:disabled) {
-  background: rgba(65, 25, 50, 0.95);
-  border-color: rgba(255, 121, 198, 0.6);
+#chatLog.rp .choices-toggle-btn.is-erotic {
+  color: #ffc0e0;
+  background: rgba(30, 30, 38, 0.70);
+  border-color: rgba(255, 121, 198, 0.32);
+  box-shadow: none;
+  text-shadow: none;
+}
+#chatLog.rp .choices-toggle-btn.is-erotic:hover {
+  background: rgba(30, 30, 38, 0.88);
+  border-color: rgba(255, 121, 198, 0.55);
+  color: #ffd0e8;
+}
+#chatLog.rp .choices-toggle-btn.is-open.is-erotic {
+  color: #ffeaf4;
+  background: var(--choices-erotic-bg);
+  border-color: var(--choices-erotic-edge);
+  box-shadow:
+    0 0 3px rgba(255, 226, 242, 0.85),
+    0 0 9px rgba(255, 48, 122, 0.75),
+    0 0 20px rgba(255, 40, 118, 0.45),
+    inset 0 0 10px rgba(255, 140, 200, 0.35),
+    inset 0 1px 0 rgba(255, 232, 246, 0.38);
+  text-shadow:
+    0 0 4px rgba(255, 186, 222, 0.90),
+    0 0 10px rgba(255, 90, 160, 0.55);
+}
+#chatLog.rp .choices-toggle-btn.is-open.is-erotic:hover {
+  background: var(--choices-erotic-bg-hover);
+  border-color: rgba(255, 208, 232, 1);
+  box-shadow:
+    0 0 4px rgba(255, 236, 248, 0.95),
+    0 0 13px rgba(255, 48, 122, 0.85),
+    0 0 28px rgba(255, 40, 118, 0.55),
+    inset 0 0 12px rgba(255, 160, 210, 0.42),
+    inset 0 1px 0 rgba(255, 240, 250, 0.45);
+}
+#chatLog.rp .choices-reroll-btn:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(84, 140, 216, 0.81), rgba(44, 78, 138, 0.81));
+  border-color: rgba(185, 222, 255, 0.75);
+  color: #f2f8ff;
 }
 #chatLog.rp .choice-item-btn {
   background: rgba(30, 30, 38, 0.85);
@@ -1224,8 +1917,12 @@ footer button:disabled { opacity: .5; cursor: default; }
   cursor: pointer;
 }
 .more-item:hover { background: rgba(255, 255, 255, .08); }
-.more-item.danger { color: #ff8f8f; }
-.more-item.danger:hover { background: rgba(255, 80, 80, .14); }
+/* 危険な操作: 背景は通常が薄い赤、ホバーで濃い赤（マウスを乗せた方が強く見える） */
+.more-item.danger { color: #ffa8a8; background: rgba(255, 80, 80, .10); }
+.more-item.danger:hover { background: #7f1d1d; color: #ffe4e4; }
+/* ⋯ メニューのインラインSVGアイコン（Material Symbols の arrow_split。絵文字と行の高さを揃える） */
+.more-ico { display: inline-flex; align-items: center; justify-content: center; width: 18px; margin-right: 4px; vertical-align: -3px; }
+.more-ico svg { width: 17px; height: 17px; display: block; fill: currentColor; }
 .more-sep { border: none; border-top: 1px solid #3a3a44; margin: 4px 2px; }
 
 /* 狭い画面: 画面下から出すシート */
@@ -1384,7 +2081,7 @@ footer button:disabled { opacity: .5; cursor: default; }
 
   /* チップのぶん本文を下げる／浮いている操作ボタンのぶん下に余白を空ける
      （既存の #chatLog ルールより後ろに置くこと）
-     「操作を表示」の上端は footer-h+約32px。44px で 12px の隙間を空ける */
+     「ツール」の上端は footer-h+約32px。44px で 12px の隙間を空ける */
   #chatLog {
     padding-top: max(56px, calc(env(safe-area-inset-top) + 50px));
     padding-bottom: 44px;
@@ -1399,6 +2096,11 @@ footer button:disabled { opacity: .5; cursor: default; }
   #sideBottomSection .side-action-btn {
     font-size: 11px; padding: 7px 0;
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 320px 級の端末はドロワー(243px)と FAB が重ならないので、下段の右余白を詰めて
+     「🖼️ 背景表示」が省略されないようにする */
+  @media (max-width: 340px) {
+    #sideBottomSection { padding-right: 12px; }
   }
   /* 背景表示オンのときは、操作の表示にある 🖼️ タイルと同じ緑に合わせる
      （button.sub の灰色を上書きするため id + .on で指定） */
@@ -1415,50 +2117,62 @@ footer button:disabled { opacity: .5; cursor: default; }
   .foot-bar-slot .foot-bar.hidden { display: none !important; }
   .foot-bar-slot:empty, .foot-bar-slot:has(.foot-bar.hidden) { display: none !important; margin-top: 0; }
 
-  /* 背景表示バーの外側をタップしたら閉じる（透明でタップだけ拾う。バーとトグルは z64 で上） */
+  /* 背景表示バーの外側をタップしたら閉じる。
+     開いている間は画面全体を薄いグレーで覆い、7つの操作だけを浮かせる。
+     ↑↓ は z62 でスクリムの下、4ボタンと「✕ 閉じる」は z64 で上。 */
   #revealBackdrop {
     display: block; position: fixed; inset: 0; z-index: 63;
-    background: transparent;
+    background: rgba(8, 10, 16, .52);
     touch-action: manipulation;
   }
   #revealBackdrop.hidden { display: none !important; }
 
-  /* 前/次 + 「操作を表示」の3点クラスタ。
+  /* 前/次 + 「ツール」の3点クラスタ。
      フッターは厚くせず、FABと同じ44px帯に収める。
      上の #mobileTurnCluster/#mobileActionToggle の display:none に勝つため id で指定する */
   #mobileTurnCluster {
     display: flex;
     align-items: center;
-    gap: 4px;
+    justify-content: center;
+    /* 中央の「✕ 閉じる」は別要素。その幅＋左右4px分を空けて↑↓を配置する */
+    gap: 82px;
     position: fixed;
-    left: calc(50% - 8px);
-    transform: translateX(-50%);
+    left: 0;
+    right: 0;
     bottom: calc(var(--footer-h, 56px) + 2px);
-    z-index: 64;
+    z-index: 62;                          /* スクリム(z63)の下 */
     pointer-events: none;                 /* 隙間がチャット面タップを奪わないように */
   }
-  #mobileTurnCluster button {
+  #mobileTurnCluster button,
+  #mobileActionToggle {
     position: relative;       /* 見た目より縦に広いタップ判定を重ねる */
     pointer-events: auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 24px;
+    height: 30px;
     border: 1px solid rgba(255, 255, 255, .18);
-    border-radius: 10px;
+    border-radius: 12px;
     background: rgba(38, 40, 56, .62);
     color: #e6e6e6;
     box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     opacity: .72;
-    font-size: 10px;
+    font-size: 10.5px;
     line-height: 1;
     white-space: nowrap;
     touch-action: manipulation; user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
     transition: opacity .2s ease, transform .2s ease, background .2s ease, border-color .2s ease;
   }
+  /* タップ時の四角いフォーカス枠を出さない（キーボード操作の枠は残す） */
+  #mobileTurnCluster button:focus:not(:focus-visible),
+  #mobileActionToggle:focus:not(:focus-visible),
+  .choices-container button:focus:not(:focus-visible),
+  .btn-more:focus:not(:focus-visible) { outline: none; }
   /* 見た目は小さいが、縦の当たり判定は40px残す */
-  #mobileTurnCluster button::before {
+  #mobileTurnCluster button::before,
+  #mobileActionToggle::before {
     content: "";
     position: absolute;
     left: 0; right: 0;
@@ -1467,28 +2181,83 @@ footer button:disabled { opacity: .5; cursor: default; }
     transform: translateY(-50%);
   }
   #mobileTurnCluster .mobile-turn-btn {
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
+    z-index: 62;              /* スクリム(z63)の下。開いている間は押せない */
   }
   #mobileActionToggle {
     display: flex;
-    width: 66px;
-    height: 24px;
-    padding: 0 5px;
-    font-size: 10px;
+    position: fixed;
+    left: calc(50% - 37px);    /* width 74px の中央。transformは押下アニメ用に空ける */
+    bottom: calc(var(--footer-h, 56px) + 2px);
+    width: 74px;
+    height: 30px;
+    padding: 0 6px;
+    border-radius: 12px;
+    font-size: 10.5px;
+    z-index: 64;              /* 「✕ 閉じる」はスクリムの上 */
   }
-  #mobileTurnCluster button:hover {
-    background: rgba(59, 91, 219, .85);   /* アプリ共通の青（メッセージツールバーと同じ） */
+  /* タッチ端末では :hover がタップ後に残り、青いままになる。
+     モバイルではホバー色を付けず、:active の押下感だけ残す。 */
+  #mobileTurnCluster button:hover,
+  #mobileActionToggle:hover {
+    background: rgba(38, 40, 56, .62);
+    border-color: rgba(255, 255, 255, .18);
+    color: #e6e6e6;
+    opacity: .72;
+  }
+  /* 押している間だけ青くする。丸ボタンの border-radius で円形に塗られる */
+  #mobileTurnCluster .mobile-turn-btn:active,
+  #mobileTurnCluster .mobile-turn-btn.tap-flash {
+    transform: scale(.92);
+    opacity: 1;
+    background: rgba(59, 91, 219, .9);
+    border-color: #5c7cfa;
+    color: #fff;
+  }
+  /* 速いタップでも見えるよう、JS が 220ms だけ付けるクラス。
+     押下中だけの :active と違い、指を離した直後も少し残る。 */
+  #mobileTurnCluster .mobile-turn-btn.tap-flash { transition: none; }
+  /* 「ツール / 閉じる」「選択肢」も同じ青フラッシュ。
+     ホバー/選択状態の色に負けないよう、一瞬だけ !important で上書きする。 */
+  #mobileActionToggle.tap-flash,
+  .choices-toggle-btn.tap-flash,
+  .choices-switch.tap-flash,
+  .choice-item-btn.tap-flash,
+  .btn-img-refine.tap-flash,
+  .btn-prompt.tap-flash,
+  .btn-more.tap-flash {
+    background: rgba(59, 91, 219, .9) !important;
+    border-color: #5c7cfa !important;
+    color: #fff !important;
+    opacity: 1 !important;
+    transition: none !important;
+  }
+  #mobileActionToggle.tap-flash { transform: scale(.96); }
+  /* 「ツール」メニュー（4つのボタン）を開いている間は「閉じる」を青く点灯 */
+  #mobileActionToggle.on {
+    background: rgba(59, 91, 219, .9);
     border-color: #5c7cfa;
     color: #fff;
     opacity: 1;
   }
-  #mobileTurnCluster .mobile-turn-btn:active { transform: scale(.92); opacity: .9; }
+  /* 入力中は中央の「ツール」が青い「送信」に入れ替わる。
+     下中央は左右どちらの親指でも届くので、左手持ちでも送信できる。
+     入力を止めれば（キーボードを閉じれば）また「ツール」に戻る。 */
+  #mobileActionToggle.send-mode {
+    background-color: #3b5bdb;
+    border-color: #5c7cfa;
+    color: #fff;
+    font-weight: 700;
+    letter-spacing: .06em;
+    opacity: 1;
+    box-shadow: 0 3px 14px rgba(59, 91, 219, .5);
+  }
   #mobileActionToggle:active { transform: scale(.96); opacity: .9; }
-  /* 入力中はナビだけを抜き、中央の「操作を表示」は今まで通り残す。
+  /* 入力中はナビだけを抜き、中央の「ツール」は今まで通り残す。
      ボタンの場所は確保するので、中央がずれない。 */
   #mobileTurnCluster.nav-off .mobile-turn-btn {
     opacity: 0;
@@ -1496,24 +2265,34 @@ footer button:disabled { opacity: .5; cursor: default; }
     transform: scale(.7);
   }
 
+  /* 3列固定のグリッド（今は 3+2、増えたら 3+3 / 3+3+2 と自動で増える）。
+     列数を決め打ちにして、端末幅で 4+1 のように崩れないようにする。
+     幅は「3列分」で固定し、最終行の余りは justify-content で中央に揃える。
+     タイル幅は列数から計算するので、丸め誤差で 2+3 に崩れることもない。
+     （1列の広さを変えるときは --reveal-panel-w を 84px×3 + gap×2 で決める） */
   #mobileReveal {
-    display: flex; gap: 8px; align-items: stretch; justify-content: center;
+    --reveal-gap: 8px;
+    display: flex; flex-wrap: wrap; align-items: stretch; justify-content: center;
+    gap: var(--reveal-gap);
+    width: min(268px, calc(100vw - 12px));   /* 84px × 3 + 8px × 2 */
     position: fixed; left: 50%; transform: translateX(-50%);
-    /* 「操作を表示」クラスタ（bottom: footer-h+2 / 44px）の真上に出す。
+    /* 「ツール」クラスタ（bottom: footer-h+2 / 44px）の真上に出す。
        両方同時に見えるので押して閉じられる */
     bottom: calc(var(--footer-h, 56px) + 54px); z-index: 64;
     pointer-events: none;               /* gap がチャット面タップを奪わないように */
   }
-  /* アイコンだけでは何のボタンか分からないので、大きめのタイルにアイコン＋文字を重ねる */
+  /* アイコンだけでは何のボタンか分からないので、大きめのタイルにアイコン＋文字を重ねる。
+     幅は 3列分を均等に割る（列数を変えるときは flex-basis の 3 を直す） */
   #mobileReveal button {
     pointer-events: auto;
-    min-width: 58px; min-height: 58px; padding: 7px 9px;
+    flex: 0 0 calc((100% - var(--reveal-gap) * 2) / 3);
+    min-width: 0; min-height: 58px; padding: 7px 6px;
     display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
     border-radius: 15px;
     background: rgba(38, 40, 56, .9); color: #f0f0f5;
     border: 1px solid rgba(255, 255, 255, .22);
     box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
-    opacity: 1;                        /* 透明にしない（「操作を表示」だけ薄く残す） */
+    opacity: 1;                        /* 透明にしない（「ツール」だけ薄く残す） */
     white-space: nowrap;
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     touch-action: manipulation; user-select: none; -webkit-user-select: none;
@@ -1536,6 +2315,8 @@ footer button:disabled { opacity: .5; cursor: default; }
   body.typing-input .mobile-reveal,
   body.side-open #mobileTurnCluster,
   body.side-open .mobile-reveal { display: none !important; }
+  /* 7つ以外（FABなど）もスクリムの下に置く。FABはタップでスクリムを閉じる */
+  body:has(#revealBackdrop:not(.hidden)) .mobile-fab { z-index: 62; }
 
   /* 小さなモーダルを 92dvh の全画面シートにしない */
   #elapsedModal .modal-content.compact,
@@ -1553,7 +2334,280 @@ footer button:disabled { opacity: .5; cursor: default; }
 
 /* 320px 前後の端末でも FAB とぶつけないように、少しだけ縮める */
 @media (max-width: 330px) {
-  #mobileTurnCluster { left: calc(50% - 4px); gap: 3px; }
-  #mobileTurnCluster .mobile-turn-btn { width: 26px; height: 26px; font-size: 13px; }
-  #mobileActionToggle { width: 62px; height: 22px; padding: 0 4px; font-size: 9.5px; }
+  #mobileTurnCluster { gap: 76px; }
+  #mobileTurnCluster .mobile-turn-btn { width: 30px; height: 30px; font-size: 14px; }
+  #mobileActionToggle { left: calc(50% - 34px); width: 68px; height: 27px; padding: 0 5px; font-size: 10px; }
+}
+
+/* タッチ端末では :hover がタップ後に残るため、選択肢系は通常色へ戻す。
+   .is-open / .is-selected は状態表示なので残す。 */
+@media (hover: none), (pointer: coarse) {
+  .choice-item-btn:hover:not(.is-selected) {
+    background: rgba(255, 255, 255, .05);
+    border-color: rgba(255, 255, 255, .12);
+  }
+  #chatLog.rp .choice-item-btn:hover:not(.is-selected) {
+    background: rgba(30, 30, 38, .85);
+    border-color: rgba(255, 255, 255, .2);
+  }
+  .choices-toggle-btn:hover:not(.is-open):not(.is-erotic) {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #ccc;
+  }
+  #chatLog.rp .choices-toggle-btn:hover:not(.is-open):not(.is-erotic) {
+    background: rgba(30, 30, 38, 0.85);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: #ccc;
+  }
+  /* 画像・タグ・⋯ もタップ後にホバー青が残らないようにする */
+  .choices-container .btn-img-refine:hover:not(:disabled),
+  .choices-container .btn-prompt:hover,
+  .choices-container .btn-edit-resend:hover {
+    background: rgba(255, 255, 255, .06);
+    border-color: rgba(255, 255, 255, .15);
+    color: #ccc;
+  }
+  #chatLog.rp .choices-container .btn-img-refine:hover:not(:disabled),
+  #chatLog.rp .choices-container .btn-prompt:hover,
+  #chatLog.rp .choices-container .btn-edit-resend:hover {
+    background: rgba(30, 30, 38, .85);
+    border-color: rgba(255, 255, 255, .2);
+    color: #ddd;
+  }
+  .btn-more:hover:not([aria-expanded="true"]) {
+    background: rgba(255, 255, 255, .06);
+    border-color: rgba(255, 255, 255, .15);
+    color: #ccc;
+  }
+  #chatLog.rp .btn-more:hover:not([aria-expanded="true"]) {
+    background: rgba(30, 30, 38, .85);
+    border-color: rgba(255, 255, 255, .2);
+    color: #ddd;
+  }
+}
+
+/* 婉曲表現を戻したことを知らせる行と「戻す」 */
+.choices-notice.is-ok { color: #8fd6a0; }
+.choices-undo-btn {
+  margin-left: 8px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.choices-undo-btn:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.msg-notice {
+  margin-top: 4px;
+  padding-left: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #8fd6a0;
+  align-self: stretch;   /* 縦flexなので flex-basis ではなくこちら */
+}
+
+/* RPモードで背景画像があるときも読みやすいよう黒縁取りを付与（候補通知と共通化） */
+#chatLog.rp :is(.msg-notice, .choices-notice) {
+  text-shadow: var(--rp-outline);
+}
+
+
+/* ==========================================================================
+   長期記憶（RAG）5段階優先度バッジ＆ピルセレクター
+   ========================================================================== */
+.mem-priority-select,
+.rag-entry-priority-select {
+  appearance: none;
+  -webkit-appearance: none;
+  font-size: 10px !important;
+  font-weight: 600;
+  padding: 1px 4px !important;
+  border-radius: 4px;
+  border: 1px solid #444450;
+  background: #2a2a32;
+  color: #e0e0e0;
+  cursor: pointer;
+  line-height: 1.4 !important;
+  height: 22px;
+  letter-spacing: -0.3px;
+  transition: all 0.15s ease;
+  text-align: center;
+  white-space: nowrap;
+}
+.mem-priority-select:hover,
+.rag-entry-priority-select:hover {
+  background: #383844;
+  border-color: #6889f5;
+  color: #fff;
+}
+/* OSネイティブプルダウン展開時の白飛び・文字化け防止 */
+.mem-priority-select option,
+.rag-entry-priority-select option {
+  background-color: #1a1a1e;
+  color: #e6e6e6;
+  font-weight: 500;
+}
+
+/* 5段階カラーテーマ（固定/最優先/優先/標準/抑制） */
+.rag-entry-priority-select.is-pinned,
+.rag-entry-priority-select.mem-prio-pinned,
+.mem-prio-pinned {
+  background: #451a03;
+  color: #fbbf24;
+  border-color: #d97706;
+}
+.rag-entry-priority-select.is-pinned:hover,
+.rag-entry-priority-select.mem-prio-pinned:hover {
+  background: #5c2406;
+  border-color: #f59e0b;
+}
+.rag-entry-priority-select.mem-prio-highest,
+.mem-prio-highest {
+  background: rgba(249, 115, 22, 0.22);
+  color: #fb923c;
+  border-color: rgba(249, 115, 22, 0.55);
+}
+.rag-entry-priority-select.mem-prio-highest:hover {
+  background: rgba(249, 115, 22, 0.35);
+  border-color: #fb923c;
+}
+.rag-entry-priority-select.mem-prio-high,
+.mem-prio-high {
+  background: rgba(234, 179, 8, 0.20);
+  color: #facc15;
+  border-color: rgba(234, 179, 8, 0.50);
+}
+.rag-entry-priority-select.mem-prio-high:hover {
+  background: rgba(234, 179, 8, 0.32);
+  border-color: #facc15;
+}
+.rag-entry-priority-select.mem-prio-default,
+.mem-prio-default {
+  background: #2a2a32;
+  color: #d4d4d8;
+  border-color: #444450;
+}
+.rag-entry-priority-select.mem-prio-default:hover {
+  background: #383844;
+  color: #fff;
+  border-color: #6889f5;
+}
+.rag-entry-priority-select.mem-prio-low,
+.mem-prio-low {
+  background: rgba(100, 116, 139, 0.22);
+  color: #94a3b8;
+  border-color: rgba(100, 116, 139, 0.45);
+}
+.rag-entry-priority-select.mem-prio-low:hover {
+  background: rgba(100, 116, 139, 0.35);
+  border-color: #cbd5e1;
+}
+
+/* 編集モーダル内ピルセレクター */
+.mem-priority-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.mem-prio-pill {
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  user-select: none;
+}
+.mem-prio-pill.active {
+  font-weight: 700;
+  box-shadow: 0 0 0 1.5px currentColor;
+}
+.mem-prio-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 4px;
+}
+
+/* #textMeta がクリック可能なときのボタン風装飾 */
+.modal-meta.is-clickable {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: #222228;
+  border: 1px solid #3c3c46;
+  color: #cfd8f5;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.modal-meta.is-clickable:hover {
+  background: #2e2e38;
+  border-color: #6889f5;
+  color: #fff;
+}
+
+/* 索引記憶ランキングモーダル（#textModal の z-index: 60 より前面に表示） */
+#ragHitsModal {
+  z-index: 70;
+}
+.rag-hits-modal-content {
+  position: relative;
+  max-width: 580px;
+  max-height: 82vh;
+  max-height: 82dvh;
+  display: flex;
+  flex-direction: column;
+  padding-top: 14px;
+}
+.rag-hits-close-btn {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+}
+.rag-hits-entries {
+  max-height: none;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  gap: 12px;
+}
+.rag-hits-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rag-hits-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #9ca3af;
+  border-bottom: 1px solid #383842;
+  padding-bottom: 4px;
+  margin-right: 36px; /* 右上の ✕ ボタンと重ならない余白 */
+}
+.rag-hits-score {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e2e8f0;
+  background: #18181c;
+  border: 1px solid #383842;
+  padding: 1px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
 }

@@ -120,20 +120,25 @@ console.log("\n[1] ⋯ メニューの中身（状態ごとの項目）");
   reset();
   const a = T.build(asst, false, mkState(msgs));
   ok(JSON.stringify(labelsOf(a)) === JSON.stringify(
-    ["🔍 拡大", "—", "本文を編集", "—", "再生成", "分岐", "コピー", "—", "巻き戻し", "削除"]),
+    ["🔍 拡大", "—", "📝 本文を編集", "—", "🔄 再生成", "分岐", "📋 コピー", "—", "⏪ 巻き戻し", "🗑️ 削除"]),
     "A: 画像done+前ユーザー発言+isLast=false", labelsOf(a));
 
   reset();
   const b = T.build(mkMsg(), true, mkState([asst], { setting: { rp_state: true } }));
   ok(JSON.stringify(labelsOf(b)) === JSON.stringify(
-    ["本文を編集", "キャラの状態", "—", "分岐", "コピー", "—", "削除"]),
+    ["📝 本文を編集", "🧑 キャラの状態", "—", "分岐", "📋 コピー", "—", "🗑️ 削除"]),
     "B: 画像なし+rp_state有効+前ユーザー発言なし+isLast=true", labelsOf(b));
 
   reset();
   const c = T.build(user, true, mkState([user, asst]));
   ok(JSON.stringify(labelsOf(c)) === JSON.stringify(
-    ["✏️ 編集して再送", "—", "分岐", "コピー", "—", "削除"]),
+    ["✏️ 編集して再送", "—", "分岐", "📋 コピー", "—", "🗑️ 削除"]),
     "C: ユーザー発言（状態/再生成は出さない）", labelsOf(c));
+
+  // 分岐は絵文字だと 🔀（シャッフル）に見えるので、線画のSVGアイコンを前に付ける
+  const branchBtn = c.children.find((x) => x.textContent === "分岐");
+  ok(!!branchBtn && branchBtn.children.some((x) => x.classList.contains("more-ico")),
+    "C: 分岐の頭に SVG アイコン（.more-ico）が付く", branchBtn && branchBtn.children.map((x) => x.className));
 
   reset();
   const gen = mkMsg({ image: { status: "queued", file: "" } });
@@ -148,7 +153,7 @@ console.log("\n[1] ⋯ メニューの中身（状態ごとの項目）");
   reset();
   const st = mkMsg({ state: [{ name: "A" }] });
   const f = T.build(st, true, mkState([user, st]));
-  ok(labelsOf(f).includes("キャラの状態"), "F: m.state があれば キャラの状態 を出す", labelsOf(f));
+  ok(labelsOf(f).includes("🧑 キャラの状態"), "F: m.state があれば キャラの状態 を出す", labelsOf(f));
 }
 
 console.log("\n[2] PC 幅ではポップオーバー、狭い幅ではシート");
@@ -268,11 +273,11 @@ console.log("\n[5] メニュー項目のクリックで操作が走り、閉じ�
   sandbox.innerWidth = 1200;
   reset();
   calls.length = 0;
-  T.build(asst, true, st).children.find((c) => c.textContent === "本文を編集").onclick();
+  T.build(asst, true, st).children.find((c) => c.textContent === "📝 本文を編集").onclick();
   ok(calls.some((c) => c[0] === "openEdit"), "「本文を編集」で openEdit を呼ぶ", calls.map((c) => c[0]));
 
   calls.length = 0;
-  T.build(asst, true, st).children.find((c) => c.textContent === "コピー").onclick();
+  T.build(asst, true, st).children.find((c) => c.textContent === "📋 コピー").onclick();
   ok(calls.length === 0, "「コピー」は外部関数を呼ばない（clipboard のみ）");
 }
 

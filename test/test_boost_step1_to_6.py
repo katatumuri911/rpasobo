@@ -456,11 +456,11 @@ class TestBoostStep1To6(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(fetched_count[0], 1)
 
-            # Step 2 -> must invalidate and re-fetch config
+            # Step 2 -> cid単位キャッシュのため再取得せずキャッシュヒットを維持（毎ターンのローカルRPC削減）
             ide_poke.locate = lambda c: (9999, "tok", {"summary": "test", "status": "CASCADE_RUN_STATUS_IDLE", "lastUserInputStepIndex": 2})
             ok, msg, retry = ide_poke.send_to_conversation(cid)
             self.assertTrue(ok)
-            self.assertEqual(fetched_count[0], 2)
+            self.assertEqual(fetched_count[0], 1)
         finally:
             ide_poke._user_config = orig_user_config
             ide_poke._cached_config = orig_cached_config
