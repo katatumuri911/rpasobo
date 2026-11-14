@@ -233,13 +233,14 @@ class TestGeminiThinkingApiAndKeep(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.orig_data = server.DATA
+        self.orig_sess = server.SESS_DIR
         server.DATA = self.tmp
-        server.SESSIONS_DIR = os.path.join(self.tmp, "sessions")
-        os.makedirs(server.SESSIONS_DIR, exist_ok=True)
+        server.SESS_DIR = os.path.join(self.tmp, "sessions")
+        os.makedirs(server.SESS_DIR, exist_ok=True)
 
     def tearDown(self):
         server.DATA = self.orig_data
-        server.SESSIONS_DIR = os.path.join(self.orig_data, "sessions")
+        server.SESS_DIR = self.orig_sess
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_merge_defaults_thinking_levels(self):

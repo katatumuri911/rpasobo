@@ -230,7 +230,7 @@ def _language_servers(ttl=2.0):
             "  if (-not $ports.ContainsKey($p)) { $ports[$p] = @() }; "
             "  $ports[$p] += [int]$_.LocalPort "
             "}; "
-            "Get-CimInstance Win32_Process -Filter \"Name like 'language_server%'\" | ForEach-Object { "
+            "Get-CimInstance Win32_Process -Filter \"Name like 'language_server%' or Name like 'agy%'\" | ForEach-Object { "
             "  $id = [int]$_.ProcessId; "
             "  [pscustomobject]@{cmd=$_.CommandLine; ports=($ports[$id] | Where-Object { $_ -ne $null })} "
             "} | ConvertTo-Json -Compress -Depth 3"
@@ -1101,9 +1101,9 @@ def _pb_build(fields):
 
 def _app_procs():
     """Antigravity（IDE でないほう）のプロセスと、hub の言語サーバー。([(pid, 親pid, exe)], hub の言語サーバーの数)"""
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='Antigravity.exe' or Name like 'language_server%'\" | ForEach-Object {"
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='Antigravity.exe' or Name like 'language_server%' or Name like 'agy%'\" | ForEach-Object {"
           " [pscustomobject]@{pid=$_.ProcessId; ppid=$_.ParentProcessId; name=$_.Name; exe=$_.ExecutablePath;"
-          " hub=($_.CommandLine -like '*subclient_type hub*')} } | ConvertTo-Json")
+          " hub=($_.CommandLine -like '*subclient_type hub*' -or $_.CommandLine -like '*--hub*')} } | ConvertTo-Json")
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
                              timeout=30, creationflags=0x08000000).stdout
@@ -1112,7 +1112,7 @@ def _app_procs():
         rows = []
     rows = rows if isinstance(rows, list) else [rows]
     app = [(r["pid"], r["ppid"], r.get("exe") or "") for r in rows if (r.get("name") or "").lower() == "antigravity.exe"]
-    return app, sum(1 for r in rows if (r.get("name") or "").lower().startswith("language_server") and r.get("hub"))
+    return app, sum(1 for r in rows if (r.get("name") or "").lower().startswith(("language_server", "agy")) and r.get("hub"))
 
 
 def _rewrite_workspace(cid, folder, project, backup):

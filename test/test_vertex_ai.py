@@ -28,8 +28,13 @@ class TestVertexAI(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.orig_data = google_ai.DATA
         self.orig_env = google_ai.ENV_FILE
+        self.orig_srv_data = server.DATA
+        self.orig_srv_sess = server.SESS_DIR
         google_ai.DATA = self.tmp.name
         google_ai.ENV_FILE = os.path.join(self.tmp.name, ".env")
+        server.DATA = self.tmp.name
+        server.SESS_DIR = os.path.join(self.tmp.name, "sessions")
+        os.makedirs(server.SESS_DIR, exist_ok=True)
         os.environ["RPCHAT_GEMINI_TRANSPORT"] = "rest"
         for k in ("VERTEX_PROJECT_ID", "VERTEX_LOCATION", "VERTEX_SA_JSON_PATH"):
             os.environ.pop(k, None)
@@ -39,6 +44,8 @@ class TestVertexAI(unittest.TestCase):
     def tearDown(self):
         google_ai.DATA = self.orig_data
         google_ai.ENV_FILE = self.orig_env
+        server.DATA = self.orig_srv_data
+        server.SESS_DIR = self.orig_srv_sess
         for k in ("RPCHAT_GEMINI_TRANSPORT", "VERTEX_PROJECT_ID",
                   "VERTEX_LOCATION", "VERTEX_SA_JSON_PATH"):
             os.environ.pop(k, None)

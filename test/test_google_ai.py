@@ -24,6 +24,24 @@ class TestGoogleAIModule(unittest.TestCase):
         os.environ.pop("GEMINI_API_KEY", None)
         os.environ.pop("GOOGLE_API_KEY", None)
 
+        self.orig_srv_dirs = {
+            "DATA": server.DATA,
+            "SESS_DIR": server.SESS_DIR,
+            "OUTBOX": server.OUTBOX,
+            "DONE": server.DONE,
+            "TRASH": server.TRASH,
+        }
+
+        test_data = os.path.join(self.tmp, "data")
+        server.DATA = test_data
+        server.SESS_DIR = os.path.join(test_data, "sessions")
+        server.OUTBOX = os.path.join(self.tmp, "outbox")
+        server.DONE = os.path.join(server.OUTBOX, "done")
+        server.TRASH = os.path.join(test_data, "trash")
+
+        for d in (test_data, server.SESS_DIR, server.OUTBOX, server.DONE, server.TRASH):
+            os.makedirs(d, exist_ok=True)
+
         google_ai.DATA = self.tmp
         google_ai.ENV_FILE = os.path.join(self.tmp, ".env")
         google_ai.KEY_FILE = google_ai.ENV_FILE
@@ -33,6 +51,8 @@ class TestGoogleAIModule(unittest.TestCase):
         google_ai.DATA = self.orig_data
         google_ai.ENV_FILE = self.orig_env_file
         google_ai.KEY_FILE = self.orig_key_file
+        for k, v in self.orig_srv_dirs.items():
+            setattr(server, k, v)
         if self.orig_gemini_key is not None:
             os.environ["GEMINI_API_KEY"] = self.orig_gemini_key
         else:

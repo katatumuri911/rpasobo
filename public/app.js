@@ -34,6 +34,11 @@ let lastScrollTime = 0;
 // 前/次ボタンで移動した直後は、下端付近でも自動で最下段へ戻さない。
 // ユーザーが自分で最下段まで戻るか、送信したら解除する。
 let navHoldBottom = false;
+// 「今も最下段を読んでいる」かどうか。スマホでキーボードや URL バーが引っ込むと
+// #chatLog の見える高さだけが増え、scrollTop はそのままだと最下段から離れてしまう。
+// そのままでは「返信が届いたら本文を上端にそろえる」判定（下端付近か）が外れるので、
+// 見える高さが変わったら最下段を読み続けている間は最下段へ戻す。
+let pinnedBottom = true;
 let lastAutoScrolledAsstId = "";            // スマホで本文表示時に上端合わせした最新AI応答のID
 const _initParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 let sid = (_initParams && _initParams.get("sid")) || getStorage("sid") || "";
@@ -247,6 +252,21 @@ function syncViewportVars() {
   // キーボードが出た瞬間に、フォーカス中の入力欄が画面の外に残らないように寄せる
   if (kbOpen && !kbWasOpen) rafOnce(keepFocusedVisible);
   kbWasOpen = kbOpen;
+  // キーボードを閉じた／URL バーが引っ込んだ等で見える高さが増えたとき、
+  // 最下段を読んでいたなら最下段のままにする（自動追従を切らさない）。
+  // 返信到着時の「本文を上端にそろえる」も、この状態を前提に判定している。
+  keepBottomAfterResize();
+}
+function keepBottomAfterResize() {
+  if (!pinnedBottom || navHoldBottom) return;
+  if (!log || !log.scrollHeight || log.scrollHeight <= log.clientHeight + 2) return;
+  rafOnce(() => {
+    // レイアウト確定後にもう一度確かめる（ユーザーが読み返していたら触らない）
+    if (!pinnedBottom || navHoldBottom) return;
+    const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
+    if (gap <= 2) return;
+    log.scrollTop = log.scrollHeight;
+  });
 }
 // キーボードで縮んだあと、フォーカス中の入力欄（記憶の内容など）を必ず見える位置へ
 function keepFocusedVisible() {
@@ -651,6 +671,7 @@ async function switchTo(id) {
   setStorage("sid", sid);
   lastRev = -1;
   navHoldBottom = false;
+  pinnedBottom = true;
   lastAutoScrolledAsstId = "";
   state = null;
   rpBgFile = undefined;
@@ -972,6 +993,7 @@ function jumpToAssistantReply(dir) {
   // 返信の外側（画像・タグ・開いた選択肢など）を含む本当の端まで移動する。
   const jumpToEdge = (toBottom) => {
     navHoldBottom = false;
+    pinnedBottom = !!toBottom;
     log.scrollTop = toBottom ? maxScroll : 0;
     updateRpBg();
   };
@@ -1052,6 +1074,7 @@ function scrollAssistantToTop(el) {
   const top = topAligned <= maxScroll ? topAligned : Math.min(centerAligned, maxScroll);
   // 移動した直後に render が「下端付近だから」と最下段へ引き戻すのを防ぐ。
   navHoldBottom = true;
+  pinnedBottom = false;   // 本文の先頭を読む位置なので最下段ではない
   log.scrollTop = Math.min(Math.max(0, top), maxScroll);
   // 移動先が最下段そのものなら、自動追従は解除したままにする。
   if (log.scrollHeight - log.scrollTop - log.clientHeight <= 2) navHoldBottom = false;
@@ -1730,26 +1753,14 @@ function renderModels() {
   const left = (r) => (typeof r.left !== "number" ? ""
     : r.left > 0 ? `（残り${Math.max(1, Math.round(r.left * 100))}%）` : `（使い切り${reset(r)}）`);
 
-  const splitModelLabel = (label) => {
-    const m = String(label || "").match(/^(.*?)\s*(\(.*?\))\s*$/);
-    return { name: m ? m[1] : (label || ""), sub: m ? m[2] : "" };
-  };
-
   const agOpts = [`<option value="ag:">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
-    .concat(rows.map((r) => {
-      const parts = splitModelLabel(r.label);
-      return `<option value="ag:${esc(r.model)}">${esc(parts.name || r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`;
-    }));
+    .concat(rows.map((r) => `<option value="ag:${esc(r.model)}">${esc(r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
   const agCardOpts = [`<option value="">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
-    .concat(rows.map((r) => {
-      const parts = splitModelLabel(r.label);
-      return `<option value="${esc(r.model)}">${esc(parts.name || r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`;
-    }));
+    .concat(rows.map((r) => `<option value="${esc(r.model)}">${esc(r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
   const currentAg = state?.setting?.ide_model || "";
   if (isAg && currentAg && !rows.some((r) => r.model === currentAg)) {
-    const curParts = splitModelLabel(currentAg);
-    agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(curParts.name || currentAg)}（いまは選べない）</option>`);
-    agCardOpts.push(`<option value="${esc(currentAg)}">${esc(curParts.name || currentAg)}（いまは選べない）</option>`);
+    agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(currentAg)}（いまは選べない）</option>`);
+    agCardOpts.push(`<option value="${esc(currentAg)}">${esc(currentAg)}（いまは選べない）</option>`);
   }
 
   const googleOpts = [];
@@ -4001,7 +4012,7 @@ function render() {
     }
   }
 
-  if (!didAutoScroll && nearBottom) log.scrollTop = log.scrollHeight;
+  if (!didAutoScroll && nearBottom) { log.scrollTop = log.scrollHeight; pinnedBottom = true; }
   updateRpBg();
   renderIde();
 }
@@ -4039,6 +4050,8 @@ log.addEventListener("scroll", () => {
     const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
     if (gap <= 2) navHoldBottom = false;
   }
+  // 最下段から離れた（＝ユーザーが読み返している）ら、勝手に最下段へ戻さない。
+  if (log.scrollHeight - log.scrollTop - log.clientHeight > 2) pinnedBottom = false;
   if (!rpMode || rpTick) return;
   const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
   rpTick = raf(() => { rpTick = 0; updateRpBg(); }, 0);
@@ -4086,6 +4099,7 @@ async function poll() {
       if (first) {
         navHoldBottom = false;
         log.scrollTop = log.scrollHeight;
+        pinnedBottom = true;
         lastAutoScrolledAsstId = renderLastAsstId || "";
       }
       fillForm(s.setting, first || !formDirty); formSid = s.id;
@@ -4127,7 +4141,7 @@ async function pollProgress() {
     if (box && box.innerHTML !== progressHtml) {
       const nearBottom = !navHoldBottom && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
       box.innerHTML = progressHtml;
-      if (nearBottom) log.scrollTop = log.scrollHeight;
+      if (nearBottom) { log.scrollTop = log.scrollHeight; pinnedBottom = true; }
     }
   } catch { /* 読めないときは前の表示のまま */ }
   finally { progressBusy = false; }
@@ -4197,6 +4211,7 @@ async function send() {
     navHoldBottom = false;
     lastAutoScrolledAsstId = "";
     log.scrollTop = log.scrollHeight;
+    pinnedBottom = true;
   } catch (e) {
     // 通信が切れたときもボタンが「送信中」のまま固まらないようにする
     alert("送信に失敗しました: " + (e.message || e) + "\n画面を更新して、送れたか確認してください。");

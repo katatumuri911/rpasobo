@@ -62,9 +62,23 @@ def main(argv):
     result = runner.run(suite)
     elapsed = time.time() - started
 
+    # テスト後に本番 data/ にテスト用ゴミファイルが残留していないか検知・自動クリーンアップ
+    cleanup_msg = ""
+    try:
+        from tools import cleanup_test_data
+        real, garbage, related, orphans, trash = cleanup_test_data.find_garbage(include_trash=False)
+        targets = sorted(list(set(related + orphans)))
+        if targets:
+            del_files, _ = cleanup_test_data.perform_cleanup(targets)
+            sample_names = ", ".join(os.path.basename(f) for f in del_files[:3])
+            more = f" 他 {len(del_files) - 3} 件" if len(del_files) > 3 else ""
+            cleanup_msg = f"\n[自動掃除] テストで本番環境に生成されたゴミファイル {len(del_files)} 件 ({sample_names}{more}) を自動削除しました。"
+    except Exception as e:
+        cleanup_msg = f"\n[自動掃除エラー] {e}"
+
     ok = result.wasSuccessful() and not empty
     print(f"\n結果: {'OK' if ok else 'NG'} / {elapsed:.1f} 秒 / "
-          f"{result.testsRun - len(result.skipped)} 実行 / スキップ {len(result.skipped)} 件")
+          f"{result.testsRun - len(result.skipped)} 実行 / スキップ {len(result.skipped)} 件{cleanup_msg}")
     if not slow:
         print("ヒント: 実データを走査する低速テストは RPCHAT_SLOW_TESTS=1 で実行します")
     return 0 if ok else 1

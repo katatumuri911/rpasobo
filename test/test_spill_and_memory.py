@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,6 +14,56 @@ import server
 
 
 class TestFinalSpillAndMemorySpec(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="test_spill_")
+        self.orig_server_dirs = {
+            "DATA": server.DATA,
+            "SESS_DIR": server.SESS_DIR,
+            "CHOICES_DIR": server.CHOICES_DIR,
+            "STATES_DIR": server.STATES_DIR,
+            "IMAGES_DIR": server.IMAGES_DIR,
+            "SENT": server.SENT,
+            "CTX": server.CTX,
+            "ARCHIVE_DIR": server.ARCHIVE_DIR,
+            "TRASH": server.TRASH,
+        }
+        self.orig_ms_dirs = {
+            "DATA": memory_store.DATA,
+            "RAG_DIR": memory_store.RAG_DIR,
+            "TRASH": memory_store.TRASH,
+        }
+
+        test_data = os.path.join(self.tmp, "data")
+        server.DATA = test_data
+        server.SESS_DIR = os.path.join(test_data, "sessions")
+        server.CHOICES_DIR = os.path.join(test_data, "choices")
+        server.STATES_DIR = os.path.join(test_data, "states")
+        server.IMAGES_DIR = os.path.join(test_data, "images")
+        server.SENT = os.path.join(test_data, "sent")
+        server.CTX = os.path.join(test_data, "ctx")
+        server.ARCHIVE_DIR = os.path.join(test_data, "archive")
+        server.TRASH = os.path.join(test_data, "trash")
+
+        for d in (
+            server.DATA, server.SESS_DIR, server.CHOICES_DIR, server.STATES_DIR,
+            server.IMAGES_DIR, server.SENT, server.CTX, server.ARCHIVE_DIR, server.TRASH
+        ):
+            os.makedirs(d, exist_ok=True)
+
+        memory_store.DATA = test_data
+        memory_store.RAG_DIR = os.path.join(test_data, "rag")
+        memory_store.TRASH = server.TRASH
+        os.makedirs(memory_store.RAG_DIR, exist_ok=True)
+        memory_store._memory_cache.clear()
+
+    def tearDown(self):
+        for k, v in self.orig_server_dirs.items():
+            setattr(server, k, v)
+        for k, v in self.orig_ms_dirs.items():
+            setattr(memory_store, k, v)
+        memory_store._memory_cache.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _make_mem(self, mid, cat, content, score=0.8, pinned=False):
         m = {

@@ -9369,6 +9369,10 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json({"error": "この環境では Antigravity のモデルを読めない（Windows のみ）"}, 400)
                 try:
                     res, why = ide_poke.models()
+                    if res is None:
+                        import importlib
+                        importlib.reload(ide_poke)
+                        res, why = ide_poke.models()
                 except Exception as e:
                     res, why = None, f"モデルの一覧を読めなかった: {e}"
                 if res is None:
