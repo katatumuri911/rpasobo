@@ -11072,7 +11072,7 @@ class H(BaseHTTPRequestHandler):
                         st["choices_ide_auto"] = False
                         s.pop("rotation", None)
                     else:
-                        if req_model:
+                        if "model" in d:
                             st["ide_model"] = req_model
                         model = st.get("ide_model") or ""
                         s.pop("rotation", None)

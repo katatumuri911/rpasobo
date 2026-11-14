@@ -21,11 +21,11 @@
   <div id="sessionList"></div>
   <input id="importFile" type="file" accept=".json,application/json" hidden>
   <div id="sideBottomSection" class="side-bottom-section">
-    <div id="sideModelContainer" class="side-model-slot"></div>
     <div class="side-ai-summary-row" id="sideAiSummaryRow">
       <span id="sideAiSummaryText" class="side-ai-summary-text">Antigravity</span>
       <button id="sideAiToolBtn" type="button" class="sub side-ai-tool-btn" title="AI・モデル・認証設定を開く">⚡</button>
     </div>
+    <div id="sideModelContainer" class="side-model-slot"></div>
     <div class="side-actions-row">
       <button id="sideRpToggle" type="button" class="sub side-action-btn" title="背景に画像を表示">🖼️ 背景表示</button>
       <button id="sideRagToggle" type="button" class="sub side-action-btn" title="記憶を管理">🧠 記憶</button>
@@ -716,6 +716,20 @@
             <span id="vertexApplyMsg" class="muted"></span>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Antigravity 本文・状況整理カード -->
+    <div id="agMainCard" class="ai-card hidden" style="margin-top:8px;">
+      <div class="ai-card-title">
+        <span>本文・状況整理（メイン生成）</span>
+        <button id="agModelsReload" type="button" class="sub" style="font-size:11px;">モデル一覧を更新</button>
+      </div>
+      <label style="margin:0;">本文モデル
+        <select id="agModel"><option value="">会話の最後の入力と同じ</option></select>
+      </label>
+      <div id="agModelSubRow" class="foot-model-sub-row" style="margin-top:6px;">
+        <div id="agModelSubInfo" class="foot-model-sub-info"></div>
       </div>
     </div>
 

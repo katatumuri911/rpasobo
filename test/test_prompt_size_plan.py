@@ -475,9 +475,20 @@ class TestPromptSizePlan(unittest.TestCase):
 
         実データの基準（tools/baseline.json）は会話が進むだけで古くなるため、
         このテストでは一時ベースライン（RPCHAT_BASELINE）を使って --save → --check を連続実行する。
+
+        低速テスト扱い: 実データの全セッションを走査するため、会話量に比例して遅くなる
+        （95セッションで約 8.8 秒）。既定ではスキップし、RPCHAT_SLOW_TESTS=1 のときだけ実行する。
+        手動で回す場合: RPCHAT_SLOW_TESTS=1 python -m unittest test.test_prompt_size_plan
         """
+        if os.environ.get("RPCHAT_SLOW_TESTS") != "1":
+            self.skipTest("低速テスト（実データ全件を走査）。RPCHAT_SLOW_TESTS=1 で実行")
+
         sent_dir = os.path.join(ROOT_DIR, "data", "sent")
         sess_dir = os.path.join(ROOT_DIR, "data", "sessions")
+        if not os.path.isdir(sess_dir) or not os.listdir(sess_dir):
+            # セッションが無いと --save がベースラインを書かず、--check が必ず失敗する
+            self.skipTest("data/sessions が空のため検証対象が無い")
+
         before_sent = {f: os.path.getmtime(os.path.join(sent_dir, f)) for f in os.listdir(sent_dir)} if os.path.exists(sent_dir) else {}
         before_sess = {f: os.path.getmtime(os.path.join(sess_dir, f)) for f in os.listdir(sess_dir)} if os.path.exists(sess_dir) else {}
 

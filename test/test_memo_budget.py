@@ -22,6 +22,9 @@ import server
 import wait_input
 import tools.check_context as check_context
 
+# serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
+_POLL = 0.02
+
 
 def make_msg(role, text, mid=None, **kwargs):
     d = {"id": mid or server.new_id(), "role": role, "text": text, "ts": server.now()}
@@ -54,7 +57,7 @@ class TestMemoBudget(unittest.TestCase):
         # HTTP サーバーの立ち上げ（API テスト用）
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.H)
         self.port = self.httpd.server_address[1]
-        self.th = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.th = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=_POLL), daemon=True)
         self.th.start()
 
     def tearDown(self):

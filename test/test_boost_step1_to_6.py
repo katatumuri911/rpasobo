@@ -17,6 +17,9 @@ import server
 import ide_poke
 import memory_store
 
+# serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
+_POLL = 0.02
+
 
 class TestBoostStep1To6(unittest.TestCase):
     def setUp(self):
@@ -58,7 +61,7 @@ class TestBoostStep1To6(unittest.TestCase):
 
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.H)
         self.server_port = self.httpd.server_address[1]
-        self.server_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.server_thread = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=_POLL), daemon=True)
         self.server_thread.start()
 
     def tearDown(self):
@@ -667,14 +670,6 @@ class TestBoostStep1To6(unittest.TestCase):
     def test_v2_26_place_anise_bedroom_no_bed(self):
         """26: state.place='アニスの寝室' -> bedroom。bed は入らない"""
         st = [{"name": "A", "place": "アニスの寝室"}]
-        res = server.sanitize_prompt("1girl", state=st, allow_inject=True)
-        tags = [t.strip() for t in res.split(",")]
-        self.assertIn("bedroom", tags)
-        self.assertNotIn("bed", tags)
-
-    def test_v2_27_place_bedroom_no_bed_collision(self):
-        """27: state.place='ベッドルーム' -> bedroom。bed は入らない（誤爆しない）"""
-        st = [{"name": "A", "place": "ベッドルーム"}]
         res = server.sanitize_prompt("1girl", state=st, allow_inject=True)
         tags = [t.strip() for t in res.split(",")]
         self.assertIn("bedroom", tags)

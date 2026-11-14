@@ -1740,10 +1740,16 @@ function renderModels() {
       const parts = splitModelLabel(r.label);
       return `<option value="ag:${esc(r.model)}">${esc(parts.name || r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`;
     }));
+  const agCardOpts = [`<option value="">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
+    .concat(rows.map((r) => {
+      const parts = splitModelLabel(r.label);
+      return `<option value="${esc(r.model)}">${esc(parts.name || r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`;
+    }));
   const currentAg = state?.setting?.ide_model || "";
   if (isAg && currentAg && !rows.some((r) => r.model === currentAg)) {
     const curParts = splitModelLabel(currentAg);
     agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(curParts.name || currentAg)}（いまは選べない）</option>`);
+    agCardOpts.push(`<option value="${esc(currentAg)}">${esc(curParts.name || currentAg)}（いまは選べない）</option>`);
   }
 
   const googleOpts = [];
@@ -1842,8 +1848,20 @@ function renderModels() {
     if (selChoices.dataset.html !== htmlChoices) { selChoices.innerHTML = htmlChoices; selChoices.dataset.html = htmlChoices; }
     selChoices.value = wantChoices;
   }
+
+  const selAg = $("agModel");
+  if (selAg && state && document.activeElement !== selAg) {
+    const htmlAg = agCardOpts.join("");
+    if (selAg.dataset.html !== htmlAg) {
+      selAg.innerHTML = htmlAg;
+      selAg.dataset.html = htmlAg;
+    }
+    selAg.value = currentAg || "";
+  }
+
   updateModelSheetLeft();
   updateFootModelSubInfo();
+  updateAgModelSubInfo();
   ThinkingUI.render(state?.setting);
 }
 
@@ -2003,7 +2021,7 @@ const ThinkingUI = {
     let currentModelId = "";
     if (isGoogle) currentModelId = $("googleModel")?.value || st.google_model || "";
     else if (isVertex) currentModelId = ($("vertexCustomModel")?.value || "").trim() || $("vertexModel")?.value || st.vertex_model || "";
-    else currentModelId = st.ide_model || "";
+    else currentModelId = ($("agModel")?.value !== undefined ? $("agModel").value : st.ide_model) || "";
 
     // Choices (auxiliary) model
     let choicesModelId = "";
@@ -2025,7 +2043,7 @@ const ThinkingUI = {
         const mLabel = currentModelId || "モデル未設定";
         summaryEl.textContent = `Vertex AI: ${mLabel} (思考: ${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
       } else {
-        const mLabel = st.ide_model || "会話と同じ";
+        const mLabel = ($("agModel")?.value !== undefined ? $("agModel").value : st.ide_model) || "会話と同じ";
         summaryEl.textContent = `Antigravity (${mLabel})`;
       }
     }
@@ -2241,6 +2259,7 @@ function openVertexConfigModal() {
   if ($("aiProvider")) $("aiProvider").value = "vertex";
   $("googleBox")?.classList.add("hidden");
   $("vertexBox")?.classList.remove("hidden");
+  $("agMainCard")?.classList.add("hidden");
   $("agAiBox")?.classList.add("hidden");
   vertexAuthManualOpen = true;
   $("vertexAuthForm")?.classList.remove("hidden");
@@ -2343,6 +2362,8 @@ async function applyProviderSettings(provider) {
     body.fetch = !!$("vertexFetch")?.checked;
     body.safety_off = !!$("vertexSafetyOff")?.checked;
     body.max_output_tokens = Number($("vertexMaxTokens")?.value || 8192);
+  } else {
+    body.model = $("agModel")?.value !== undefined ? $("agModel").value : (state?.setting?.ide_model || "");
   }
   try {
     const d = await checked("/api/ai/provider", body);
@@ -2350,6 +2371,7 @@ async function applyProviderSettings(provider) {
       state.setting.ai_provider = d.provider || p;
       if (p === "vertex" && d.model) state.setting.vertex_model = d.model;
       if (p === "google" && d.model) state.setting.google_model = d.model;
+      if (p === "antigravity" && "model" in d) state.setting.ide_model = d.model || "";
       if (typeof d.fetch === "boolean") state.setting.google_fetch = d.fetch;
       if (typeof d.safety_off === "boolean") state.setting.google_safety_off = d.safety_off;
       if (d.max_output_tokens) state.setting.google_max_output_tokens = d.max_output_tokens;
@@ -2389,6 +2411,7 @@ function syncGoogleSettingsUI() {
   if ($("aiProvider") && document.activeElement !== $("aiProvider")) $("aiProvider").value = prov;
   if ($("googleBox")) $("googleBox").classList.toggle("hidden", prov !== "google");
   if ($("vertexBox")) $("vertexBox").classList.toggle("hidden", prov !== "vertex");
+  if ($("agMainCard")) $("agMainCard").classList.toggle("hidden", prov !== "antigravity");
   if ($("agAiBox")) $("agAiBox").classList.toggle("hidden", prov !== "antigravity");
   if ($("auxThinkingSection")) $("auxThinkingSection").classList.toggle("hidden", prov === "antigravity");
 
@@ -2484,6 +2507,7 @@ function openGoogleKeyModal() {
   if ($("aiProvider")) $("aiProvider").value = "google";
   $("googleBox")?.classList.remove("hidden");
   $("vertexBox")?.classList.add("hidden");
+  $("agMainCard")?.classList.add("hidden");
   $("agAiBox")?.classList.add("hidden");
   googleAuthManualOpen = true;
   $("googleAuthForm")?.classList.remove("hidden");
@@ -2532,6 +2556,8 @@ if ($("aiProvider")) {
     const provider = ["google", "vertex"].includes(sel) ? sel : "antigravity";
     $("googleBox")?.classList.toggle("hidden", provider !== "google");
     $("vertexBox")?.classList.toggle("hidden", provider !== "vertex");
+    $("agMainCard")?.classList.toggle("hidden", provider !== "antigravity");
+    $("agAiBox")?.classList.toggle("hidden", provider !== "antigravity");
     if (provider === "google") {
       if (!googleStatusLoaded) await loadGoogleStatus();
       if (!googleConfigured) { openGoogleKeyModal(); return; }
@@ -2540,6 +2566,8 @@ if ($("aiProvider")) {
       if (!vertexStatusLoaded) await loadVertexStatus();
       if (!vertexConfigured) { openVertexConfigModal(); return; }
       if (!vertexModels.length) await loadVertexModels();
+    } else if (provider === "antigravity") {
+      if (!ideModels) await loadModels();
     }
     await applyProviderSettings(provider);
   };
@@ -2748,6 +2776,24 @@ if ($("choicesIdeModel")) {
     renderModels();
   };
 }
+if ($("agModel")) {
+  $("agModel").onchange = async () => {
+    const model = $("agModel").value;
+    try {
+      await checked("/api/ai/provider", { sid, provider: "antigravity", model });
+      const label = $("agModel").selectedOptions[0]?.textContent || (model || "会話と同じ");
+      toast("Antigravity: " + label);
+      await poll();
+      renderModels();
+      syncGoogleSettingsUI();
+    } catch (e) {
+      alert(e.message);
+      renderModels();
+    }
+    $("agModel").blur();
+  };
+}
+if ($("agModelsReload")) $("agModelsReload").onclick = loadModels;
 $("ideModelReload").onclick = loadModels;
 $("idePokeNow").onclick = async () => {
   $("idePokeNow").disabled = true;
@@ -3696,28 +3742,74 @@ function updateFootModelSubInfo() {
   if (prov === "google") {
     const curId = state?.setting?.google_model || "";
     const cur = googleModels.find((m) => m.id === curId);
-    el.textContent = cur?.outputTokenLimit ? `（出力上限 ${cur.outputTokenLimit}）` : "";
+    el.innerHTML = cur?.outputTokenLimit ? `<span class="model-badge meta">上限 ${esc(cur.outputTokenLimit)}</span>` : "";
     return;
   }
   if (prov === "vertex") {
     const curId = state?.setting?.vertex_model || "";
     const cur = vertexModels.find((m) => m.id === curId);
-    el.textContent = cur?.outputTokenLimit ? `（出力上限 ${cur.outputTokenLimit}）` : "";
+    el.innerHTML = cur?.outputTokenLimit ? `<span class="model-badge meta">上限 ${esc(cur.outputTokenLimit)}</span>` : "";
     return;
   }
   const val = $("ideModel") ? $("ideModel").value : "";
   const model = val.startsWith("ag:") ? val.slice(3) : val;
   const r = (ideModels?.models || []).find((x) => x.model === model);
   if (!r) {
-    el.textContent = "";
+    el.innerHTML = "";
     return;
   }
-  const m = String(r.label || "").match(/^(.*?)\s*(\(.*?\))\s*$/);
-  const sub = m ? m[2] : "";
-  const reset = modelResetText;
-  const left = (typeof r.left !== "number" ? ""
-    : r.left > 0 ? `（残り${Math.max(1, Math.round(r.left * 100))}%）` : `（使い切り${reset(r)}）`);
-  el.textContent = (sub ? " " + sub : "") + left;
+  // カッコ () や（）を外してモダンなバッジ表示にする
+  const m = String(r.label || "").match(/^(.*?)\s*[\(（](.*?)[\)）]\s*$/);
+  const sub = m ? m[2].trim() : "";
+  const badges = [];
+  if (sub) {
+    badges.push(`<span class="model-badge thinking">${esc(sub)}</span>`);
+  }
+  if (typeof r.left === "number") {
+    if (r.left > 0) {
+      const pct = Math.max(1, Math.round(r.left * 100));
+      const lowCls = pct <= 15 ? " is-low" : "";
+      badges.push(`<span class="model-badge quota${lowCls}">残り ${pct}%</span>`);
+    } else {
+      const reset = modelResetText(r);
+      const when = reset ? ` ${esc(reset)}` : "";
+      badges.push(`<span class="model-badge quota is-low">使い切り${when}</span>`);
+    }
+  }
+  el.innerHTML = badges.join("");
+}
+function updateAgModelSubInfo() {
+  const el = $("agModelSubInfo");
+  if (!el) return;
+  const prov = state?.setting?.ai_provider || "antigravity";
+  if (prov !== "antigravity") {
+    el.innerHTML = "";
+    return;
+  }
+  const model = $("agModel") ? $("agModel").value : (state?.setting?.ide_model || "");
+  const r = (ideModels?.models || []).find((x) => x.model === model);
+  if (!r) {
+    el.innerHTML = "";
+    return;
+  }
+  const m = String(r.label || "").match(/^(.*?)\s*[\(（](.*?)[\)）]\s*$/);
+  const sub = m ? m[2].trim() : "";
+  const badges = [];
+  if (sub) {
+    badges.push(`<span class="model-badge thinking">${esc(sub)}</span>`);
+  }
+  if (typeof r.left === "number") {
+    if (r.left > 0) {
+      const pct = Math.max(1, Math.round(r.left * 100));
+      const lowCls = pct <= 15 ? " is-low" : "";
+      badges.push(`<span class="model-badge quota${lowCls}">残り ${pct}%</span>`);
+    } else {
+      const reset = modelResetText(r);
+      const when = reset ? ` ${esc(reset)}` : "";
+      badges.push(`<span class="model-badge quota is-low">使い切り${when}</span>`);
+    }
+  }
+  el.innerHTML = badges.join("");
 }
 function openModelSheet() {
   if (!state || !state.setting) {
@@ -3756,6 +3848,8 @@ async function openAiToolModal() {
   } else if (prov === "vertex") {
     if (!vertexStatusLoaded) await loadVertexStatus();
     if (vertexConfigured && !vertexModels.length) await loadVertexModels();
+  } else if (prov === "antigravity") {
+    if (!ideModels) await loadModels();
   }
   renderModels();
   syncGoogleSettingsUI();
@@ -6454,6 +6548,11 @@ if ($("vertexMaxTokens")) {
   });
 }
 
+if ($("agModel")) {
+  $("agModel").addEventListener("change", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
 if ($("googleModel")) {
   $("googleModel").addEventListener("change", () => {
     ThinkingUI.render(state?.setting);

@@ -25,6 +25,9 @@ if ROOT not in sys.path:
 import memory_store as ms
 import server
 
+# serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
+_POLL = 0.02
+
 SID = "s1"
 
 
@@ -262,7 +265,7 @@ class _ServerTempStore(_TempStore):
 
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.H)
         self.port = self.httpd.server_address[1]
-        self.http_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.http_thread = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=_POLL), daemon=True)
         self.http_thread.start()
 
     def tearDown(self):

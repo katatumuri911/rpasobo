@@ -16,6 +16,9 @@ if ROOT_DIR not in sys.path:
 import server
 import memory_store
 
+# serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
+_POLL = 0.02
+
 
 class TestNewSessionFix(unittest.TestCase):
     def setUp(self):
@@ -75,7 +78,7 @@ class TestNewSessionFix(unittest.TestCase):
         # HTTP サーバー起動
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.H)
         self.server_port = self.httpd.server_address[1]
-        self.server_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.server_thread = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=_POLL), daemon=True)
         self.server_thread.start()
 
     def tearDown(self):

@@ -31,6 +31,19 @@ def make_msg(role, text, mid=None, status=None):
     return m
 
 
+class _NoSleepTime:
+    """time モジュールの代替。sleep だけ無効化し、リトライ待ちの実時間を検証対象から外す。"""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def sleep(self, *_args, **_kwargs):
+        pass
+
+
 class TestBoostChanges(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp(prefix="test_boost_")
@@ -887,6 +900,9 @@ class TestBoostChanges(unittest.TestCase):
         orig_fix_model = ide_poke._fix_model
         orig_call = ide_poke._call
         orig_summary = ide_poke._summary
+        orig_time = ide_poke.time
+        # 確認ループは 0.03 秒 + 0.1 秒 x 9 待つ。待ち時間自体は仕様では無いので無効化する。
+        ide_poke.time = _NoSleepTime(orig_time)
 
         ide_poke.locate = lambda c: (9000, "tok-test", {"summary": "Test", "status": "CASCADE_RUN_STATUS_IDLE", "lastUserInputTime": "ts_0"})
         ide_poke._cached_config = lambda cfg=None: base_cfg
@@ -950,6 +966,7 @@ class TestBoostChanges(unittest.TestCase):
             ide_poke._fix_model = orig_fix_model
             ide_poke._call = orig_call
             ide_poke._summary = orig_summary
+            ide_poke.time = orig_time
             ide_poke._cid_cfg.pop(cid, None)
 
     def test_query_features_does_not_cache_empty_embeddings(self):

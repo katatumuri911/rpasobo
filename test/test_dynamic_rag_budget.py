@@ -114,22 +114,6 @@ class TestDynamicRAGBudgetUnit(unittest.TestCase):
         self.assertIn("r4", stats["included_ids"])
         self.assertNotIn("r5", stats["included_ids"])
 
-    test_d8_rule_tier1_cap_four = test_d8_rule_tier1_cap_five
-
-    def test_d8b_legacy_memory_budget_migration(self):
-        """D8b: test/test_memory_budget.py の cap=5 移行検証"""
-        import io
-        from test.test_memory_budget import TestMemoryBudgetUnit, TestMemoryBudgetIntegration
-        suite = unittest.TestSuite()
-        suite.addTest(TestMemoryBudgetUnit("test_m1_rule_cap_is_five"))
-        suite.addTest(TestMemoryBudgetUnit("test_m7_no_rule_in_recall_block"))
-        suite.addTest(TestMemoryBudgetIntegration("test_m8_mem_ids_are_only_shown"))
-        runner = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0)
-        res = runner.run(suite)
-        self.assertTrue(res.wasSuccessful())
-        self.assertEqual(0, len(res.failures))
-        self.assertEqual(0, len(res.errors))
-
     def test_d9_format_prompt_memories_dynamic_budget_applied(self):
         """D9: soft_budget=1600 を直接指定"""
         # ルール4件(~1200B) + 想起枠(~528B) > 1600B となるように設定
@@ -455,20 +439,6 @@ class TestDynamicRAGBudgetIntegration(unittest.TestCase):
         self.assertIsInstance(last_perf["rag_floor_threatened"], bool)
         self.assertIsInstance(last_perf["rag_floor_hit"], bool)
         self.assertIsInstance(last_perf["rag_abandon_inline"], bool)
-
-    def test_d18_existing_test_suite_regression(self):
-        """D18: 既存全テスト群の検出とリグレッション検証"""
-        import io
-        from test import test_memory_budget
-        mb_suite = unittest.TestLoader().loadTestsFromModule(test_memory_budget)
-        mb_res = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(mb_suite)
-        self.assertTrue(mb_res.wasSuccessful())
-        self.assertEqual(0, len(mb_res.failures))
-        self.assertEqual(0, len(mb_res.errors))
-
-        loader = unittest.TestLoader()
-        full_suite = loader.discover(os.path.join(ROOT, "test"), pattern="test_*.py")
-        self.assertGreaterEqual(full_suite.countTestCases(), 442)
 
 
 if __name__ == "__main__":

@@ -53,10 +53,6 @@ class TestMemoryBudgetUnit(unittest.TestCase):
         self.assertIn("r4", stats["included_ids"])
         self.assertNotIn("r5", stats["included_ids"])
 
-    test_m1_rule_cap_is_four = test_m1_rule_cap_is_five
-    test_m1_rule_cap_is_three = test_m1_rule_cap_is_five
-
-    test_m1_rule_cap_is_three = test_m1_rule_cap_is_four
 
     def test_m2_manual_not_prioritized(self):
         """M2: manual 低スコア < auto 高スコアの順"""

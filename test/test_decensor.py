@@ -18,6 +18,9 @@ if ROOT_DIR not in sys.path:
 
 import server
 
+# serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
+_POLL = 0.02
+
 # リポジトリの data/decensor.json と同じ語彙（辞書は data/decensor.json だけが正になったため、
 # テストはユーザーの辞書に依存しないよう自前の語彙を書く）
 DICT = {
@@ -617,7 +620,7 @@ class TestDecensorApi(unittest.TestCase):
         write_dict_file()
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.H)
         self.port = self.httpd.server_address[1]
-        self.th = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.th = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=_POLL), daemon=True)
         self.th.start()
 
     def tearDown(self):

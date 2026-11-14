@@ -16,6 +16,9 @@ if ROOT_DIR not in sys.path:
 import server
 import memory_store as ms
 
+# serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
+_POLL = 0.02
+
 
 class TestBoostPriorityUnit(unittest.TestCase):
     def test_resolve_priority_key_defaults(self):
@@ -95,6 +98,16 @@ class TestBoostPriorityUnit(unittest.TestCase):
         self.assertEqual(0.02, ms.memory_boost({"priority": "high"}))
         self.assertEqual(0.00, ms.memory_boost({"priority": "default"}))
         self.assertEqual(-0.05, ms.memory_boost({"priority": "low"}))
+
+    def test_rule_standing_level_hierarchy(self):
+        """Tier 1 ルールの standing 階層: 自セッション固定(4) > 自セッション恒久/優先(3) > 他セッション(2) > 手動(1) > 抑制(0)"""
+        self.assertEqual(4, ms.rule_standing_level("ルール", priority_key="pinned", is_other=False))
+        self.assertEqual(3, ms.rule_standing_level("校則により禁止", priority_key="default", is_other=False))
+        self.assertEqual(3, ms.rule_standing_level("任意の決まり", priority_key="high", is_other=False))
+        self.assertEqual(2, ms.rule_standing_level("ルール", priority_key="pinned", is_other=True))
+        self.assertEqual(2, ms.rule_standing_level("校則により禁止", priority_key="default", is_other=True))
+        self.assertEqual(1, ms.rule_standing_level("手書き", source="manual", priority_key="default", is_other=False))
+        self.assertEqual(0, ms.rule_standing_level("校則により禁止", priority_key="low", is_other=False))
 
     def test_is_pinned_memory(self):
         self.assertTrue(ms.is_pinned_memory({"priority": "pinned", "status": "active"}))
@@ -280,7 +293,7 @@ class TestBoostPriorityServerAPI(unittest.TestCase):
 
         self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.H)
         self.port = self.httpd.server_address[1]
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=_POLL), daemon=True)
         self.thread.start()
 
     def tearDown(self):
