@@ -1834,7 +1834,294 @@ function renderModels() {
     selChoices.value = wantChoices;
   }
   updateModelSheetLeft();
+  ThinkingUI.render(state?.setting);
 }
+
+// ---------------------------------------------------------------- Thinking Level UI & Resolvers
+const ThinkingUI = {
+  VALID_THINKING_LEVELS: ["auto", "minimal", "low", "medium", "high", "xhigh"],
+  VALID_CHOICES_THINKING_LEVELS: ["low", "minimal", "medium", "high", "auto", "same"],
+
+  LEVEL_LABELS: {
+    auto: "自動",
+    minimal: "💨最小",
+    low: "⚡低",
+    medium: "⚖️中",
+    high: "🔍高",
+    xhigh: "🔥最大"
+  },
+
+  CHOICES_LEVEL_LABELS: {
+    low: "⚡低 (速・推奨)",
+    minimal: "💨最小",
+    medium: "⚖️中",
+    high: "🔍高",
+    same: "🔗本文と同じ",
+    auto: "自動"
+  },
+
+  GUIDES: {
+    auto: "モデル既定の深さで思考します（Gemini 3.x/4.x: 中、Hydrogen: 高、2.5: 自動）",
+    minimal: "思考を最小限に抑え、最も高速に応答します（対応: Gemini 3.0〜3.7 Flash、2.5 Flash は budget:0。非対応モデルは「低」に丸められます）",
+    low: "思考を短くして応答速度を高めます（Gemini 2.5: 1024トークン）",
+    medium: "思考の深さと応答速度のバランスを取ります（Gemini 2.5: 4096トークン）",
+    high: "じっくり思考して複雑なプロットやキャラの心理・設定を精密に整理します（Gemini 2.5: 8192トークン）",
+    xhigh: "最大深度で思考します（Gemini 4 Hydrogen のみネイティブ対応。他モデルは「高」に丸められます。Gemini 2.5: 16384トークン）"
+  },
+
+  CHOICES_GUIDES: {
+    low: "【推奨】思考を短く抑え、選択肢を素早く提示します",
+    minimal: "思考を最小限にし、最速で選択肢を生成します",
+    medium: "選択肢の文脈整合性を高めて丁寧に生成します",
+    high: "深い思考で選択肢を生成します（記憶抽出タスクは安全のため「中」に制限されます）",
+    same: "本文と同じ思考設定を使用します（最大「高」まで）",
+    auto: "モデル既定で生成します"
+  },
+
+  thinkingFamily(modelId) {
+    const low = String(modelId || "").toLowerCase();
+    if (["2.0", "2-0", "1.5", "1-5", "1.0", "1-0", "gemma", "nano", "embedding"].some(k => low.includes(k))) {
+      return "none";
+    }
+    const isLatestThinking = ["flash-latest", "flash-lite-latest", "pro-latest", "thinking-latest"].some(k => low.includes(k));
+    const isThinkingModel = ["2.5", "2-5", "3.", "3-", "4.", "4-", "thinking"].some(k => low.includes(k));
+    if (!isThinkingModel && !isLatestThinking) {
+      return "none";
+    }
+    if (low.includes("2.5") || low.includes("2-5")) {
+      return low.includes("flash") ? "budget_25_flash" : "budget_25_pro";
+    }
+    if (low.includes("hydrogen")) {
+      return "level_hydrogen";
+    }
+    if (["3.8", "3-8", "3.9", "3-9", "4.", "4-", "pro-latest"].some(k => low.includes(k)) || (low.includes("flash-latest") && !low.includes("lite"))) {
+      return "level_38_4";
+    }
+    if (low.includes("flash")) {
+      return "level_3_flash";
+    }
+    return "level_38_4";
+  },
+
+  resolve(modelId, level = "auto") {
+    const fam = this.thinkingFamily(modelId);
+    let lv = String(level || "auto").trim().toLowerCase();
+    if (!this.VALID_THINKING_LEVELS.includes(lv)) lv = "auto";
+    if (fam === "none") {
+      return { config: null, eff: "none", minOut: 0, isNone: true, rounded: false };
+    }
+    if (fam === "budget_25_flash" || fam === "budget_25_pro") {
+      if (lv === "auto") {
+        return { config: null, eff: "auto(budget)", minOut: 0, isAuto: true, rounded: false };
+      }
+      const minB = fam === "budget_25_flash" ? 0 : 128;
+      const budgetMap = { minimal: minB, low: 1024, medium: 4096, high: 8192, xhigh: 16384 };
+      const b = budgetMap[lv] ?? 4096;
+      const minOut = b > 0 ? Math.max(8192, b + 4096) : 0;
+      return { config: { thinkingBudget: b }, eff: `budget:${b}`, minOut, rounded: false };
+    }
+    const defaultLv = fam === "level_hydrogen" ? "HIGH" : "MEDIUM";
+    if (lv === "auto") {
+      return { config: null, eff: `auto(${defaultLv})`, minOut: 0, isAuto: true, rounded: false };
+    }
+    let eff = lv.toUpperCase();
+    let rounded = false;
+    if (eff === "MINIMAL" && fam !== "level_3_flash") {
+      eff = "LOW";
+      rounded = true;
+    }
+    if (eff === "XHIGH" && fam !== "level_hydrogen") {
+      eff = "HIGH";
+      rounded = true;
+    }
+    let minOut = 0;
+    if (eff === "XHIGH") minOut = 32768;
+    else if (eff === "HIGH") minOut = 16384;
+    return { config: { thinkingLevel: eff }, eff, minOut, rounded };
+  },
+
+  resolveChoices(mainLevel, choicesLevel, modelId) {
+    let m = String(mainLevel || "auto").trim().toLowerCase();
+    if (!this.VALID_THINKING_LEVELS.includes(m)) m = "auto";
+    let c = String(choicesLevel || "low").trim().toLowerCase();
+    if (!this.VALID_CHOICES_THINKING_LEVELS.includes(c)) c = "low";
+    let resolved = (c === "same") ? m : c;
+    if (resolved === "xhigh") resolved = "high";
+    return this.resolve(modelId, resolved);
+  },
+
+  async setThinking(mainLevel, choicesLevel) {
+    if (!state || !state.setting) return;
+    const body = { sid };
+    if (mainLevel !== null && mainLevel !== undefined) {
+      const lv = String(mainLevel).toLowerCase();
+      if (this.VALID_THINKING_LEVELS.includes(lv)) {
+        state.setting.thinking_level = lv;
+        body.thinking_level = lv;
+      }
+    }
+    if (choicesLevel !== null && choicesLevel !== undefined) {
+      const clv = String(choicesLevel).toLowerCase();
+      if (this.VALID_CHOICES_THINKING_LEVELS.includes(clv)) {
+        state.setting.choices_thinking_level = clv;
+        body.choices_thinking_level = clv;
+      }
+    }
+    this.render(state.setting);
+    try {
+      const res = await api("/api/ai/thinking", body);
+      if (res && res.ok && state && state.setting) {
+        if (res.thinking_level) state.setting.thinking_level = res.thinking_level;
+        if (res.choices_thinking_level) state.setting.choices_thinking_level = res.choices_thinking_level;
+        this.render(state.setting);
+      }
+    } catch (e) {
+      console.warn("failed to save thinking level:", e);
+    }
+  },
+
+  render(st) {
+    st = st || state?.setting || {};
+    const prov = ["google", "vertex"].includes(st.ai_provider) ? st.ai_provider : "antigravity";
+    const isGoogle = prov === "google";
+    const isVertex = prov === "vertex";
+    const isAg = prov === "antigravity";
+    const mainLevel = String(st.thinking_level || "auto").toLowerCase();
+    const choicesLevel = String(st.choices_thinking_level || "low").toLowerCase();
+
+    // 1. Resolve current active model for preview
+    let currentModelId = "";
+    if (isGoogle) currentModelId = $("googleModel")?.value || st.google_model || "";
+    else if (isVertex) currentModelId = ($("vertexCustomModel")?.value || "").trim() || $("vertexModel")?.value || st.vertex_model || "";
+    else currentModelId = st.ide_model || "";
+
+    // Choices (auxiliary) model
+    let choicesModelId = "";
+    if (isVertex) choicesModelId = ($("choicesIdeModel")?.value !== undefined ? $("choicesIdeModel").value : st.vertex_choices_model) || "";
+    else if (isGoogle) choicesModelId = ($("choicesIdeModel")?.value !== undefined ? $("choicesIdeModel").value : st.google_choices_model) || "";
+    else choicesModelId = ($("choicesIdeModel")?.value !== undefined ? $("choicesIdeModel").value : st.choices_ide_model) || "";
+    if (!choicesModelId) choicesModelId = currentModelId;
+
+    const mainResolved = this.resolve(currentModelId, mainLevel);
+    const choicesResolved = this.resolveChoices(mainLevel, choicesLevel, choicesModelId);
+
+    // 2. SettingsPanel AI Summary row
+    const summaryEl = $("aiSummaryText");
+    if (summaryEl) {
+      if (isGoogle) {
+        const mLabel = currentModelId || "モデル未設定";
+        summaryEl.textContent = `Google: ${mLabel} (思考: ${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
+      } else if (isVertex) {
+        const mLabel = currentModelId || "モデル未設定";
+        summaryEl.textContent = `Vertex AI: ${mLabel} (思考: ${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
+      } else {
+        const mLabel = st.ide_model || "会話と同じ";
+        summaryEl.textContent = `Antigravity (${mLabel})`;
+      }
+    }
+
+    // 3. Sidebar AI Summary text
+    const sideSummaryEl = $("sideAiSummaryText");
+    if (sideSummaryEl) {
+      if (isGoogle || isVertex) {
+        const pName = isGoogle ? "Google" : "Vertex";
+        sideSummaryEl.textContent = `${pName}: ${currentModelId || "-"} (${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
+      } else {
+        sideSummaryEl.textContent = `AG: ${st.ide_model || "会話と同じ"}`;
+      }
+    }
+
+    // 4. FootBar Compact Thinking Section
+    const footSec = $("footThinkingSection");
+    if (footSec) {
+      footSec.classList.toggle("hidden", isAg);
+      footSec.querySelectorAll(".segment-btn").forEach(btn => {
+        const lv = btn.dataset.level;
+        btn.classList.toggle("active", lv === mainLevel);
+        const r = this.resolve(currentModelId, lv);
+        btn.classList.toggle("is-rounded", !!r.rounded);
+      });
+      const footEff = $("footThinkingEff");
+      if (footEff) {
+        footEff.textContent = mainResolved.isNone ? "実効: なし"
+          : mainResolved.rounded ? `実効: ${mainResolved.eff} (丸め)`
+          : `実効: ${mainResolved.eff}`;
+      }
+      const footChoicesSel = $("footChoicesThinkingSelect");
+      if (footChoicesSel && document.activeElement !== footChoicesSel) {
+        footChoicesSel.value = choicesLevel;
+      }
+    }
+
+    // 5. Tool Modal Cards & Pills
+    if (isGoogle || isVertex) {
+      const prefix = isGoogle ? "google" : "vertex";
+      const isAuth = isGoogle ? googleConfigured : vertexConfigured;
+
+      // Lock sections if unauthenticated
+      const cardsSec = $(`${prefix}CardsSection`);
+      if (cardsSec) cardsSec.classList.toggle("is-unauthenticated", !isAuth);
+      const auxCard = $("choicesIdeCard");
+      if (auxCard) auxCard.classList.toggle("is-unauthenticated", !isAuth);
+
+      // Main Thinking Pills
+      const pillsContainer = $(`${prefix}ThinkingPills`);
+      if (pillsContainer) {
+        pillsContainer.querySelectorAll(".pill-btn").forEach(btn => {
+          const lv = btn.dataset.level;
+          btn.classList.toggle("active", lv === mainLevel);
+          const r = this.resolve(currentModelId, lv);
+          btn.classList.toggle("is-rounded", !!r.rounded);
+        });
+      }
+
+      // Main Badge & Guide
+      const badgeEl = $(`${prefix}ThinkingBadge`);
+      if (badgeEl) {
+        if (mainResolved.isNone) badgeEl.textContent = "実効: 思考非対応";
+        else if (mainResolved.rounded) badgeEl.textContent = `実効: ${mainResolved.eff} (最小/最大は非対応のため丸め)`;
+        else badgeEl.textContent = `実効: ${mainResolved.eff}`;
+      }
+      const guideEl = $(`${prefix}ThinkingGuide`);
+      if (guideEl) guideEl.textContent = this.GUIDES[mainLevel] || "";
+
+      // Choices Thinking Pills (shared choicesIdeCard)
+      const choicesPillsContainer = $("choicesThinkingPills");
+      if (choicesPillsContainer) {
+        choicesPillsContainer.querySelectorAll(".pill-btn").forEach(btn => {
+          const clv = btn.dataset.choicesLevel;
+          btn.classList.toggle("active", clv === choicesLevel);
+          const cr = this.resolveChoices(mainLevel, clv, choicesModelId);
+          btn.classList.toggle("is-rounded", !!cr.rounded);
+        });
+      }
+
+      // Choices Badge & Guide
+      const choicesBadgeEl = $("choicesThinkingBadge");
+      if (choicesBadgeEl) {
+        if (choicesResolved.isNone) choicesBadgeEl.textContent = "実効: 思考非対応";
+        else if (choicesResolved.rounded) choicesBadgeEl.textContent = `実効: ${choicesResolved.eff} (丸め)`;
+        else choicesBadgeEl.textContent = `実効: ${choicesResolved.eff}`;
+      }
+      const choicesGuideEl = $("choicesThinkingGuide");
+      if (choicesGuideEl) choicesGuideEl.textContent = this.CHOICES_GUIDES[choicesLevel] || "";
+
+      // MaxTokens ceiling badge
+      const tokInput = $(`${prefix}MaxTokens`);
+      const tokBadge = $(`${prefix}MaxTokensBadge`);
+      if (tokBadge && tokInput) {
+        const curVal = Number(tokInput.value || 8192);
+        if (mainResolved.minOut > 0) {
+          tokBadge.textContent = curVal < mainResolved.minOut
+            ? `下限 ${mainResolved.minOut} に自動底上げ`
+            : `推奨下限: ${mainResolved.minOut}`;
+        } else {
+          tokBadge.textContent = "";
+        }
+      }
+    }
+  }
+};
 
 // ---------------------------------------------------------------- Google Gemini / Vertex AI
 
@@ -1916,21 +2203,38 @@ async function loadVertexModels(force = false) {
   renderModels();
 }
 
+let vertexAuthManualOpen = false;
+
+function toggleVertexAuth() {
+  vertexAuthManualOpen = !vertexAuthManualOpen;
+  $("vertexAuthForm")?.classList.toggle("hidden", !vertexAuthManualOpen);
+  if ($("vertexAuthToggle")) {
+    $("vertexAuthToggle").textContent = vertexAuthManualOpen ? "認証設定を閉じる ▴" : "認証設定を変更 ▾";
+  }
+}
+
 function updateVertexStateBadge(vd) {
   const el = $("vertexKeyState");
   if (!el) return;
   if (vd && vd.configured) {
     el.className = "ok";
     const who = vd.auth_type === "adc" ? "ADC" : (vd.client_email_hint || "SA");
-    el.textContent = `設定済み（${vd.project_id} / ${vd.location} / ${who}）`;
+    el.textContent = `🟢 設定済み（${vd.project_id} / ${vd.location} / ${who}）`;
   } else {
     el.className = "warn";
-    el.textContent = "未設定";
+    el.textContent = "⚠️ 未設定";
   }
 }
 
 function openVertexConfigModal() {
-  $("vertexConfigModal")?.classList.remove("hidden");
+  openAiToolModal();
+  if ($("aiProvider")) $("aiProvider").value = "vertex";
+  $("googleBox")?.classList.add("hidden");
+  $("vertexBox")?.classList.remove("hidden");
+  $("agAiBox")?.classList.add("hidden");
+  vertexAuthManualOpen = true;
+  $("vertexAuthForm")?.classList.remove("hidden");
+  if ($("vertexAuthToggle")) $("vertexAuthToggle").textContent = "認証設定を閉じる ▴";
   if ($("vertexConfigMsg")) {
     $("vertexConfigMsg").className = "muted";
     $("vertexConfigMsg").textContent = "";
@@ -1947,7 +2251,11 @@ function openVertexConfigModal() {
 }
 
 function closeVertexConfigModal() {
-  $("vertexConfigModal")?.classList.add("hidden");
+  if (vertexConfigured) {
+    vertexAuthManualOpen = false;
+    $("vertexAuthForm")?.classList.add("hidden");
+    if ($("vertexAuthToggle")) $("vertexAuthToggle").textContent = "認証設定を変更 ▾";
+  }
 }
 
 async function saveVertexConfig() {
@@ -2035,6 +2343,8 @@ async function applyProviderSettings(provider) {
       if (typeof d.fetch === "boolean") state.setting.google_fetch = d.fetch;
       if (typeof d.safety_off === "boolean") state.setting.google_safety_off = d.safety_off;
       if (d.max_output_tokens) state.setting.google_max_output_tokens = d.max_output_tokens;
+      if (d.thinking_level) state.setting.thinking_level = d.thinking_level;
+      if (d.choices_thinking_level) state.setting.choices_thinking_level = d.choices_thinking_level;
     }
     await poll();
     await loadModels();
@@ -2053,14 +2363,49 @@ async function applyProviderSettings(provider) {
 
 const applyGoogleSettings = () => applyProviderSettings("google");
 
+let googleAuthManualOpen = false;
+
+function toggleGoogleAuth() {
+  googleAuthManualOpen = !googleAuthManualOpen;
+  $("googleAuthForm")?.classList.toggle("hidden", !googleAuthManualOpen);
+  if ($("googleAuthToggle")) {
+    $("googleAuthToggle").textContent = googleAuthManualOpen ? "認証設定を閉じる ▴" : "認証設定を変更 ▾";
+  }
+}
+
 function syncGoogleSettingsUI() {
   const st = state?.setting || {};
   const prov = ["google", "vertex"].includes(st.ai_provider) ? st.ai_provider : "antigravity";
   if ($("aiProvider") && document.activeElement !== $("aiProvider")) $("aiProvider").value = prov;
   if ($("googleBox")) $("googleBox").classList.toggle("hidden", prov !== "google");
   if ($("vertexBox")) $("vertexBox").classList.toggle("hidden", prov !== "vertex");
+  if ($("agAiBox")) $("agAiBox").classList.toggle("hidden", prov !== "antigravity");
+  if ($("auxThinkingSection")) $("auxThinkingSection").classList.toggle("hidden", prov === "antigravity");
 
-  // Google AI Studio（既存処理を維持）
+  // Accordion auto-unfold if unauthenticated
+  if ($("googleAuthForm")) {
+    const show = !googleConfigured || googleAuthManualOpen;
+    $("googleAuthForm").classList.toggle("hidden", !show);
+    if ($("googleAuthToggle")) {
+      $("googleAuthToggle").textContent = show ? "認証設定を閉じる ▴" : "認証設定を変更 ▾";
+    }
+  }
+  if ($("vertexAuthForm")) {
+    const show = !vertexConfigured || vertexAuthManualOpen;
+    $("vertexAuthForm").classList.toggle("hidden", !show);
+    if ($("vertexAuthToggle")) {
+      $("vertexAuthToggle").textContent = show ? "認証設定を閉じる ▴" : "認証設定を変更 ▾";
+    }
+  }
+
+  // Location warning note for Vertex
+  if ($("vertexLocationWarning")) {
+    const note = vertexStatus.location_note || "";
+    $("vertexLocationWarning").classList.toggle("hidden", !note);
+    if (note) $("vertexLocationWarning").textContent = `⚠️ 使用リージョン: ${vertexStatus.effective_location || ""} (${note})`;
+  }
+
+  // Google AI Studio
   if ($("googleModel") && document.activeElement !== $("googleModel")) {
     const html = googleModelOptions(st.google_model || "");
     if ($("googleModel").dataset.html !== html) {
@@ -2090,15 +2435,19 @@ function syncGoogleSettingsUI() {
   if ($("vertexSafetyOff")) $("vertexSafetyOff").checked = st.google_safety_off !== false;
   if ($("vertexMaxTokens")) $("vertexMaxTokens").value = st.google_max_output_tokens || 8192;
   updateVertexStateBadge(vertexStatus);
+
+  ThinkingUI.render(st);
 }
 
 async function loadGoogleStatus() {
   try {
     const d = await checked("/api/google/status");
     googleStatusLoaded = true;
+    googleConfigured = !!d.configured;
+    googleKeyHint = d.hint || "";
     if ($("googleKeyState")) {
       $("googleKeyState").className = d.configured ? "ok" : "warn";
-      $("googleKeyState").textContent = d.configured ? `設定済み（…${d.hint || ""} / ${d.source || ""}）` : "未設定";
+      $("googleKeyState").textContent = d.configured ? `🟢 設定済み（…${d.hint || ""}）` : "⚠️ 未設定";
     }
     if (d.configured) await loadGoogleModels(false);
   } catch (e) {
@@ -2121,11 +2470,25 @@ async function loadGoogleModels(force = false) {
 }
 
 function openGoogleKeyModal() {
-  $("googleKeyModal")?.classList.remove("hidden");
-  $("googleKeyMsg").textContent = "";
+  openAiToolModal();
+  if ($("aiProvider")) $("aiProvider").value = "google";
+  $("googleBox")?.classList.remove("hidden");
+  $("vertexBox")?.classList.add("hidden");
+  $("agAiBox")?.classList.add("hidden");
+  googleAuthManualOpen = true;
+  $("googleAuthForm")?.classList.remove("hidden");
+  if ($("googleAuthToggle")) $("googleAuthToggle").textContent = "認証設定を閉じる ▴";
+  if ($("googleKeyMsg")) $("googleKeyMsg").textContent = "";
   setTimeout(() => $("googleKeyInput")?.focus(), 50);
 }
-function closeGoogleKeyModal() { $("googleKeyModal")?.classList.add("hidden"); }
+
+function closeGoogleKeyModal() {
+  if (googleConfigured) {
+    googleAuthManualOpen = false;
+    $("googleAuthForm")?.classList.add("hidden");
+    if ($("googleAuthToggle")) $("googleAuthToggle").textContent = "認証設定を変更 ▾";
+  }
+}
 
 if ($("vertexSaFile")) {
   $("vertexSaFile").onchange = async () => {
@@ -2171,7 +2534,22 @@ if ($("aiProvider")) {
     await applyProviderSettings(provider);
   };
 }
-if ($("googleApply")) $("googleApply").onclick = applyGoogleSettings;
+if ($("googleApply")) {
+  $("googleApply").onclick = async () => {
+    try {
+      await applyGoogleSettings();
+      if ($("googleApplyMsg")) {
+        $("googleApplyMsg").className = "ok";
+        $("googleApplyMsg").textContent = "保存しました";
+      }
+    } catch (e) {
+      if ($("googleApplyMsg")) {
+        $("googleApplyMsg").className = "err";
+        $("googleApplyMsg").textContent = e.message;
+      }
+    }
+  };
+}
 if ($("googleKeySet")) $("googleKeySet").onclick = openGoogleKeyModal;
 if ($("googleKeyCancel")) $("googleKeyCancel").onclick = closeGoogleKeyModal;
 if ($("googleKeyModal")) $("googleKeyModal").addEventListener("click", (e) => { if (e.target === $("googleKeyModal")) closeGoogleKeyModal(); });
@@ -2257,6 +2635,7 @@ if ($("vertexApply")) {
 if ($("vertexModel")) {
   $("vertexModel").onchange = () => {
     if ($("vertexCustomModel")) $("vertexCustomModel").value = "";
+    ThinkingUI.render(state?.setting);
   };
 }
 if ($("vertexConfigDelete")) {
@@ -3317,6 +3696,38 @@ function closeModelSheet() {
   el.classList.add("hidden");
   syncFootBarPlacement();     // ドロワー下段へ戻す
   updateFabState();
+}
+
+async function openAiToolModal() {
+  if (!state || !state.setting) {
+    toast("チャンネルを開いてください", 4000);
+    syncActionControlsVisibility();
+    return;
+  }
+  hideReveal();
+  $("aiToolModal")?.classList.remove("hidden");
+  updateFabState();
+  syncActionControlsVisibility();
+
+  const prov = state.setting.ai_provider || "antigravity";
+  if (prov === "google") {
+    if (!googleStatusLoaded) await loadGoogleStatus();
+    if (googleConfigured && !googleModels.length) await loadGoogleModels();
+  } else if (prov === "vertex") {
+    if (!vertexStatusLoaded) await loadVertexStatus();
+    if (vertexConfigured && !vertexModels.length) await loadVertexModels();
+  }
+  renderModels();
+  syncGoogleSettingsUI();
+  ThinkingUI.render(state.setting);
+}
+
+function closeAiToolModal() {
+  const el = $("aiToolModal");
+  if (!el || el.classList.contains("hidden")) return;
+  el.classList.add("hidden");
+  updateFabState();
+  syncActionControlsVisibility();
 }
 
 function render() {
@@ -5942,7 +6353,87 @@ if ($("revealState"))    $("revealState").onclick    = () => {
   syncActionControlsVisibility();
 };
 if ($("revealSettings")) $("revealSettings").onclick = () => { hideReveal(); if ($("settingsToggle")) $("settingsToggle").click(); syncActionControlsVisibility(); };
-if ($("revealModel"))    $("revealModel").onclick    = () => { hideReveal(); openModelSheet(); syncActionControlsVisibility(); };
+if ($("revealModel"))    $("revealModel").onclick    = () => { hideReveal(); openAiToolModal(); syncActionControlsVisibility(); };
+if ($("openAiToolBtn"))  $("openAiToolBtn").onclick  = () => openAiToolModal();
+if ($("sideAiToolBtn"))  $("sideAiToolBtn").onclick  = () => {
+  if (document.body && document.body.classList) document.body.classList.remove("side-open");
+  updateFabState();
+  openAiToolModal();
+};
+if ($("aiToolModalClose")) $("aiToolModalClose").onclick = closeAiToolModal;
+if ($("aiToolModal")) {
+  $("aiToolModal").addEventListener("click", (e) => {
+    if (e.target === $("aiToolModal")) closeAiToolModal();
+  });
+}
+if ($("googleAuthToggle")) $("googleAuthToggle").onclick = toggleGoogleAuth;
+if ($("vertexAuthToggle")) $("vertexAuthToggle").onclick = toggleVertexAuth;
+
+const bindThinkingPills = (containerId) => {
+  const container = $(containerId);
+  if (!container) return;
+  container.addEventListener("click", (e) => {
+    const btn = e.target.closest(".pill-btn");
+    if (!btn || !btn.dataset.level) return;
+    ThinkingUI.setThinking(btn.dataset.level);
+  });
+};
+bindThinkingPills("googleThinkingPills");
+bindThinkingPills("vertexThinkingPills");
+
+if ($("choicesThinkingPills")) {
+  $("choicesThinkingPills").addEventListener("click", (e) => {
+    const btn = e.target.closest(".pill-btn");
+    if (!btn || !btn.dataset.choicesLevel) return;
+    ThinkingUI.setThinking(undefined, btn.dataset.choicesLevel);
+  });
+}
+
+if ($("footThinkingBar")) {
+  $("footThinkingBar").addEventListener("click", (e) => {
+    const btn = e.target.closest(".segment-btn");
+    if (!btn || !btn.dataset.level) return;
+    ThinkingUI.setThinking(btn.dataset.level);
+  });
+}
+
+if ($("footChoicesThinkingSelect")) {
+  $("footChoicesThinkingSelect").addEventListener("change", (e) => {
+    ThinkingUI.setThinking(undefined, e.target.value);
+  });
+}
+
+if ($("googleMaxTokens")) {
+  $("googleMaxTokens").addEventListener("input", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
+if ($("vertexMaxTokens")) {
+  $("vertexMaxTokens").addEventListener("input", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
+
+if ($("googleModel")) {
+  $("googleModel").addEventListener("change", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
+if ($("vertexModel")) {
+  $("vertexModel").addEventListener("change", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
+if ($("vertexCustomModel")) {
+  $("vertexCustomModel").addEventListener("input", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
+if ($("choicesIdeModel")) {
+  $("choicesIdeModel").addEventListener("change", () => {
+    ThinkingUI.render(state?.setting);
+  });
+}
 
 if ($("mobileElapsedChip")) $("mobileElapsedChip").onclick = openElapsedModal;
 if ($("elapsedCancel")) $("elapsedCancel").onclick = closeElapsedModal;

@@ -8,7 +8,7 @@ RP Image Chat - server (multi-session)
   - 応答に付いた画像プロンプトを ComfyUI に投げ、完成画像をセッションに反映
 標準ライブラリのみ。  python server.py
 """
-import json, os, threading, time, uuid, random, shutil, urllib.request, mimetypes, sys, copy, socket, sqlite3, datetime, hashlib, re, base64, binascii, collections, concurrent.futures
+import json, os, threading, time, uuid, random, shutil, urllib.request, mimetypes, sys, copy, socket, sqlite3, datetime, hashlib, re, base64, binascii, collections, concurrent.futures, inspect
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 import qr  # スマホで開くアドレスの QR コード
@@ -497,6 +497,8 @@ DEFAULT_SETTING = {
     "google_max_output_tokens": 8192,
     "vertex_model": "",
     "vertex_choices_model": "",
+    "thinking_level": "auto",           # 本文・睡眠プロセス用: auto / minimal / low / medium / high / xhigh
+    "choices_thinking_level": "low",    # 補助タスク用: low / minimal / medium / high / auto / same
     "ide_revert": True,   # 発言を編集・削除・作り直し・巻き戻ししたら、担当の会話もその前まで巻き戻す
     # 入力の渡し方。diff: 全部のときは履歴を30000字まで・ファイルの設定も中身を出す、続きは増えた分と変わった分
     # light: 全部のときは直近15件を全文（前はAIメモ）・ファイルの設定と長い会話は場所を出して読ませる、続きは今回の発言（と変わった設定）だけ
@@ -933,6 +935,10 @@ def merge_defaults(setting):
         out["google_max_output_tokens"] = 8192
     out["google_fetch"] = bool(out.get("google_fetch", True))
     out["google_safety_off"] = bool(out.get("google_safety_off", True))
+    tl = str(out.get("thinking_level") or "auto").strip().lower()
+    out["thinking_level"] = tl if tl in google_ai.VALID_THINKING_LEVELS else "auto"
+    ctl = str(out.get("choices_thinking_level") or "low").strip().lower()
+    out["choices_thinking_level"] = ctl if ctl in google_ai.VALID_CHOICES_THINKING_LEVELS else "low"
     return out
 
 
@@ -977,6 +983,49 @@ def active_api_model(st, task_type="user"):
 
 # 既存テスト（test_google_parallel_choices.py:39）との互換維持
 _google_model = active_api_model
+
+
+def active_thinking_level(st, task_type="user"):
+    """タスク種別に応じて google_ai.generate へ渡す thinking_level を解決する"""
+    st = st or {}
+    main_lv = str(st.get("thinking_level") or "auto").strip().lower()
+    if main_lv not in google_ai.VALID_THINKING_LEVELS:
+        main_lv = "auto"
+
+    if task_type == "user":
+        return main_lv
+
+    if task_type == "consolidation":
+        # 世代交代の睡眠プロセス（30ターン要約＋時間確定）は浅すぎると精度が落ちるため最低 medium に底上げ
+        return "medium" if main_lv in ("minimal", "low") else main_lv
+
+    # 補助タスク: choices / image_refine / memory_extract / memory_regen
+    sub_lv = str(st.get("choices_thinking_level") or "low").strip().lower()
+    if sub_lv not in google_ai.VALID_CHOICES_THINKING_LEVELS:
+        sub_lv = "low"
+    resolved = main_lv if sub_lv == "same" else sub_lv
+
+    # 「本文と同じ(same)」で本文が xhigh の場合でも、選択肢や画像推敲が超長考で詰まらないよう high に抑える
+    if resolved == "xhigh":
+        resolved = "high"
+
+    # 記憶抽出・一括記憶再生成はバックグラウンドで走るため、長考設定でも最大 medium に制限して保護
+    if task_type in ("memory_extract", "memory_regen") and resolved in ("high", "xhigh"):
+        return "medium"
+    return resolved
+
+
+def _call_google_generate(model, prompt, *args, **kwargs):
+    """既存テストのモック関数が thinking_level 引数を持たない場合でも安全に呼び出す"""
+    fn = google_ai.generate
+    try:
+        sig = inspect.signature(fn)
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if not has_var_kw and "thinking_level" not in sig.parameters:
+            kwargs.pop("thinking_level", None)
+    except (ValueError, TypeError):
+        pass
+    return fn(model, prompt, *args, **kwargs)
 
 
 def _api_model_setting(st, task_type="user"):
@@ -11894,11 +11943,13 @@ def run_google_task(sid, mid, task_type=None, key=None):
         use_fetch = bool(st.get("google_fetch", True)) and (task_type == "user")
         _set_google_status(sid, task_type, "requesting", provider=provider, model=model,
                            fetch=use_fetch, images=len(images))
-        res = google_ai.generate(
+        thinking_level = active_thinking_level(st, task_type)
+        res = _call_google_generate(
             model, prompt, system,
             safety_off=bool(st.get("google_safety_off", True)),
             max_output_tokens=int(st.get("google_max_output_tokens") or 8192),
             fetch=use_fetch, images=images, provider=provider,
+            thinking_level=thinking_level,
         )
         if sid in deleted_sessions:
             return
@@ -14507,6 +14558,16 @@ class H(BaseHTTPRequestHandler):
                                 and not has_choices_ide_session(st)):
                             st["choices_ide_auto"] = True
 
+                    if "thinking_level" in d:
+                        tl = str(d.get("thinking_level") or "").strip().lower()
+                        if tl not in google_ai.VALID_THINKING_LEVELS:
+                            return self.send_json({"error": f"無効な thinking_level です: {tl}"}, 400)
+                        st["thinking_level"] = tl
+                    if "choices_thinking_level" in d:
+                        ctl = str(d.get("choices_thinking_level") or "").strip().lower()
+                        if ctl not in google_ai.VALID_CHOICES_THINKING_LEVELS:
+                            return self.send_json({"error": f"無効な choices_thinking_level です: {ctl}"}, 400)
+                        st["choices_thinking_level"] = ctl
                     if prev != provider:
                         _purge_google_session_state(sid)
                         write_sent(sid, {"ide": "", "choices_ide": "", "msgs": [], "mem_ids": [],
@@ -14530,6 +14591,30 @@ class H(BaseHTTPRequestHandler):
                     "fetch": st.get("google_fetch", True),
                     "safety_off": st.get("google_safety_off", True),
                     "max_output_tokens": st.get("google_max_output_tokens", 8192),
+                    "thinking_level": st.get("thinking_level", "auto"),
+                    "choices_thinking_level": st.get("choices_thinking_level", "low"),
+                })
+            if p == "/api/ai/thinking":
+                sid = d.get("sid") or sid or ""
+                with lock:
+                    live = load(sid)
+                    lst = live["setting"]
+                    if "thinking_level" in d:
+                        tl = str(d.get("thinking_level") or "").strip().lower()
+                        if tl not in google_ai.VALID_THINKING_LEVELS:
+                            return self.send_json({"error": f"無効な thinking_level です: {tl}"}, 400)
+                        lst["thinking_level"] = tl
+                    if "choices_thinking_level" in d:
+                        ctl = str(d.get("choices_thinking_level") or "").strip().lower()
+                        if ctl not in google_ai.VALID_CHOICES_THINKING_LEVELS:
+                            return self.send_json({"error": f"無効な choices_thinking_level です: {ctl}"}, 400)
+                        lst["choices_thinking_level"] = ctl
+                    live["setting"] = lst
+                    save(live)
+                return self.send_json({
+                    "ok": True,
+                    "thinking_level": lst.get("thinking_level", "auto"),
+                    "choices_thinking_level": lst.get("choices_thinking_level", "low"),
                 })
             if p == "/api/ide/model":
                 # 合図を送るときのモデル。空なら会話の最後の入力と同じ
@@ -14796,7 +14881,11 @@ class H(BaseHTTPRequestHandler):
                     new.pop("memo_as_initial", None)
                 # 固定キャラ（AI が応答で足す）と担当IDE（専用の操作で変える）はフォームから上書きさせない
                 keep = {k: s["setting"].get(k, v) for k, v in NO_IDE.items()}
-                for _pk in ("ai_provider", "google_model", "google_fetch", "google_safety_off", "google_max_output_tokens", "vertex_model", "vertex_choices_model"):
+                for _pk in (
+                    "ai_provider", "google_model", "google_fetch", "google_safety_off",
+                    "google_max_output_tokens", "vertex_model", "vertex_choices_model",
+                    "thinking_level", "choices_thinking_level",
+                ):
                     keep[_pk] = s["setting"].get(_pk)
                 keep["chars"] = s["setting"].get("chars") or []
                 keep["total_turns"] = s["setting"].get("total_turns", 0)

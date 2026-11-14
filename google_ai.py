@@ -67,6 +67,110 @@ def _is_thinking_model(model_id):
     return any(k in low for k in ("2.5", "3.", "3-", "4.", "4-", "thinking"))
 
 
+VALID_THINKING_LEVELS = ("auto", "minimal", "low", "medium", "high", "xhigh")
+VALID_CHOICES_THINKING_LEVELS = ("low", "minimal", "medium", "high", "auto", "same")
+
+
+def _thinking_family(model_id):
+    """モデル名から思考パラメータの世代・対応範囲を判定する
+    戻り値:
+      'none'            : 思考非対応、または 2.0-thinking 等の level/budget 非対応モデル、Gemma等
+      'budget_25_flash' : Gemini 2.5 Flash 系 (thinkingBudget: 0〜24576)
+      'budget_25_pro'   : Gemini 2.5 Pro 系 (thinkingBudget: 128〜32768)
+      'level_3_flash'   : Gemini 3.0〜3.7 Flash 系 (MINIMAL / LOW / MEDIUM / HIGH)
+      'level_38_4'      : Gemini 3.x Pro 系、3.8+ Flash、4 Carbon、-latest 等 (LOW / MEDIUM / HIGH)
+      'level_hydrogen'  : Gemini 4 Hydrogen 系 (LOW / MEDIUM / HIGH / XHIGH)
+    """
+    low = str(model_id or "").lower()
+
+    # 1. 思考パラメータ非対応モデル（2.0系、1.x系、Gemma系）の完全除外
+    # ※ _is_thinking_model("gemma-3-27b") は "3-" により True になるため、ここで確実に none に落とす
+    if any(k in low for k in ("2.0", "2-0", "1.5", "1-5", "1.0", "1-0", "gemma", "nano", "embedding")):
+        return "none"
+
+    # 思考モデル判定（_is_thinking_model または 思考世代の最新エイリアス）
+    is_latest_thinking = any(
+        k in low for k in ("flash-latest", "flash-lite-latest", "pro-latest", "thinking-latest")
+    )
+    if not (_is_thinking_model(low) or "2-5" in low or is_latest_thinking):
+        return "none"
+
+    # 2. Gemini 2.5 系 (thinkingBudget)
+    if "2.5" in low or "2-5" in low:
+        return "budget_25_flash" if "flash" in low else "budget_25_pro"
+
+    # 3. Gemini 4 Hydrogen 系 (XHIGH 対応)
+    if "hydrogen" in low:
+        return "level_hydrogen"
+
+    # 4. Gemini 3.8+ / 4.x / -latest 系 (MINIMAL非対応、LOW / MEDIUM / HIGH)
+    # ※ 3.8, 3.9, 4.x, および最新エイリアス（flash-lite-latest は 3.x Flash-Lite 相当として MINIMAL 対応の 5 へ流す）
+    if any(k in low for k in ("3.8", "3-8", "3.9", "3-9", "4.", "4-", "pro-latest")) or (
+        "flash-latest" in low and "lite" not in low
+    ):
+        return "level_38_4"
+
+    # 5. Gemini 3.0〜3.7 Flash / Flash-Lite 系 (MINIMAL 対応)
+    if "flash" in low:
+        return "level_3_flash"
+
+    # 6. その他の 3.x Pro 等
+    return "level_38_4"
+
+
+def resolve_thinking_config(model_id, level="auto"):
+    """モデルと指定レベルから (thinkingConfig辞書またはNone, 実効レベル文字列, 推奨最小maxOutputTokens) を返す。
+    非対応の段は HTTP 400 を防ぐため自動で有効な隣接段へ丸める。
+    """
+    fam = _thinking_family(model_id)
+    lv = str(level or "auto").strip().lower()
+    if lv not in VALID_THINKING_LEVELS:
+        lv = "auto"
+
+    if fam == "none":
+        return None, "none", 0
+
+    # 1. Gemini 2.5 系: thinkingBudget (トークン数) に変換
+    if fam in ("budget_25_flash", "budget_25_pro"):
+        if lv == "auto":
+            return None, "auto(budget)", 0
+        min_b = 0 if fam == "budget_25_flash" else 128
+        budget_map = {
+            "minimal": min_b,
+            "low": 1024,
+            "medium": 4096,
+            "high": 8192,
+            "xhigh": 16384,
+        }
+        b = budget_map.get(lv, 4096)
+        # 思考バジェットが maxOutputTokens 以上になると HTTP 400 または本文空切れになるため、
+        # b > 0 のときは必ず「思考バジェット + 本文用余白(4096)」かつ最低 8192 以上を確保する
+        min_out = max(8192, b + 4096) if b > 0 else 0
+        return {"thinkingBudget": b}, f"budget:{b}", min_out
+
+    # 2. Gemini 3.x / 4.x 系: thinkingLevel に変換
+    default_lv = "HIGH" if fam == "level_hydrogen" else "MEDIUM"
+    if lv == "auto":
+        return None, f"auto({default_lv})", 0
+
+    eff = lv.upper()
+    # MINIMAL は 3.0〜3.7 Flash 系のみ対応。Pro 系や 3.8 / 4 系では LOW に丸める
+    if eff == "MINIMAL" and fam != "level_3_flash":
+        eff = "LOW"
+    # XHIGH は Hydrogen のみ対応。他モデルでは HIGH に丸める
+    if eff == "XHIGH" and fam != "level_hydrogen":
+        eff = "HIGH"
+
+    if eff == "XHIGH":
+        min_out = 32768
+    elif eff == "HIGH":
+        min_out = 16384
+    else:
+        min_out = 0
+
+    return {"thinkingLevel": eff}, eff, min_out
+
+
 SAFETY_CATEGORIES = [
     "HARM_CATEGORY_HARASSMENT",
     "HARM_CATEGORY_HATE_SPEECH",
@@ -1162,7 +1266,23 @@ def _sdk_payload_to_kwargs(payload, timeout=180):
         cfg["response_schema"] = gc["responseSchema"]
     if gc.get("thinkingConfig"):
         tc = gc["thinkingConfig"]
-        cfg["thinking_config"] = t.ThinkingConfig(thinking_budget=int(tc.get("thinkingBudget") or 0))
+        tc_cls = getattr(t, "ThinkingConfig", None)
+        if tc_cls is None:
+            raise _SdkFallbackToRest("SDK ThinkingConfig not available in genai_types")
+        if "thinkingLevel" in tc and tc["thinkingLevel"]:
+            fields = (getattr(tc_cls, "model_fields", None)
+                      or getattr(tc_cls, "__fields__", None) or {})
+            if fields and "thinking_level" not in fields:
+                raise _SdkFallbackToRest("SDK ThinkingConfig does not support thinking_level")
+            try:
+                tc_obj = tc_cls(thinking_level=str(tc["thinkingLevel"]))
+            except Exception:
+                raise _SdkFallbackToRest("SDK ThinkingConfig raised error on thinking_level")
+            if getattr(tc_obj, "thinking_level", None) is None:
+                raise _SdkFallbackToRest("SDK ThinkingConfig ignored thinking_level")
+            cfg["thinking_config"] = tc_obj
+        elif "thinkingBudget" in tc and tc["thinkingBudget"] is not None:
+            cfg["thinking_config"] = tc_cls(thinking_budget=int(tc.get("thinkingBudget", 0)))
     temp = gc.get("temperature") if "temperature" in gc else payload.get("temperature")
     if temp is not None:
         cfg["temperature"] = float(temp)
@@ -1517,20 +1637,27 @@ def extract_text(data):
     meta = {"finish_reason": None, "block_reason": None, "safety_ratings": [], "usage": {}}
     if not isinstance(data, dict):
         return "", meta
-    um = data.get("usageMetadata")
+    um = data.get("usageMetadata") or data.get("usage_metadata")
     if isinstance(um, dict):
-        meta["usage"] = um
-    pf = data.get("promptFeedback")
+        meta["usage"] = dict(um)
+        # 思考トークン数を camelCase / snake_case の双方から参照可能にする
+        if "thoughts_token_count" in meta["usage"] and "thoughtsTokenCount" not in meta["usage"]:
+            meta["usage"]["thoughtsTokenCount"] = meta["usage"]["thoughts_token_count"]
+        elif "thoughtsTokenCount" in meta["usage"] and "thoughts_token_count" not in meta["usage"]:
+            meta["usage"]["thoughts_token_count"] = meta["usage"]["thoughtsTokenCount"]
+    pf = data.get("promptFeedback") or data.get("prompt_feedback")
     if isinstance(pf, dict):
-        meta["block_reason"] = pf.get("blockReason")
-        if isinstance(pf.get("safetyRatings"), list):
-            meta["safety_ratings"] = pf["safetyRatings"]
+        meta["block_reason"] = pf.get("blockReason") or pf.get("block_reason")
+        sr = pf.get("safetyRatings") or pf.get("safety_ratings")
+        if isinstance(sr, list):
+            meta["safety_ratings"] = sr
     cands = data.get("candidates")
     if isinstance(cands, list) and cands and isinstance(cands[0], dict):
         c0 = cands[0]
-        meta["finish_reason"] = c0.get("finishReason")
-        if isinstance(c0.get("safetyRatings"), list):
-            meta["safety_ratings"] = c0["safetyRatings"]
+        meta["finish_reason"] = c0.get("finishReason") or c0.get("finish_reason")
+        sr = c0.get("safetyRatings") or c0.get("safety_ratings")
+        if isinstance(sr, list):
+            meta["safety_ratings"] = sr
         texts = []
         for p in (c0.get("content") or {}).get("parts") or []:
             if isinstance(p, dict) and not p.get("thought") and isinstance(p.get("text"), str):
@@ -1618,7 +1745,8 @@ def _is_tool_400(msg):
 def _is_thinking_400(msg):
     low = str(msg or "").lower()
     return any(w in low for w in ("thinking", "thinking_config", "thinkingconfig",
-                                  "thinking_budget", "thinkingbudget"))
+                                  "thinking_budget", "thinkingbudget",
+                                  "thinking_level", "thinkinglevel"))
 
 
 def _step1_generation_config(model):
@@ -1631,13 +1759,19 @@ def _step1_generation_config(model):
     return {"maxOutputTokens": 256}
 
 
-def _step2_generation_config(model, max_output_tokens, provider="google"):
-    """2段目・直接生成。Vertex の思考モデルは思考で JSON が切れないよう下限を上げる"""
+def _step2_generation_config(model, max_output_tokens, provider="google", thinking_level="auto"):
+    """2段目・直接生成。Vertex の思考モデルや高思考設定時は思考で JSON が切れないよう下限を上げる"""
     tok = int(max_output_tokens or 8192)
     low = str(model or "").lower()
-    if provider == "vertex" and _is_thinking_model(low):
+    tc, _, min_out = resolve_thinking_config(model, thinking_level)
+    if min_out > 0:
+        tok = max(tok, min_out)
+    if provider == "vertex" and (_is_thinking_model(low) or "2-5" in low):
         tok = max(tok, 16384)
-    return {"maxOutputTokens": tok, "responseMimeType": "application/json"}
+    cfg = {"maxOutputTokens": tok, "responseMimeType": "application/json"}
+    if tc:
+        cfg["thinkingConfig"] = tc
+    return cfg
 
 
 def _next_safety_payload(provider, cur_payload):
@@ -1696,7 +1830,8 @@ def _parts_with_images(text, images):
 
 
 def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=8192,
-             fetch=True, images=None, timeout=180, fetch_name="fetch_prompt", provider="google"):
+             fetch=True, images=None, timeout=180, fetch_name="fetch_prompt", provider="google",
+             thinking_level="auto"):
     """
     戻り値:
       {"text": str, "meta": {...}, "fetch_called": bool, "first_status", "second_status",
@@ -1706,6 +1841,9 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
     if not model:
         return {"text": "", "meta": {}, "fetch_called": False, "error": "モデルが未設定です",
                 "retryable": False, "http_status": None, "elapsed_ms": 0}
+    _, eff_level, _ = resolve_thinking_config(model, thinking_level)
+    if eff_level in ("XHIGH", "budget:16384"):
+        timeout = max(int(timeout or 180), 240)
     system = system or "あなたは日本語ロールプレイの本文生成器です。必ずJSONのみを返します。"
     use_fetch = bool(fetch) and not images
     safety = _safety_settings(safety_off, provider=provider)
@@ -1742,7 +1880,7 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
                     direct_payload = {
                         "systemInstruction": {"parts": [{"text": system}]},
                         "contents": [{"role": "user", "parts": _parts_with_images(prompt, images)}],
-                        "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider),
+                        "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider, thinking_level=thinking_level),
                     }
                     if safety:
                         direct_payload["safetySettings"] = safety
@@ -1782,7 +1920,7 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
                         "response": {"context": prompt},
                     }}]},
                 ],
-                "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider),
+                "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider, thinking_level=thinking_level),
             }
             if safety:
                 second_payload["safetySettings"] = safety
@@ -1794,7 +1932,7 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
                     direct_payload = {
                         "systemInstruction": {"parts": [{"text": system}]},
                         "contents": [{"role": "user", "parts": _parts_with_images(prompt, images)}],
-                        "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider),
+                        "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider, thinking_level=thinking_level),
                     }
                     if safety:
                         direct_payload["safetySettings"] = safety
@@ -1831,7 +1969,7 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
             payload = {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": _parts_with_images(prompt, images)}],
-                "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider),
+                "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider, thinking_level=thinking_level),
             }
             if safety:
                 payload["safetySettings"] = safety

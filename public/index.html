@@ -22,6 +22,10 @@
   <input id="importFile" type="file" accept=".json,application/json" hidden>
   <div id="sideBottomSection" class="side-bottom-section">
     <div id="sideModelContainer" class="side-model-slot"></div>
+    <div class="side-ai-summary-row" id="sideAiSummaryRow">
+      <span id="sideAiSummaryText" class="side-ai-summary-text">AI: -</span>
+      <button id="sideAiToolBtn" type="button" class="sub side-ai-tool-btn" title="AI・モデル・認証設定を開く">⚡</button>
+    </div>
     <div class="side-actions-row">
       <button id="sideRpToggle" type="button" class="sub side-action-btn" title="背景に画像を表示">🖼️ 背景表示</button>
       <button id="sideRagToggle" type="button" class="sub side-action-btn" title="記憶を管理">🧠 記憶</button>
@@ -54,92 +58,16 @@
       <button id="settingsCloseBtn" type="button" class="sub settings-close-btn" title="設定を閉じる">✕ 閉じる</button>
     </div>
     <div class="form">
-      <div class="box ide-box">
-        <div class="box-title">AI</div>
-        <div class="row" style="margin-bottom:8px">
-          <label style="margin:0">プロバイダ
-            <select id="aiProvider">
-              <option value="antigravity">Antigravity</option>
-              <option value="google">Google Gemini（AI Studio）</option>
-              <option value="vertex">Google Cloud（Vertex AI）</option>
-            </select>
-          </label>
+      <div class="box">
+        <div class="box-title">AI・生成エンジン</div>
+        <div id="aiSummaryRow" class="ai-summary-row">
+          <span id="aiSummaryText">Google Gemini 3.8 Flash (思考: 低)</span>
+          <button id="openAiToolBtn" type="button" class="sub">⚡ AI・モデル・認証設定を開く</button>
         </div>
-        <span class="muted" style="display:block; margin-bottom:8px">本文を書くエンジン。Antigravity の本文モデルは画面下の「モデル」、Google のときはこの箱の「Googleモデル」で選びます（選択肢のモデルはどちらのエンジンでも、下の「選択肢のモデル」）。</span>
-        <div id="googleBox" class="hidden" style="border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:10px">
-          <div class="row" style="justify-content:space-between">
-            <strong>Google Gemini</strong>
-            <span id="googleKeyState" class="muted">確認中…</span>
-          </div>
-          <div class="row" style="margin-top:6px">
-            <button id="googleKeySet" type="button" class="sub">APIキー設定</button>
-            <button id="googleKeyDelete" type="button" class="sub danger">キー削除</button>
-            <button id="googleModelsReload" type="button" class="sub">モデル一覧を更新</button>
-          </div>
-          <label>Googleモデル<select id="googleModel"><option value="">APIキーを保存してください</option></select></label>
-          <label class="check"><input type="checkbox" id="googleFetch"> プロンプト取り寄せ（function calling）を使う</label>
-          <label class="check"><input type="checkbox" id="googleSafetyOff"> 調整可能な安全カテゴリをOFFにする（PROHIBITED_CONTENTは解除不可）</label>
-          <label>最大出力トークン<input id="googleMaxTokens" type="number" min="256" max="65536" step="256" value="8192"></label>
-          <div class="row">
-            <button id="googleApply" type="button">Google設定を保存</button>
-            <span id="googleApplyMsg" class="muted"></span>
-          </div>
-          <span class="muted">GoogleはSFW向けです。NSFWはAGまたは別APIを使ってください。Googleでブロックされた場合、自動でAGへは切り替えません。</span>
-        </div>
-        <div id="vertexBox" class="hidden" style="border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:10px">
-          <div class="row" style="justify-content:space-between">
-            <strong>Google Cloud（Vertex AI）</strong>
-            <span id="vertexKeyState" class="muted">確認中…</span>
-          </div>
-          <div class="row" style="margin-top:6px">
-            <button id="vertexConfigSet" type="button" class="sub">認証・リージョン設定</button>
-            <button id="vertexConfigDelete" type="button" class="sub danger">設定削除</button>
-            <button id="vertexModelsReload" type="button" class="sub">モデル一覧を更新</button>
-          </div>
-          <label>Vertexモデル<select id="vertexModel"><option value="">認証・プロジェクトを設定してください</option></select></label>
-          <label>カスタムモデルID（任意・一覧にないモデルを指定する場合）
-            <input id="vertexCustomModel" type="text" placeholder="例: gemini-2.5-pro / gemini-2.0-flash-001">
-          </label>
-          <label class="check"><input type="checkbox" id="vertexFetch"> プロンプト取り寄せ（function calling）を使う</label>
-          <label class="check"><input type="checkbox" id="vertexSafetyOff"> 調整可能な安全カテゴリをOFFにする</label>
-          <label>最大出力トークン<input id="vertexMaxTokens" type="number" min="256" max="65536" step="256" value="8192"></label>
-          <div class="row">
-            <button id="vertexApply" type="button">Vertex設定を保存</button>
-            <span id="vertexApplyMsg" class="muted"></span>
-          </div>
-        </div>
-        <div id="agAiBox">
-        <span class="muted">Antigravityの会話を選ぶと、その会話だけがこのチャンネルの入力を受け取ります</span>
-        <div id="ideCurrent" class="ide-current">指定なし（--ide なしの wait_input.py が受け取る）</div>
-        <div class="row">
-          <button id="idePick" type="button" class="sub" title="Antigravity の会話をフォルダから選ぶ（検索・会話IDの直接入力もできる）">会話を選ぶ…</button>
-          <button id="ideNew" type="button" class="sub" title="Antigravity に新しい会話を作って担当にする（何も送らない。最初の入力で送られる）">新規会話</button>
-          <button id="ideFork" type="button" class="sub" title="担当の会話を途中の発言から分岐する（元の会話はそのまま。同じフォルダに新しい会話ができる）">分岐…</button>
-          <button id="ideRename" type="button" class="sub" title="担当の会話の名前を変える（Antigravity の一覧の名前が変わる。再起動は要らない）">名前…</button>
-          <button id="ideClear" type="button" class="sub" title="担当の会話を外す（会話は消えない）">外す</button>
-          <button id="ctxReset" type="button" class="sub" title="同じ担当のままでも、次の入力で設定と会話を全部送り直す（AIが忘れていそうなとき）">次は全部送る</button>
-        </div>
-        <span id="ideState" class="muted"></span>
-        <div class="row">
-          <span class="muted" title="会話IDを指定して送るので、ウィンドウやフォーカスは使わない。会話が応答中なら終わるのを待つ。こちらから送るまで会話は止まっているので、待っている間は使用量を使わない">入力から2秒たっても受け取られていなければ、担当の会話にスペース1文字を送る</span>
-          <button id="idePokeNow" type="button" class="sub" title="今すぐ1回、担当IDE会話に半角スペースを送る（応答中なら送らない）">今すぐ送信</button>
-        </div>
-        <span id="pokeState" class="muted"></span>
-        <hr style="border:0; border-top:1px solid #333; margin:10px 0;">
-        <div class="sub-label">選択肢（8択）担当の Antigravity 会話 <span class="muted">（設定すると発言送信と同時に別セッションで並列生成し、待ち時間を約15秒短縮します）</span></div>
-        <div id="choicesIdeCurrent" class="ide-current">指定なし（メインの会話で順番に生成）</div>
-        <div class="row">
-          <button id="choicesIdePick" type="button" class="sub" title="選択肢生成を担当する Antigravity の会話を選ぶ">会話を選ぶ…</button>
-          <button id="choicesIdeNew" type="button" class="sub" title="選択肢生成用の新しい Antigravity 会話を作って担当にする">新規会話</button>
-          <button id="choicesIdeRename" type="button" class="sub" title="選択肢担当の会話の名前を変える">名前…</button>
-          <button id="choicesIdeClear" type="button" class="sub" title="選択肢担当の会話を外す（メイン会話での順次生成に戻す）">外す</button>
-          <button id="choicesIdePokeNow" type="button" class="sub" title="選択肢担当の会話に今すぐ送信する">今すぐ送信</button>
-        </div>
-        <span id="choicesIdeState" class="muted"></span>
-        <span id="choicesPokeState" class="muted"></span>
-        <label title="選択肢の生成に使うモデル。Antigravity のときは選択肢担当の会話、Google のときは API で使う。高速なモデルを選ぶとさらに早く選択肢が出ます">選択肢のモデル<select id="choicesIdeModel">
-          <option value="">メインのモデルと同じ</option>
-        </select></label>
+      </div>
+
+      <div class="box">
+        <div class="box-title">Antigravity 実行詳細・ルール</div>
         <label title="担当の会話にもう見せたものは、どちらでも送り直さない。違うのは全部送るときと、続きのときに何を出すか">入力の渡し方<select id="f_input_mode">
           <option value="diff">差分（全部のときは履歴とファイルの中身も出す。続きは増えた分と変わった分）</option>
           <option value="light">今回の発言だけ（初回は直近15件を全文＋それより前はAIメモ、ファイルの設定と長い会話は場所を出して読ませる）</option>
@@ -168,7 +96,6 @@
             <button id="previewBtn" type="button" class="sub">送る設定を確認</button>
           </div>
         </div>
-        </div><!-- /agAiBox -->
       </div>
 
       <div class="box">
@@ -342,6 +269,29 @@
         <option value="">会話の最後の入力と同じ</option>
       </select></label>
       <button id="ideModelReload" type="button" class="sub" title="残りを読み直す（Antigravity のモデル一覧と残りの利用枠）">↻</button>
+      <div id="footThinkingSection" class="foot-thinking-section hidden">
+        <div class="foot-thinking-bar" id="footThinkingBar" role="group" aria-label="思考の深さ">
+          <button type="button" class="segment-btn" data-level="auto" title="自動: モデル既定">自動</button>
+          <button type="button" class="segment-btn" data-level="minimal" title="最小: 最速">最小</button>
+          <button type="button" class="segment-btn" data-level="low" title="低: 速い">低</button>
+          <button type="button" class="segment-btn" data-level="medium" title="中: バランス">中</button>
+          <button type="button" class="segment-btn" data-level="high" title="高: 長考">高</button>
+          <button type="button" class="segment-btn" data-level="xhigh" title="最大: 超長考">最大</button>
+        </div>
+        <div class="foot-thinking-sub-row">
+          <span class="foot-thinking-eff muted" id="footThinkingEff">実効: -</span>
+          <label class="foot-choices-thinking-label" title="補助タスク（選択肢・画像推敲・記憶抽出）の思考の深さ">補助:
+            <select id="footChoicesThinkingSelect">
+              <option value="low">⚡低 (推奨)</option>
+              <option value="minimal">💨最小</option>
+              <option value="medium">⚖️中</option>
+              <option value="high">🔍高</option>
+              <option value="same">🔗本文と同じ</option>
+              <option value="auto">自動</option>
+            </select>
+          </label>
+        </div>
+      </div>
     </div>
     <div id="attachList" class="attach-list hidden"></div>
     <div class="foot-input">
@@ -586,48 +536,250 @@
     </div>
   </div>
 </div>
-<div id="googleKeyModal" class="modal hidden">
-  <div class="modal-content compact">
-    <h2>Google APIキー</h2>
-    <div class="muted">キーはサーバーの .env ファイルに保存されます。ブラウザには保存しません。</div>
-    <label>APIキー<input id="googleKeyInput" type="password" autocomplete="off" placeholder="AIza... / AQ..."></label>
-    <div class="modal-actions">
-      <button id="googleKeySave" type="button">保存</button>
-      <button id="googleKeyCancel" type="button" class="sub">キャンセル</button>
+<div id="googleKeyModal" class="modal hidden"></div>
+<div id="vertexConfigModal" class="modal hidden"></div>
+<div id="aiToolModal" class="modal hidden">
+  <div class="modal-card modal-content ai-tool-modal-content">
+    <div class="ai-tool-header">
+      <h2>⚡ AI・モデル・認証設定</h2>
+      <button id="aiToolModalClose" type="button" class="sub">✕ 閉じる</button>
     </div>
-    <div id="googleKeyMsg" class="muted"></div>
-  </div>
-</div>
-<div id="vertexConfigModal" class="modal hidden">
-  <div class="modal-card modal-content" style="max-width:520px">
-    <h3>Vertex AI 認証・リージョン設定</h3>
-    <p class="muted" style="font-size:12px">
-      GCPサービスアカウントのJSONキーを選択（または貼り付け）するか、ADC（<code>gcloud auth application-default login</code>）を設定した状態でプロジェクトIDを指定してください。<br>
-      ※サービスアカウントには最小権限（<code>Vertex AI ユーザー / roles/aiplatform.user</code>）のみを付与することを推奨します。
-    </p>
-    <label>サービスアカウントJSONファイルを選択
-      <input id="vertexSaFile" type="file" accept=".json,application/json">
-    </label>
-    <label>またはサービスアカウントJSONを直接貼り付け（任意・既存認証を使う場合は空欄可）
-      <textarea id="vertexSaInput" rows="4" placeholder='{"type": "service_account", "project_id": "...", ...}'></textarea>
-    </label>
-    <label>GCP プロジェクトID（必須）
-      <input id="vertexProjectInput" type="text" placeholder="例: my-gcp-project-123">
-    </label>
-    <label>リージョン（Location）
-      <input id="vertexLocationInput" type="text" list="vertexLocationList" value="global" placeholder="global">
-      <datalist id="vertexLocationList">
-        <option value="global"></option>
-        <option value="us-central1"></option>
-        <option value="us-east5"></option>
-        <option value="asia-northeast1"></option>
-        <option value="europe-west1"></option>
-      </datalist>
-    </label>
-    <div id="vertexConfigMsg" class="muted" style="min-height:1.4em; margin:6px 0"></div>
-    <div class="row" style="justify-content:flex-end; gap:8px">
-      <button id="vertexConfigCancel" type="button" class="sub">キャンセル</button>
-      <button id="vertexConfigSave" type="button">保存して認証確認</button>
+
+    <div class="ai-tool-provider-row">
+      <label style="margin:0; font-weight:600;">AIプロバイダ
+        <select id="aiProvider">
+          <option value="antigravity">Antigravity（IDE連携）</option>
+          <option value="google">Google Gemini（AI Studio）</option>
+          <option value="vertex">Google Cloud（Vertex AI）</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- Google AI Studio -->
+    <div id="googleBox" class="hidden">
+      <div class="auth-accordion">
+        <div class="auth-summary">
+          <span id="googleKeyState" class="muted">確認中…</span>
+          <button id="googleAuthToggle" type="button" class="sub" style="font-size:11px;">認証設定を変更 ▾</button>
+        </div>
+        <div id="googleAuthForm" class="auth-form hidden">
+          <div class="muted" style="font-size:11px;">キーはサーバーの .env ファイルに保存されます。ブラウザには保存しません。</div>
+          <label style="font-size:12px; margin:4px 0;">APIキー
+            <input id="googleKeyInput" type="password" autocomplete="off" placeholder="AIzaSy... / AQ...">
+          </label>
+          <div class="row" style="gap:6px;">
+            <button id="googleKeySave" type="button" style="font-size:12px;">保存</button>
+            <button id="googleKeySet" type="button" class="sub hidden" style="font-size:12px;">APIキー設定</button>
+            <button id="googleKeyDelete" type="button" class="sub danger" style="font-size:12px;">キー削除</button>
+          </div>
+          <div id="googleKeyMsg" class="muted" style="font-size:11px;"></div>
+        </div>
+      </div>
+
+      <div id="googleCardsSection" class="ai-cards-section">
+        <!-- 本文・状況整理カード -->
+        <div class="ai-card" style="margin-top:8px;">
+          <div class="ai-card-title">
+            <span>本文・状況整理（メイン生成）</span>
+            <button id="googleModelsReload" type="button" class="sub" style="font-size:11px;">モデル一覧を更新</button>
+          </div>
+          <label style="margin:0;">本文モデル
+            <select id="googleModel"><option value="">モデルを選択</option></select>
+          </label>
+          <div class="sub-label" style="margin-top:6px; display:flex; justify-content:space-between; align-items:center;">
+            <span>思考の深さ（Thinking Level）</span>
+            <span id="googleThinkingBadge" class="effective-badge">実効: -</span>
+          </div>
+          <div class="thinking-pills" id="googleThinkingPills">
+            <div class="pills-row">
+              <button type="button" class="pill-btn" data-level="auto">自動</button>
+              <button type="button" class="pill-btn" data-level="minimal">💨最小</button>
+              <button type="button" class="pill-btn" data-level="low">⚡低</button>
+            </div>
+            <div class="pills-row">
+              <button type="button" class="pill-btn" data-level="medium">⚖️中</button>
+              <button type="button" class="pill-btn" data-level="high">🔍高</button>
+              <button type="button" class="pill-btn" data-level="xhigh">🔥最大</button>
+            </div>
+          </div>
+          <div id="googleThinkingGuide" class="thinking-guide"></div>
+        </div>
+
+        <!-- API詳細パラメータカード -->
+        <div class="ai-card" style="margin-top:8px;">
+          <div class="ai-card-title">
+            <span>API詳細設定</span>
+          </div>
+          <label style="margin:0;">最大出力トークン
+            <span id="googleMaxTokensBadge" class="token-ceiling-badge muted" style="margin-left:6px;"></span>
+            <input id="googleMaxTokens" type="number" min="256" max="65536" step="256" value="8192">
+          </label>
+          <label class="check"><input type="checkbox" id="googleFetch"> プロンプト取り寄せ（function calling）を使う</label>
+          <label class="check"><input type="checkbox" id="googleSafetyOff"> 調整可能な安全カテゴリをOFFにする（PROHIBITED_CONTENTは解除不可）</label>
+          <div class="row" style="margin-top:6px;">
+            <button id="googleApply" type="button">Google設定を保存</button>
+            <span id="googleApplyMsg" class="muted"></span>
+          </div>
+          <span class="muted" style="font-size:11px;">GoogleはSFW向けです。NSFWはAGまたは別APIを使ってください。Googleでブロックされた場合、自動でAGへは切り替えません。</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Google Cloud Vertex AI -->
+    <div id="vertexBox" class="hidden">
+      <div class="auth-accordion">
+        <div class="auth-summary">
+          <span id="vertexKeyState" class="muted">確認中…</span>
+          <button id="vertexAuthToggle" type="button" class="sub" style="font-size:11px;">認証設定を変更 ▾</button>
+        </div>
+        <div id="vertexLocationWarning" class="warn hidden" style="font-size:11px; margin-top:4px;"></div>
+        <div id="vertexAuthForm" class="auth-form hidden">
+          <div class="muted" style="font-size:11px;">
+            GCPサービスアカウントJSONを選択/貼り付けするか、ADCを設定してプロジェクトIDを指定してください。
+          </div>
+          <label style="font-size:12px; margin:2px 0;">サービスアカウントJSONファイル
+            <input id="vertexSaFile" type="file" accept=".json,application/json">
+          </label>
+          <label style="font-size:12px; margin:2px 0;">またはJSON直接貼り付け
+            <textarea id="vertexSaInput" rows="2" placeholder='{"type": "service_account", ...}'></textarea>
+          </label>
+          <label style="font-size:12px; margin:2px 0;">GCP プロジェクトID（必須）
+            <input id="vertexProjectInput" type="text" placeholder="例: my-gcp-project-123">
+          </label>
+          <label style="font-size:12px; margin:2px 0;">リージョン（Location）
+            <input id="vertexLocationInput" type="text" list="vertexLocationList" value="global">
+            <datalist id="vertexLocationList">
+              <option value="global"></option>
+              <option value="us-central1"></option>
+              <option value="us-east5"></option>
+              <option value="asia-northeast1"></option>
+              <option value="europe-west1"></option>
+            </datalist>
+          </label>
+          <div class="row" style="gap:6px; margin-top:4px;">
+            <button id="vertexConfigSave" type="button" style="font-size:12px;">保存して認証確認</button>
+            <button id="vertexConfigSet" type="button" class="sub hidden" style="font-size:12px;">認証設定</button>
+            <button id="vertexConfigDelete" type="button" class="sub danger" style="font-size:12px;">設定削除</button>
+          </div>
+          <div id="vertexConfigMsg" class="muted" style="font-size:11px;"></div>
+        </div>
+      </div>
+
+      <div id="vertexCardsSection" class="ai-cards-section">
+        <!-- 本文・状況整理カード -->
+        <div class="ai-card" style="margin-top:8px;">
+          <div class="ai-card-title">
+            <span>本文・状況整理（メイン生成）</span>
+            <button id="vertexModelsReload" type="button" class="sub" style="font-size:11px;">モデル一覧を更新</button>
+          </div>
+          <label style="margin:0;">Vertexモデル
+            <select id="vertexModel"><option value="">モデルを選択</option></select>
+          </label>
+          <label style="margin:4px 0 0;">カスタムモデルID（一覧にない場合）
+            <input id="vertexCustomModel" type="text" placeholder="例: gemini-2.5-pro / gemini-2.0-flash-001">
+          </label>
+          <div class="sub-label" style="margin-top:6px; display:flex; justify-content:space-between; align-items:center;">
+            <span>思考の深さ（Thinking Level）</span>
+            <span id="vertexThinkingBadge" class="effective-badge">実効: -</span>
+          </div>
+          <div class="thinking-pills" id="vertexThinkingPills">
+            <div class="pills-row">
+              <button type="button" class="pill-btn" data-level="auto">自動</button>
+              <button type="button" class="pill-btn" data-level="minimal">💨最小</button>
+              <button type="button" class="pill-btn" data-level="low">⚡低</button>
+            </div>
+            <div class="pills-row">
+              <button type="button" class="pill-btn" data-level="medium">⚖️中</button>
+              <button type="button" class="pill-btn" data-level="high">🔍高</button>
+              <button type="button" class="pill-btn" data-level="xhigh">🔥最大</button>
+            </div>
+          </div>
+          <div id="vertexThinkingGuide" class="thinking-guide"></div>
+        </div>
+
+        <!-- API詳細パラメータカード -->
+        <div class="ai-card" style="margin-top:8px;">
+          <div class="ai-card-title">
+            <span>API詳細設定</span>
+          </div>
+          <label style="margin:0;">最大出力トークン
+            <span id="vertexMaxTokensBadge" class="token-ceiling-badge muted" style="margin-left:6px;"></span>
+            <input id="vertexMaxTokens" type="number" min="256" max="65536" step="256" value="8192">
+          </label>
+          <label class="check"><input type="checkbox" id="vertexFetch"> プロンプト取り寄せ（function calling）を使う</label>
+          <label class="check"><input type="checkbox" id="vertexSafetyOff"> 調整可能な安全カテゴリをOFFにする</label>
+          <div class="row" style="margin-top:6px;">
+            <button id="vertexApply" type="button">Vertex設定を保存</button>
+            <span id="vertexApplyMsg" class="muted"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 補助タスクカード（3プロバイダ共通・単一 choicesIdeModel 要素） -->
+    <div class="ai-card" id="choicesIdeCard" style="margin-top:8px;">
+      <div class="ai-card-title">
+        <span>補助タスク（選択肢8択・画像推敲・記憶抽出）</span>
+      </div>
+      <label style="margin:0;">選択肢のモデル
+        <select id="choicesIdeModel"><option value="">メインのモデルと同じ</option></select>
+      </label>
+      <div id="auxThinkingSection">
+        <div class="sub-label" style="margin-top:6px; display:flex; justify-content:space-between; align-items:center;">
+          <span>補助タスク思考の深さ</span>
+          <span id="choicesThinkingBadge" class="effective-badge">実効: -</span>
+        </div>
+        <div class="thinking-pills" id="choicesThinkingPills">
+          <div class="pills-row">
+            <button type="button" class="pill-btn" data-choices-level="low">⚡低 (推奨)</button>
+            <button type="button" class="pill-btn" data-choices-level="minimal">💨最小</button>
+            <button type="button" class="pill-btn" data-choices-level="medium">⚖️中</button>
+          </div>
+          <div class="pills-row">
+            <button type="button" class="pill-btn" data-choices-level="high">🔍高</button>
+            <button type="button" class="pill-btn" data-choices-level="same">🔗本文と同じ</button>
+            <button type="button" class="pill-btn" data-choices-level="auto">自動</button>
+          </div>
+        </div>
+        <div id="choicesThinkingGuide" class="thinking-guide"></div>
+      </div>
+    </div>
+
+    <!-- Antigravity Box -->
+    <div id="agAiBox" class="hidden">
+      <div class="ai-card">
+        <div class="ai-card-title"><span>Antigravity（IDE連携）会話設定</span></div>
+        <span class="muted" style="font-size:12px;">Antigravityの会話を選ぶと、その会話だけがこのチャンネルの入力を受け取ります</span>
+        <div id="ideCurrent" class="ide-current">指定なし（--ide なしの wait_input.py が受け取る）</div>
+        <div class="row" style="margin-top:4px;">
+          <button id="idePick" type="button" class="sub">会話を選ぶ…</button>
+          <button id="ideNew" type="button" class="sub">新規会話</button>
+          <button id="ideFork" type="button" class="sub">分岐…</button>
+          <button id="ideRename" type="button" class="sub">名前…</button>
+          <button id="ideClear" type="button" class="sub">外す</button>
+          <button id="ctxReset" type="button" class="sub">次は全部送る</button>
+        </div>
+        <span id="ideState" class="muted" style="font-size:11px;"></span>
+        <div class="row" style="margin-top:4px;">
+          <span class="muted" style="font-size:11px;">入力から2秒たっても受け取られていなければ、担当の会話にスペース1文字を送る</span>
+          <button id="idePokeNow" type="button" class="sub">今すぐ送信</button>
+        </div>
+        <span id="pokeState" class="muted" style="font-size:11px;"></span>
+      </div>
+
+      <div class="ai-card" style="margin-top:8px;">
+        <div class="ai-card-title"><span>選択肢（8択）担当の Antigravity 会話</span></div>
+        <div id="choicesIdeCurrent" class="ide-current">指定なし（メインの会話で順番に生成）</div>
+        <div class="row" style="margin-top:4px;">
+          <button id="choicesIdePick" type="button" class="sub">会話を選ぶ…</button>
+          <button id="choicesIdeNew" type="button" class="sub">新規会話</button>
+          <button id="choicesIdeRename" type="button" class="sub">名前…</button>
+          <button id="choicesIdeClear" type="button" class="sub">外す</button>
+          <button id="choicesIdePokeNow" type="button" class="sub">今すぐ送信</button>
+        </div>
+        <span id="choicesIdeState" class="muted" style="font-size:11px;"></span>
+        <span id="choicesPokeState" class="muted" style="font-size:11px;"></span>
+      </div>
     </div>
   </div>
 </div>
