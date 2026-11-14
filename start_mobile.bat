@@ -30,6 +30,20 @@ if errorlevel 1 (
   )
 )
 
+REM Google GenAI SDK（任意）と認証署名用 cryptography の確認
+python -c "from google import genai" >nul 2>&1
+if errorlevel 1 (
+  echo Google GenAI SDK ^(google-genai^) をインストールしています...
+  python -m pip install google-genai
+  if errorlevel 1 echo [警告] google-genai のインストールに失敗しました（REST で動作します）。
+)
+python -c "import cryptography" >nul 2>&1
+if errorlevel 1 (
+  echo 認証署名用の cryptography をインストールしています...
+  python -m pip install cryptography
+  if errorlevel 1 echo [警告] cryptography のインストールに失敗しました（google-auth または ADC で動作します）。
+)
+
 REM 長期記憶（RAG）用ライブラリの確認と自動インストール
 python -c "import fastembed" >nul 2>&1
 if errorlevel 1 (

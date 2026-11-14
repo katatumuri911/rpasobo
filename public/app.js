@@ -412,7 +412,11 @@ async function api(path, body, method = null) {
 const post = (path, body = {}) => api(path, { sid, ...body });
 async function checked(path, body, method = null) {
   const result = await api(path, body, method);
-  if (result.error) throw new Error(result.error);
+  if (result && result.error && !(Array.isArray(result.models) && result.models.length) && !(result.status && typeof result.status === "object")) {
+    const err = new Error(result.error);
+    if (result.code) err.code = result.code;
+    throw err;
+  }
   return result;
 }
 const imgUrl = (f) => "/img?f=" + encodeURIComponent(f);
@@ -1663,6 +1667,10 @@ let googleModels = [];
 let googleStatusLoaded = false;
 let googleConfigured = false;
 let googleKeyHint = "";
+let vertexModels = [];
+let vertexStatusLoaded = false;
+let vertexConfigured = false;
+let vertexStatus = {};
 
 async function loadModels() {
   try {
@@ -1689,6 +1697,23 @@ async function loadModels() {
     googleConfigured = false;
     googleModels = [];
   }
+  try {
+    const vd = await checked("/api/vertex/status");
+    vertexStatus = vd || {};
+    vertexConfigured = !!vd.configured;
+    vertexStatusLoaded = true;
+    updateVertexStateBadge(vertexStatus);
+    if (vd.configured) {
+      const vm = await checked("/api/vertex/models");
+      vertexModels = vm.models || [];
+    } else {
+      vertexModels = [];
+    }
+  } catch (e) {
+    vertexStatus = {};
+    vertexConfigured = false;
+    vertexModels = [];
+  }
   renderModels();
   syncGoogleSettingsUI();
 }
@@ -1696,8 +1721,10 @@ async function loadModels() {
 function renderModels() {
   const sel = $("ideModel");
   const selChoices = $("choicesIdeModel");
-  const provider = state?.setting?.ai_provider || "antigravity";
-  const google = provider === "google";
+  const prov = state?.setting?.ai_provider || "antigravity";
+  const isAg = !prov || prov === "antigravity";
+  const isGoogle = prov === "google";
+  const isVertex = prov === "vertex";
   const rows = ideModels?.models || [];
   const reset = modelResetText;
   const left = (r) => (typeof r.left !== "number" ? ""
@@ -1706,7 +1733,7 @@ function renderModels() {
   const agOpts = [`<option value="ag:">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
     .concat(rows.map((r) => `<option value="ag:${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
   const currentAg = state?.setting?.ide_model || "";
-  if (!google && currentAg && !rows.some((r) => r.model === currentAg)) {
+  if (isAg && currentAg && !rows.some((r) => r.model === currentAg)) {
     agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(currentAg)}（いまは選べない）</option>`);
   }
 
@@ -1716,7 +1743,7 @@ function renderModels() {
       googleOpts.push(`<option value="google:${esc(m.id)}">${esc(m.label || m.id)}${m.outputTokenLimit ? "（出力上限 " + m.outputTokenLimit + "）" : ""}</option>`);
     }
     const currentGoogle = state?.setting?.google_model || "";
-    if (google && currentGoogle && !googleModels.some((m) => m.id === currentGoogle)) {
+    if (isGoogle && currentGoogle && !googleModels.some((m) => m.id === currentGoogle)) {
       googleOpts.push(`<option value="google:${esc(currentGoogle)}">${esc(currentGoogle)}（一覧にない）</option>`);
     }
     googleOpts.push(`<option value="__google_key_modal__">⚙ Google APIキー変更 / 削除…</option>`);
@@ -1724,39 +1751,84 @@ function renderModels() {
     googleOpts.push(`<option value="__google_key_modal__">🔑 Google APIキーを設定して利用…</option>`);
   }
 
+  const vertexOpts = [];
+  const vertexDefaultId = vertexStatus.suggest_model
+    || (vertexModels.find(vertexModelAvailable) || {}).id
+    || "gemini-3.8-flash";
+  if (vertexConfigured && vertexModels.length > 0) {
+    for (const m of vertexModels) {
+      const dis = vertexModelAvailable(m) ? "" : " disabled";
+      const tag = vertexModelAvailable(m) ? "" : "【このリージョンでは404】";
+      vertexOpts.push(`<option value="vertex:${esc(m.id)}"${dis}>${esc(m.label || m.id)}${m.outputTokenLimit ? "（出力上限 " + m.outputTokenLimit + "）" : ""}${tag}</option>`);
+    }
+    const currentVertex = state?.setting?.vertex_model || "";
+    if (isVertex && currentVertex && !vertexModels.some((m) => m.id === currentVertex)) {
+      vertexOpts.push(`<option value="vertex:${esc(currentVertex)}">${esc(currentVertex)}（一覧にない）</option>`);
+    } else if (isVertex && currentVertex) {
+      const cur = vertexModels.find((m) => m.id === currentVertex);
+      if (cur && !vertexModelAvailable(cur)) {
+        vertexOpts.push(`<option value="vertex:${esc(currentVertex)}">${esc(currentVertex)}【このリージョンでは404】</option>`);
+      }
+    }
+    vertexOpts.push(`<option value="__vertex_config_modal__">⚙ Vertex AI 認証・設定…</option>`);
+  } else {
+    if (isVertex) {
+      const vModel = state?.setting?.vertex_model || vertexDefaultId;
+      vertexOpts.push(`<option value="vertex:${esc(vModel)}">${esc(vModel)}</option>`);
+    }
+    vertexOpts.push(`<option value="__vertex_config_modal__">🔑 Vertex AI 認証を設定して利用…</option>`);
+  }
+
   const optsMain = [
     `<optgroup label="Antigravity（IDE連携）">${agOpts.join("")}</optgroup>`,
-    `<optgroup label="Google Gemini API">${googleOpts.join("")}</optgroup>`
+    `<optgroup label="Google Gemini API">${googleOpts.join("")}</optgroup>`,
+    `<optgroup label="Vertex AI（Google Cloud）">${vertexOpts.join("")}</optgroup>`
   ];
 
   if (sel && state && document.activeElement !== sel) {
-    const want = google
-      ? (state.setting?.google_model ? `google:${state.setting.google_model}` : "google:")
-      : (state.setting?.ide_model ? `ag:${state.setting.ide_model}` : "ag:");
+    const want = isVertex
+      ? ("vertex:" + (state.setting?.vertex_model || vertexDefaultId))
+      : isGoogle
+        ? (state.setting?.google_model ? "google:" + state.setting.google_model : "google:")
+        : (state.setting?.ide_model ? "ag:" + state.setting.ide_model : "ag:");
     const html = optsMain.join("");
     if (sel.dataset.html !== html) { sel.innerHTML = html; sel.dataset.html = html; }
     sel.value = want;
-    if (sel.value !== want && google && googleModels.length > 0) {
+    if (sel.value !== want && isGoogle && googleModels.length > 0) {
       sel.value = `google:${googleModels[0].id}`;
-    } else if (sel.value !== want && !google) {
+    } else if (sel.value !== want && isVertex && vertexModels.length > 0) {
+      const firstOk = vertexModels.find(vertexModelAvailable) || vertexModels[0];
+      sel.value = `vertex:${firstOk.id}`;
+    } else if (sel.value !== want && isAg) {
       sel.value = "ag:";
     }
     $("footBar")?.classList.toggle("hidden", !state?.setting);
   }
 
   if (selChoices && state && document.activeElement !== selChoices) {
-    // Google のときは API のモデル（google_choices_model）、Antigravity のときは選択肢担当の会話のモデル
-    const wantChoices = google ? (state.setting?.google_choices_model || "") : (state.setting?.choices_ide_model || "");
-    const rowsChoices = google
-      ? (googleModels || []).map((m) => ({ model: m.id, label: m.label || m.id }))
-      : rows;
-    const noList = google ? (rowsChoices.length ? "" : "（Googleモデルを読めない）")
-      : (ideModels?.error ? "（一覧を読めない）" : "");
+    let wantChoices = "";
+    let rowsChoices = [];
+    let noList = "";
+    if (isVertex) {
+      wantChoices = state.setting?.vertex_choices_model || "";
+      rowsChoices = (vertexModels || []).map((m) => ({ model: m.id, label: m.label || m.id }));
+      noList = rowsChoices.length ? "" : "（Vertexモデルを読めない）";
+    } else if (isGoogle) {
+      wantChoices = state.setting?.google_choices_model || "";
+      rowsChoices = (googleModels || []).map((m) => ({ model: m.id, label: m.label || m.id }));
+      noList = rowsChoices.length ? "" : "（Googleモデルを読めない）";
+    } else {
+      wantChoices = state.setting?.choices_ide_model || "";
+      rowsChoices = rows;
+      noList = ideModels?.error ? "（一覧を読めない）" : "";
+    }
     const optsChoices = [`<option value="">メインのモデルと同じ${noList}</option>`]
-      .concat(rowsChoices.map((r) => google
+      .concat(rowsChoices.map((r) => (isGoogle || isVertex)
         ? `<option value="${esc(r.model)}">${esc(r.label)}</option>`
         : `<option value="${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
-    if (wantChoices && !rowsChoices.some((r) => r.model === wantChoices)) optsChoices.push(`<option value="${esc(wantChoices)}">${esc(wantChoices)}（いまは選べない）</option>`);
+    if (wantChoices && !rowsChoices.some((r) => r.model === wantChoices)) {
+      optsChoices.push(`<option value="${esc(wantChoices)}">${esc(wantChoices)}（いまは選べない）</option>`);
+    }
     const htmlChoices = optsChoices.join("");
     if (selChoices.dataset.html !== htmlChoices) { selChoices.innerHTML = htmlChoices; selChoices.dataset.html = htmlChoices; }
     selChoices.value = wantChoices;
@@ -1764,7 +1836,7 @@ function renderModels() {
   updateModelSheetLeft();
 }
 
-// ---------------------------------------------------------------- Google Gemini（AI Studio）
+// ---------------------------------------------------------------- Google Gemini / Vertex AI
 
 function googleModelOptions(selected) {
   const rows = googleModels || [];
@@ -1774,21 +1846,250 @@ function googleModelOptions(selected) {
   return opts.join("");
 }
 
+function vertexModelAvailable(m) {
+  return m && m.available !== false;
+}
+
+function vertexModelOptions(selected) {
+  const rows = vertexModels || [];
+  const opt = (m, extra) => `<option value="${esc(m.id)}"`
+    + `${vertexModelAvailable(m) ? "" : " disabled"}>`
+    + `${esc(m.label || m.id)}${extra || ""}`
+    + `${vertexModelAvailable(m) ? "" : "【このリージョンでは404】"}</option>`;
+  const opts = [`<option value="">モデルを選択</option>`]
+    .concat(rows.map((m) => opt(m, m.outputTokenLimit ? `（出力上限 ${m.outputTokenLimit}）` : "")));
+  if (selected && !rows.some((m) => m.id === selected)) {
+    opts.push(`<option value="${esc(selected)}">${esc(selected)}（一覧にない）</option>`);
+  }
+  return opts.join("");
+}
+
+async function loadVertexStatus() {
+  try {
+    const d = await checked("/api/vertex/status");
+    vertexStatus = d || {};
+    vertexConfigured = !!d.configured;
+    updateVertexStateBadge(vertexStatus);
+  } catch (e) {
+    vertexStatus = {};
+    vertexConfigured = false;
+    if ($("vertexKeyState")) {
+      $("vertexKeyState").className = "err";
+      $("vertexKeyState").textContent = e.message;
+    }
+  } finally {
+    vertexStatusLoaded = true;
+  }
+}
+
+async function loadVertexModels(force = false) {
+  try {
+    // probe=1 で「そのリージョンで実際に generateContent できるか」を実測させる。
+    // 一覧APIはリージョン非依存に全モデルを返すため、これが無いと 404 になる
+    // モデル（Gemini 2.x やリージョン未提供のもの）を選べてしまう。
+    const d = await checked("/api/vertex/models" + (force ? "?refresh=1&probe=1" : "?probe=1"));
+    vertexModels = d.models || [];
+    vertexStatus.effective_location = d.effective_location || vertexStatus.location;
+    vertexStatus.location_note = d.location_note || "";
+    vertexStatus.suggest_model = d.suggest_model || vertexStatus.suggest_model || "";
+    if ($("vertexApplyMsg")) {
+      const note = d.location_note ? ("（" + d.location_note + "）") : "";
+      if (d.error) {
+        $("vertexApplyMsg").className = "err";
+        $("vertexApplyMsg").textContent = d.error;
+      } else if (vertexStatus.location_note) {
+        $("vertexApplyMsg").className = "warn";
+        $("vertexApplyMsg").textContent = "使用リージョン: " + (d.effective_location || "") + note;
+      } else if ($("vertexApplyMsg").className === "err") {
+        $("vertexApplyMsg").className = "muted";
+        $("vertexApplyMsg").textContent = "";
+      }
+    }
+  } catch (e) {
+    vertexModels = [];
+    if ($("vertexApplyMsg")) {
+      $("vertexApplyMsg").className = "err";
+      $("vertexApplyMsg").textContent = e.message;
+    }
+  }
+  syncGoogleSettingsUI();
+  renderModels();
+}
+
+function updateVertexStateBadge(vd) {
+  const el = $("vertexKeyState");
+  if (!el) return;
+  if (vd && vd.configured) {
+    el.className = "ok";
+    const who = vd.auth_type === "adc" ? "ADC" : (vd.client_email_hint || "SA");
+    el.textContent = `設定済み（${vd.project_id} / ${vd.location} / ${who}）`;
+  } else {
+    el.className = "warn";
+    el.textContent = "未設定";
+  }
+}
+
+function openVertexConfigModal() {
+  $("vertexConfigModal")?.classList.remove("hidden");
+  if ($("vertexConfigMsg")) {
+    $("vertexConfigMsg").className = "muted";
+    $("vertexConfigMsg").textContent = "";
+  }
+  if ($("vertexProjectInput")) {
+    $("vertexProjectInput").value = vertexStatus.project_id || vertexStatus.adc_project_hint || "";
+  }
+  if ($("vertexLocationInput")) {
+    $("vertexLocationInput").value = vertexStatus.location || "global";
+  }
+  if ($("vertexSaInput")) $("vertexSaInput").value = "";
+  if ($("vertexSaFile")) $("vertexSaFile").value = "";
+  setTimeout(() => $("vertexProjectInput")?.focus(), 50);
+}
+
+function closeVertexConfigModal() {
+  $("vertexConfigModal")?.classList.add("hidden");
+}
+
+async function saveVertexConfig() {
+  const btn = $("vertexConfigSave");
+  if (btn) btn.disabled = true;
+  if ($("vertexConfigMsg")) {
+    $("vertexConfigMsg").className = "muted";
+    $("vertexConfigMsg").textContent = "確認中…";
+  }
+  try {
+    const body = {
+      sa_json: ($("vertexSaInput")?.value || "").trim(),
+      project_id: ($("vertexProjectInput")?.value || "").trim(),
+      location: ($("vertexLocationInput")?.value || "").trim() || "global",
+    };
+    const r = await checked("/api/vertex/config", body);
+    if (Array.isArray(r.models) && r.models.length) vertexModels = r.models;
+    await loadVertexStatus();
+    if (!vertexModels.length) await loadVertexModels(true);
+    let note = "";
+    if (r.location_corrected) {
+      note = `このリージョンでは全モデルが404だったため、'${r.location_corrected}' に自動修正しました。`;
+      if ($("vertexLocationInput")) $("vertexLocationInput").value = r.location_corrected;
+    }
+    if (r.error) {
+      if ($("vertexConfigMsg")) {
+        $("vertexConfigMsg").className = "err";
+        $("vertexConfigMsg").textContent = (note ? note + "\n" : "") + "保存しましたが疎通確認で警告: " + r.error;
+      }
+    } else {
+      // 疎通したモデルをその場で選択して保存する（未指定のままだと 404 を踏むため）
+      const pick = r.suggest_model
+        || (r.available_models || [])[0]
+        || (vertexModels.filter(vertexModelAvailable)[0] || {}).id
+        || "";
+      if (pick && state?.setting) {
+        try {
+          await checked("/api/ide/model", { sid, model: pick, target: "main", provider: "vertex" });
+          state.setting.vertex_model = pick;
+        } catch (e) { /* 保存に失敗しても切替は続行 */ }
+      }
+      if ($("vertexConfigMsg")) {
+        $("vertexConfigMsg").className = "ok";
+        $("vertexConfigMsg").textContent = (note ? note + "\n" : "")
+          + "保存して認証を確認しました" + (pick ? `（モデル: ${pick}）` : "");
+      }
+      closeVertexConfigModal();
+      if (state?.setting) {
+        await applyProviderSettings("vertex");
+        await poll();
+        renderModels();
+      }
+    }
+  } catch (e) {
+    if ($("vertexConfigMsg")) {
+      $("vertexConfigMsg").className = "err";
+      $("vertexConfigMsg").textContent = e.message;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function applyProviderSettings(provider) {
+  const p = ["google", "vertex"].includes(provider) ? provider : "antigravity";
+  const body = { sid, provider: p };
+  if (p === "google") {
+    body.model = $("googleModel")?.value || "";
+    body.fetch = !!$("googleFetch")?.checked;
+    body.safety_off = !!$("googleSafetyOff")?.checked;
+    body.max_output_tokens = Number($("googleMaxTokens")?.value || 8192);
+  } else if (p === "vertex") {
+    const custom = ($("vertexCustomModel")?.value || "").trim();
+    body.model = custom || ($("vertexModel")?.value || "");
+    body.fetch = !!$("vertexFetch")?.checked;
+    body.safety_off = !!$("vertexSafetyOff")?.checked;
+    body.max_output_tokens = Number($("vertexMaxTokens")?.value || 8192);
+  }
+  try {
+    const d = await checked("/api/ai/provider", body);
+    if (state?.setting && d) {
+      state.setting.ai_provider = d.provider || p;
+      if (p === "vertex" && d.model) state.setting.vertex_model = d.model;
+      if (p === "google" && d.model) state.setting.google_model = d.model;
+      if (typeof d.fetch === "boolean") state.setting.google_fetch = d.fetch;
+      if (typeof d.safety_off === "boolean") state.setting.google_safety_off = d.safety_off;
+      if (d.max_output_tokens) state.setting.google_max_output_tokens = d.max_output_tokens;
+    }
+    await poll();
+    await loadModels();
+    renderModels();
+    syncGoogleSettingsUI();
+    flash(p === "vertex" ? "Vertex AI に切り替えました"
+      : p === "google" ? "Google Gemini に切り替えました" : "Antigravity に切り替えました");
+  } catch (e) {
+    if (e.code === "vertex_not_configured") openVertexConfigModal();
+    else if (e.code === "google_no_key") openGoogleKeyModal();
+    else alert(e.message);
+    renderModels();
+    syncGoogleSettingsUI();
+  }
+}
+
+const applyGoogleSettings = () => applyProviderSettings("google");
+
 function syncGoogleSettingsUI() {
-  const st = state?.setting;
-  if (!st) return;
-  const provider = st.ai_provider || "antigravity";
-  if ($("aiProvider") && document.activeElement !== $("aiProvider")) $("aiProvider").value = provider;
-  if ($("googleBox")) $("googleBox").classList.toggle("hidden", provider !== "google");
-  // AGの設定はGoogle時も残す（画像設定なども同じ箱にあるため、丸ごとは隠さない）
+  const st = state?.setting || {};
+  const prov = ["google", "vertex"].includes(st.ai_provider) ? st.ai_provider : "antigravity";
+  if ($("aiProvider") && document.activeElement !== $("aiProvider")) $("aiProvider").value = prov;
+  if ($("googleBox")) $("googleBox").classList.toggle("hidden", prov !== "google");
+  if ($("vertexBox")) $("vertexBox").classList.toggle("hidden", prov !== "vertex");
+
+  // Google AI Studio（既存処理を維持）
   if ($("googleModel") && document.activeElement !== $("googleModel")) {
     const html = googleModelOptions(st.google_model || "");
-    if ($("googleModel").dataset.html !== html) { $("googleModel").innerHTML = html; $("googleModel").dataset.html = html; }
+    if ($("googleModel").dataset.html !== html) {
+      $("googleModel").innerHTML = html;
+      $("googleModel").dataset.html = html;
+    }
     $("googleModel").value = st.google_model || "";
   }
   if ($("googleFetch")) $("googleFetch").checked = st.google_fetch !== false;
   if ($("googleSafetyOff")) $("googleSafetyOff").checked = st.google_safety_off !== false;
   if ($("googleMaxTokens")) $("googleMaxTokens").value = st.google_max_output_tokens || 8192;
+
+  // Vertex AI
+  if ($("vertexModel") && document.activeElement !== $("vertexModel")) {
+    const html = vertexModelOptions(st.vertex_model || "");
+    if ($("vertexModel").dataset.html !== html) {
+      $("vertexModel").innerHTML = html;
+      $("vertexModel").dataset.html = html;
+    }
+    $("vertexModel").value = st.vertex_model || "";
+  }
+  if ($("vertexCustomModel") && document.activeElement !== $("vertexCustomModel")) {
+    const inList = (vertexModels || []).some((m) => m.id === st.vertex_model);
+    $("vertexCustomModel").value = (st.vertex_model && !inList) ? st.vertex_model : "";
+  }
+  if ($("vertexFetch")) $("vertexFetch").checked = st.google_fetch !== false;
+  if ($("vertexSafetyOff")) $("vertexSafetyOff").checked = st.google_safety_off !== false;
+  if ($("vertexMaxTokens")) $("vertexMaxTokens").value = st.google_max_output_tokens || 8192;
+  updateVertexStateBadge(vertexStatus);
 }
 
 async function loadGoogleStatus() {
@@ -1819,33 +2120,6 @@ async function loadGoogleModels(force = false) {
   }
 }
 
-async function applyGoogleSettings() {
-  const provider = $("aiProvider")?.value || "antigravity";
-  const body = { sid, provider };
-  if (provider === "google") {
-    body.model = $("googleModel")?.value || "";
-    body.fetch = !!$("googleFetch")?.checked;
-    body.safety_off = !!$("googleSafetyOff")?.checked;
-    body.max_output_tokens = Number($("googleMaxTokens")?.value || 8192);
-  }
-  if ($("googleApply")) $("googleApply").disabled = true;
-  try {
-    const r = await checked("/api/ai/provider", body);
-    if ($("googleApplyMsg")) { $("googleApplyMsg").className = "ok"; $("googleApplyMsg").textContent = "保存しました"; }
-    flash(provider === "google" ? "Google Gemini に切り替えました" : "Antigravity に切り替えました");
-    await poll();
-    await loadModels();
-    if (provider === "google") await loadGoogleStatus();
-    renderModels();
-    syncGoogleSettingsUI();
-  } catch (e) {
-    if ($("googleApplyMsg")) { $("googleApplyMsg").className = "err"; $("googleApplyMsg").textContent = e.message; }
-    alert(e.message);
-  } finally {
-    if ($("googleApply")) $("googleApply").disabled = false;
-  }
-}
-
 function openGoogleKeyModal() {
   $("googleKeyModal")?.classList.remove("hidden");
   $("googleKeyMsg").textContent = "";
@@ -1853,15 +2127,48 @@ function openGoogleKeyModal() {
 }
 function closeGoogleKeyModal() { $("googleKeyModal")?.classList.add("hidden"); }
 
+if ($("vertexSaFile")) {
+  $("vertexSaFile").onchange = async () => {
+    const f = $("vertexSaFile").files?.[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      if ($("vertexSaInput")) $("vertexSaInput").value = text;
+      let pid = "";
+      try { pid = (JSON.parse(text) || {}).project_id || ""; } catch (_) { pid = ""; }
+      if (pid && $("vertexProjectInput") && !$("vertexProjectInput").value.trim()) {
+        $("vertexProjectInput").value = pid;
+      }
+      if ($("vertexConfigMsg")) {
+        $("vertexConfigMsg").className = pid ? "ok" : "warn";
+        $("vertexConfigMsg").textContent = pid
+          ? `読み込みました（project_id: ${pid}）`
+          : "JSONを読みましたが project_id が見つかりません";
+      }
+    } catch (e) {
+      if ($("vertexConfigMsg")) {
+        $("vertexConfigMsg").className = "err";
+        $("vertexConfigMsg").textContent = e.message;
+      }
+    }
+  };
+}
 if ($("aiProvider")) {
   $("aiProvider").onchange = async () => {
-    const provider = $("aiProvider").value === "google" ? "google" : "antigravity";
+    const sel = $("aiProvider").value;
+    const provider = ["google", "vertex"].includes(sel) ? sel : "antigravity";
     $("googleBox")?.classList.toggle("hidden", provider !== "google");
-    if (provider === "google" && !googleStatusLoaded) await loadGoogleStatus();
-    // 選んだ時点で切り替える。以前は保存が箱の中の「Google設定を保存」だけで、
-    // Antigravity を選ぶとそのボタンごと箱が隠れ、しかも /api/setting は ai_provider を
-    // 上書きさせないので、Google から Antigravity へ戻せなくなっていた
-    await applyGoogleSettings();
+    $("vertexBox")?.classList.toggle("hidden", provider !== "vertex");
+    if (provider === "google") {
+      if (!googleStatusLoaded) await loadGoogleStatus();
+      if (!googleConfigured) { openGoogleKeyModal(); return; }
+      if (!googleModels.length) await loadGoogleModels();
+    } else if (provider === "vertex") {
+      if (!vertexStatusLoaded) await loadVertexStatus();
+      if (!vertexConfigured) { openVertexConfigModal(); return; }
+      if (!vertexModels.length) await loadVertexModels();
+    }
+    await applyProviderSettings(provider);
   };
 }
 if ($("googleApply")) $("googleApply").onclick = applyGoogleSettings;
@@ -1924,12 +2231,83 @@ if ($("googleKeyDelete")) {
   };
 }
 if ($("googleModelsReload")) $("googleModelsReload").onclick = () => loadGoogleModels(true);
+if ($("vertexConfigSet")) $("vertexConfigSet").onclick = openVertexConfigModal;
+if ($("vertexConfigCancel")) $("vertexConfigCancel").onclick = closeVertexConfigModal;
+if ($("vertexConfigSave")) $("vertexConfigSave").onclick = saveVertexConfig;
+if ($("vertexModelsReload")) $("vertexModelsReload").onclick = () => loadVertexModels(true);
+if ($("vertexApply")) {
+  $("vertexApply").onclick = async () => {
+    const custom = ($("vertexCustomModel")?.value || "").trim();
+    const model = custom || ($("vertexModel")?.value || "");
+    try {
+      if (model) await checked("/api/ide/model", { sid, model, target: "main", provider: "vertex" });
+      await applyProviderSettings("vertex");
+      if ($("vertexApplyMsg")) {
+        $("vertexApplyMsg").className = "ok";
+        $("vertexApplyMsg").textContent = "保存しました";
+      }
+    } catch (e) {
+      if ($("vertexApplyMsg")) {
+        $("vertexApplyMsg").className = "err";
+        $("vertexApplyMsg").textContent = e.message;
+      }
+    }
+  };
+}
+if ($("vertexModel")) {
+  $("vertexModel").onchange = () => {
+    if ($("vertexCustomModel")) $("vertexCustomModel").value = "";
+  };
+}
+if ($("vertexConfigDelete")) {
+  $("vertexConfigDelete").onclick = async () => {
+    if (!confirm("Vertex AI の設定（サービスアカウントJSON・プロジェクト・リージョン）を削除します。\nVertex を使っているチャンネルは Antigravity に戻ります。よろしいですか？")) return;
+    try {
+      await checked("/api/vertex/config/delete", {});
+      await loadVertexStatus();
+      vertexModels = [];
+      await poll();
+      renderModels();
+      syncGoogleSettingsUI();
+      flash("Vertex AI の設定を削除しました");
+    } catch (e) { alert(e.message); }
+  };
+}
+if ($("vertexConfigModal")) {
+  $("vertexConfigModal").addEventListener("click", (e) => {
+    if (e.target === $("vertexConfigModal")) closeVertexConfigModal();
+  });
+}
 
 $("ideModel").onchange = async () => {
   const val = $("ideModel").value;
   if (val === "__google_key_modal__") {
     renderModels();
     openGoogleKeyModal();
+    return;
+  }
+  if (val === "__vertex_config_modal__") {
+    renderModels();
+    openVertexConfigModal();
+    return;
+  }
+  if (val.startsWith("vertex:")) {
+    const model = val.slice("vertex:".length);
+    if (!model) { renderModels(); return; }
+    if (!vertexStatusLoaded) await loadVertexStatus();
+    if (!vertexConfigured) { openVertexConfigModal(); renderModels(); return; }
+    try {
+      await checked("/api/ai/provider", { sid, provider: "vertex", model });
+      toast("Vertex AI: " + model);
+      await poll();
+      renderModels();
+      syncGoogleSettingsUI();
+    } catch (e) {
+      if (e.code === "vertex_not_configured") openVertexConfigModal();
+      else alert(e.message);
+      renderModels();
+    }
+    $("ideModel").blur();
     return;
   }
   if (val.startsWith("google:")) {
@@ -1970,8 +2348,8 @@ $("ideModel").onchange = async () => {
 };
 if ($("choicesIdeModel")) {
   $("choicesIdeModel").onchange = async () => {
-    // Google のときは google_choices_model、Antigravity のときは choices_ide_model に保存する
-    const provider = state?.setting?.ai_provider === "google" ? "google" : "antigravity";
+    const p = state?.setting?.ai_provider;
+    const provider = ["google", "vertex"].includes(p) ? p : "antigravity";
     try {
       await checked("/api/ide/model", { sid, model: $("choicesIdeModel").value, target: "choices", provider });
       flash("選択肢のモデル: " + $("choicesIdeModel").selectedOptions[0].textContent);
@@ -2903,9 +3281,15 @@ function updateModelSheetLeft() {
   if (!el) return;
   const sheet = $("modelSheet");
   if (!sheet || sheet.classList.contains("hidden")) return;
-  const google = state?.setting?.ai_provider === "google";
-  if (google) {
+  const prov = state?.setting?.ai_provider || "antigravity";
+  if (prov === "google") {
     el.textContent = googleConfigured ? `Google Gemini API（…${googleKeyHint}）` : "Google Gemini API（APIキー未設定）";
+    el.classList.remove("hidden");
+    return;
+  }
+  if (prov === "vertex") {
+    const who = vertexStatus.auth_type === "adc" ? "ADC" : (vertexStatus.client_email_hint || "SA");
+    el.textContent = vertexConfigured ? `Vertex AI（${vertexStatus.project_id} / ${who}）` : "Vertex AI（認証未設定）";
     el.classList.remove("hidden");
     return;
   }
@@ -2939,6 +3323,7 @@ function render() {
   const s = state;
   syncGoogleSettingsUI();
   if (s?.setting?.ai_provider === "google" && !googleStatusLoaded) loadGoogleStatus();
+  if (s?.setting?.ai_provider === "vertex" && !vertexStatusLoaded) loadVertexStatus();
   // 候補（8択）を出すのは「最新のAI応答」だけ。過去の応答では開閉ボタンも出さない
   renderLastAsstId = "";
   for (let i = s.messages.length - 1; i >= 0; i--) {
@@ -3006,7 +3391,7 @@ function render() {
       t.innerHTML = "選択肢を生成しています<span>.</span><span>.</span><span>.</span>";
     }
     desiredChildren.push(t);
-    if (s.setting?.ide_session || s.setting?.choices_ide_session || s.setting?.ai_provider === "google") {
+    if (s.setting?.ide_session || s.setting?.choices_ide_session || ["google", "vertex"].includes(s.setting?.ai_provider)) {
       let p = $("progress");
       if (!p) {
         p = document.createElement("div");
@@ -3174,7 +3559,7 @@ async function poll() {
 let progressHtml = "", progressSid = "", progressBusy = false;
 async function pollProgress() {
   const s = state;
-  if ((typeof document !== "undefined" && document.hidden) || progressBusy || !s || s.id !== sid || !(s.setting?.ide_session || s.setting?.choices_ide_session || s.setting?.ai_provider === "google") || !$("progress")) return;
+  if ((typeof document !== "undefined" && document.hidden) || progressBusy || !s || s.id !== sid || !(s.setting?.ide_session || s.setting?.choices_ide_session || ["google", "vertex"].includes(s.setting?.ai_provider)) || !$("progress")) return;
   progressBusy = true;
   try {
     const r = await api("/api/ide/progress?sid=" + encodeURIComponent(s.id));

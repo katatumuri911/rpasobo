@@ -61,7 +61,7 @@ POKE_DELAY = 0  # 即時合図を送る（0秒）
 poke_event = threading.Event()  # 入力発生時に poke_worker を即時起床させるイベント
 google_event = threading.Event()  # Google API ワーカーを即時起床させるイベント
 google_inflight = set()            # sid:task_key の二重実行防止
-google_inflight_guard = threading.Lock()
+google_inflight_guard = threading.RLock()
 google_retry_at = {}               # sid:task_key -> monotonic 再試行時刻
 google_status = {}                 # sid -> UI 表示用の直近状態
 ide_auto_event = threading.Event()  # 会話の自動作成ワーカーを即時起床させるイベント
@@ -489,12 +489,14 @@ DEFAULT_SETTING = {
     "choices_ide_auto": False,   # 新規: 選択肢担当の自動作成フラグ
     "choices_ide_model": "",     # 新規: 選択肢担当の合図モデル（空なら ide_model と同じ）
     "choices_ide_manual_off": False,  # ユーザーが手動で選択肢担当を「外す」にした場合は自動作成しない
-    "ai_provider": "antigravity",   # antigravity / google
+    "ai_provider": "antigravity",   # antigravity / google / vertex
     "google_model": "",             # Google AI Studio のモデルID
     "google_choices_model": "",     # Google のとき、選択肢の生成だけ別のモデルにする（空なら google_model と同じ）
     "google_fetch": True,           # function calling でプロンプトを取りに行かせる
     "google_safety_off": True,      # 調整可能な安全カテゴリを OFF にする（PROHIBITED_CONTENT は解除不可）
     "google_max_output_tokens": 8192,
+    "vertex_model": "",
+    "vertex_choices_model": "",
     "ide_revert": True,   # 発言を編集・削除・作り直し・巻き戻ししたら、担当の会話もその前まで巻き戻す
     # 入力の渡し方。diff: 全部のときは履歴を30000字まで・ファイルの設定も中身を出す、続きは増えた分と変わった分
     # light: 全部のときは直近15件を全文（前はAIメモ）・ファイルの設定と長い会話は場所を出して読ませる、続きは今回の発言（と変わった設定）だけ
@@ -527,7 +529,7 @@ DEFAULT_SETTING = {
 NO_IDE = {
     "ide_session": "", "ide_title": "", "ide_model": "", "ide_auto": False,
     "choices_ide_session": "", "choices_ide_title": "", "choices_ide_model": "", "choices_ide_auto": False,
-    "choices_ide_manual_off": False, "google_choices_model": "",
+    "choices_ide_manual_off": False, "google_choices_model": "", "vertex_choices_model": "",
 }
 NO_FOLDER = {"ide_folder": ""}  # 作業フォルダも持ち越さない（同じ AGENTS.md を2つのチャンネルで取り合わないように）
 
@@ -923,7 +925,7 @@ def merge_defaults(setting):
         out["choices_erotic_auto"] = (v.lower() not in ("false", "0", "")) if isinstance(v, str) else bool(v)
     # memo の統計は保存値ではなく本文から毎回導出する（旧セッション・古いクライアント対策）
     out.update(memo_stats(out.get("memo", "")))
-    if out.get("ai_provider") not in ("antigravity", "google"):
+    if out.get("ai_provider") not in ("antigravity", "google", "vertex"):
         out["ai_provider"] = "antigravity"
     try:
         out["google_max_output_tokens"] = max(256, min(65536, int(out.get("google_max_output_tokens") or 8192)))
@@ -932,6 +934,95 @@ def merge_defaults(setting):
     out["google_fetch"] = bool(out.get("google_fetch", True))
     out["google_safety_off"] = bool(out.get("google_safety_off", True))
     return out
+
+
+def _google_task_key(sid, a, b=None):
+    if isinstance(a, dict):
+        return f"{sid}:{b}:{a.get('id')}"
+    elif isinstance(b, dict):
+        return f"{sid}:{a}:{b.get('id')}"
+    elif b is not None:
+        return f"{sid}:{b}:{a}"
+    return f"{sid}:{a}"
+
+
+def is_api_provider(st):
+    """Google AI Studio と Vertex AI は同じ API ワーカー / outbox 経路を使う"""
+    return isinstance(st, dict) and st.get("ai_provider") in ("google", "vertex")
+
+
+def api_provider_of(st):
+    """必ず is_api_provider(st) が True の文脈で呼ぶこと"""
+    p = (st or {}).get("ai_provider")
+    return p if p in ("google", "vertex") else "google"
+
+
+def active_api_model(st, task_type="user"):
+    """本文・選択肢・推敲のモデル解決（旧 _google_model）"""
+    st = st or {}
+    if st.get("ai_provider") == "vertex":
+        if task_type == "choices" and (st.get("vertex_choices_model") or "").strip():
+            return st["vertex_choices_model"].strip()
+        return (st.get("vertex_model") or "").strip() or google_ai.default_vertex_model()
+    if task_type == "choices" and (st.get("google_choices_model") or "").strip():
+        return st["google_choices_model"].strip()
+    model = (st.get("google_model") or "").strip()
+    if model:
+        return model
+    try:
+        return google_ai.default_model()
+    except Exception:
+        return ""
+
+
+# 既存テスト（test_google_parallel_choices.py:39）との互換維持
+_google_model = active_api_model
+
+
+def _api_model_setting(st, task_type="user"):
+    """F-5: 設定値だけを比較する（ネットワークを叩かない・ロック内で安全）"""
+    st = st or {}
+    if st.get("ai_provider") == "vertex":
+        if task_type == "choices":
+            return ((st.get("vertex_choices_model") or "").strip()
+                    or (st.get("vertex_model") or "").strip())
+        return (st.get("vertex_model") or "").strip()
+    if task_type == "choices":
+        return ((st.get("google_choices_model") or "").strip()
+                or (st.get("google_model") or "").strip())
+    return (st.get("google_model") or "").strip()
+
+
+def _is_filter_error_msg(msg):
+    low = str(msg or "").lower()
+    return any(w in low for w in (
+        "ブロック", "フィルタ", "safety", "prohibited_content", "prohibited",
+        "blocklist", "spii", "model_armor", "recitation", "image_safety",
+        "pup_limited_disabled",
+    ))
+
+
+def _google_inflight_key(sid, task_type, m):
+    """F-1: _google_pick_tasks と完全一致する inflight キーを作る唯一の関数"""
+    m = m or {}
+    mid = m.get("id")
+    if not mid:
+        return ""
+    if task_type == "choices":
+        ctype = str(m.get("choices_type") or m.get("choices_slot") or "normal").lower()
+        return _google_task_key(sid, m.get("choices_orig_id") or mid, f"choices:{ctype}")
+    return _google_task_key(sid, mid, task_type)
+
+
+def _google_inflight_has(tkey):
+    if not tkey:
+        return False
+    with google_inflight_guard:
+        return tkey in google_inflight
+
+
+def _is_google_task_inflight(sid, task_type, m):
+    return _google_inflight_has(_google_inflight_key(sid, task_type, m))
 
 
 def parallel_choices_type(st):
@@ -952,7 +1043,7 @@ def has_parallel_choices_ide(st):
     """選択肢を本文とは別タスク（並列）で生成するか判定する"""
     if not isinstance(st, dict) or not st.get("suggest_choices", True):
         return False
-    if st.get("ai_provider") == "google":
+    if is_api_provider(st):
         return True
     if "_choices_parallel" in st:  # build_context が発言ごとの実態で上書きする
         return bool(st["_choices_parallel"])
@@ -1395,6 +1486,8 @@ def clone_session(s):
                 sd["applied"] = [dict(a) if isinstance(a, dict) else a for a in sd.get("applied") or []]
                 sd["before"] = [dict(b) if isinstance(b, dict) else b for b in sd.get("before") or []]
                 mc["staged_choices_dec"] = sd
+            if isinstance(mc.get("staged_choices_notice"), dict):
+                mc["staged_choices_notice"] = dict(mc["staged_choices_notice"])
             if "staged_choices" in mc and isinstance(mc["staged_choices"], list):
                 mc["staged_choices"] = [dict(c) if isinstance(c, dict) else c for c in mc["staged_choices"]]
             if "state" in mc and isinstance(mc["state"], list):
@@ -1606,48 +1699,54 @@ def load(sid, readonly=False):
                         im["refined_prompt"] = copy.deepcopy(idata[mid]["refined_prompt"])
 
         dirty_s = False
+        api_prov = is_api_provider(s.get("setting") or {})
         for m in msgs:
             if m.get("role") == "user" and m.get("status") == "processing":
                 t_ref = m.get("claimed_ts") or m.get("ts")
-                if t_ref and age(t_ref) > 180:
+                if t_ref and age(t_ref) > 180 and not (api_prov and _is_google_task_inflight(sid, "user", m)):
                     m["status"] = "pending"
                     m.pop("claimed_ts", None)
                     m["poke_ts"] = time.time()
                     request_repoke(m["id"])
                     dirty_s = True
             if m.get("image_refine_status") in ("pending", "processing"):
-                is_proc = m.get("image_refine_status") == "processing"
-                t_ref = m.get("image_refine_claimed_ts") if is_proc else (m.get("image_refine_ts") or m.get("ts"))
-                timeout_limit = 120 if is_proc else 300
-                if t_ref and age(t_ref) > timeout_limit:
-                    m["image_refine_status"] = "error"
-                    m["image_refine_error"] = "推敲がタイムアウトしました"
-                    m.pop("image_refine_mode", None)
-                    m.pop("image_refine_ts", None)
-                    m.pop("image_refine_claimed_ts", None)
-                    m.pop("image_refine_prompt", None)
-                    dirty_s = True
+                if not (api_prov and _is_google_task_inflight(sid, "image_refine", m)):
+                    is_proc = m.get("image_refine_status") == "processing"
+                    t_ref = m.get("image_refine_claimed_ts") if is_proc else (m.get("image_refine_ts") or m.get("ts"))
+                    timeout_limit = 120 if is_proc else 300
+                    if t_ref and age(t_ref) > timeout_limit:
+                        m["image_refine_status"] = "error"
+                        m["image_refine_error"] = "推敲がタイムアウトしました"
+                        m.pop("image_refine_mode", None)
+                        m.pop("image_refine_ts", None)
+                        m.pop("image_refine_claimed_ts", None)
+                        m.pop("image_refine_prompt", None)
+                        dirty_s = True
             if m.get("choices_status") in ("pending", "processing"):
-                is_proc = m.get("choices_status") == "processing"
-                t_ref = m.get("choices_claimed_ts") if is_proc else (m.get("choices_ts") or m.get("ts"))
-                timeout_limit = 90 if is_proc else 120
-                if t_ref and age(t_ref) > timeout_limit:
-                    if m.get("role") == "assistant":
-                        slot = str(m.get("choices_slot") or m.get("choices_type") or "normal").lower()
-                        slot = slot if slot in ("normal", "erotic") else "normal"
-                        m["choices_notice"] = {"kind": "timeout", "slot": slot, "task": t_ref, "ts": now()}
-                        enqueue_choices_notice_check(
-                            sid, m.get("id"), choices_ide_of(s.get("setting") or {}),
-                            t_ref, slot, timeout=True, rescue=True
-                        )
-                        m["choices_timeout"] = True
-                    m.pop("choices_status", None)
-                    m.pop("choices_type", None)
-                    m.pop("choices_ts", None)
-                    m.pop("choices_claimed_ts", None)
-                    m.pop("staged_choices", None)
-                    m.pop("staged_choices_dec", None)
-                    dirty_s = True
+                if api_prov and _is_google_task_inflight(sid, "choices", m):
+                    pass                      # 実行中はスイープしない
+                else:
+                    is_proc = m.get("choices_status") == "processing"
+                    t_ref = m.get("choices_claimed_ts") if is_proc else (m.get("choices_ts") or m.get("ts"))
+                    timeout_limit = 90 if is_proc else 120
+                    if t_ref and age(t_ref) > timeout_limit:
+                        if m.get("role") == "assistant":
+                            slot = str(m.get("choices_slot") or m.get("choices_type") or "normal").lower()
+                            slot = slot if slot in ("normal", "erotic") else "normal"
+                            m["choices_notice"] = {"kind": "timeout", "slot": slot, "task": t_ref, "ts": now()}
+                            if not api_prov:
+                                enqueue_choices_notice_check(
+                                    sid, m.get("id"), choices_ide_of(s.get("setting") or {}),
+                                    t_ref, slot, timeout=True, rescue=True
+                                )
+                            m["choices_timeout"] = True
+                        m.pop("choices_status", None)
+                        m.pop("choices_type", None)
+                        m.pop("choices_ts", None)
+                        m.pop("choices_claimed_ts", None)
+                        m.pop("staged_choices", None)
+                        m.pop("staged_choices_dec", None)
+                        dirty_s = True
             if m.get("role") == "assistant":
                 if m.get("memory_status") in ("pending", "processing"):
                     is_proc = m.get("memory_status") == "processing"
@@ -1880,6 +1979,7 @@ def save(s):
                 dm.pop("staged_choices", None)
                 dm.pop("staged_choices_dec", None)
                 dm.pop("staged_choices_slot", None)
+                dm.pop("staged_choices_notice", None)
                 dm.pop("choices_status", None)
                 dm.pop("choices_type", None)
                 dm.pop("choices_ts", None)
@@ -2086,7 +2186,7 @@ def rotation_maybe_arm(s):
     if not ROTATION_ENABLED:
         return False
     st = s["setting"]
-    if st.get("ai_provider") == "google":
+    if is_api_provider(st):
         return False
     if not ide_poke or not (st.get("ide_session") or "").strip():
         return False
@@ -4021,6 +4121,8 @@ def build_context(s, m, transport="ag"):
 
 def note_reply(s, reply_to, msg):
     """取り込んだ応答はAI自身が書いたものなので、送ったものとして記録する（次の差分に入れない）"""
+    if is_api_provider(s.get("setting") or {}):
+        return
     old = read_sent(s["id"])
     matched = bool(old.get("msgs")) and old["msgs"][-1][0] == reply_to
     if matched and (msg in s.get("messages", []) or (isinstance(msg, dict) and msg.get("id") and find_msg(s, msg["id"]))):
@@ -4084,6 +4186,8 @@ def trigger_async_revert(ide_id, target_step=None):
 
 
 def mark_choices_sent(s):
+    if is_api_provider(s.get("setting", {})):
+        return
     st = s.get("setting", {})
     target_ide = (st.get("choices_ide_session") if has_choices_ide_session(st) else st.get("ide_session")) or ""
     if target_ide:
@@ -8224,7 +8328,7 @@ def choices_explicit_hits(choices):
 
 def choices_ide_of(st):
     """そのチャンネルの選択肢生成を担当している会話ID"""
-    if not isinstance(st, dict) or st.get("ai_provider") == "google":
+    if not isinstance(st, dict) or is_api_provider(st):
         return ""
     return ((st.get("choices_ide_session") if has_choices_ide_session(st) else st.get("ide_session")) or "")
 
@@ -8400,6 +8504,7 @@ def delete_session_all(sid, to_trash=True):
     with lock:
         # 0. 削除済みフラグを立て、進行中の記憶再生成タスクがあれば即座に停止シグナルを出す
         deleted_sessions.add(sid)
+        _purge_google_session_state(sid)
         memory_store.mark_session_deleted(sid)
         if sid in memory_regen_state and isinstance(memory_regen_state[sid], dict):
             memory_regen_state[sid]["running"] = False
@@ -8565,7 +8670,7 @@ def plan_revert(s, keep):
     """発言を書き換える前に呼ぶ。担当の会話を msgs[keep] まで（keep = -1 なら最初の発言の前まで）に巻き戻す予定を覚える。
     巻き戻しは時間がかかるので lock の外（/api/ide/revert）でする。予定を作ったら True"""
     st = s["setting"]
-    if st.get("ai_provider") == "google":
+    if is_api_provider(st):
         return False
     if not st.get("ide_session") or not st.get("ide_revert", True):
         return False
@@ -8870,7 +8975,7 @@ def rotation_resume_scan():
             s = load(sid, readonly=True)
         except (OSError, ValueError):
             continue
-        if (s.get("setting") or {}).get("ai_provider") == "google":
+        if is_api_provider(s.get("setting") or {}):
             continue
         ph = rotation_phase(s)
         if ph and ph != "armed":
@@ -8888,7 +8993,7 @@ def rotation_step(sid):
             s = load(sid)
         except (OSError, ValueError):
             return None
-        if (s.get("setting") or {}).get("ai_provider") == "google":
+        if is_api_provider(s.get("setting") or {}):
             return None
         r = rotation_state(s)
         if not r:
@@ -9469,12 +9574,12 @@ def ide_auto_step(told=False):
         for sid in list_ids():
             s = load(sid, readonly=True)
             st = s["setting"]
-            if st.get("ai_provider") == "google":
+            if is_api_provider(st):
                 continue
             # メイン会話がある（または作成中）のに選択肢会話が未設定（またはメインと同一）なら自動作成対象にする
             auto_pair_choices = (
                 on
-                and st.get("ai_provider") != "google"
+                and not is_api_provider(st)
                 and st.get("suggest_choices", True)
                 and (bool(st.get("ide_session")) or bool(st.get("ide_auto")))
                 and not has_choices_ide_session(st)
@@ -9565,7 +9670,7 @@ def poke_worker():
                         continue
                     s = load(sid, readonly=True)
                     st, msgs = s["setting"], s["messages"]
-                    if st.get("ai_provider") == "google":
+                    if is_api_provider(st):
                         continue
                     ide = st.get("ide_session")
                     has_par = has_choices_ide_session(st)
@@ -10949,7 +11054,8 @@ def process_outbox():
                 # 4. 1回だけキューイング（I/O 1回・MAX_NEW を守る）
                 if combined or resolved:
                     queued_memories.append(("explicit", sid, ch_name, combined, resolved, turn_idx, msg["id"], el_snapshot))
-                elif (memory_backfill_on()
+                elif (not is_api_provider(s.get("setting") or {})
+                      and memory_backfill_on()
                       and needs_memory_backfill(user_text, msg.get("text", ""))
                       and not any(x.get("memory_status") in ("pending", "processing")
                                   for x in s["messages"])):
@@ -11410,14 +11516,18 @@ def process_images():
 
 
 def _set_google_status(sid, task_type, state, **extra):
-    with lock:
+    if sid in deleted_sessions:
+        return
+    with lock, google_inflight_guard:
+        if sid in deleted_sessions:
+            return
         cur = google_status.get(sid) or {}
         by_task = dict(cur.get("tasks") or {})
         entry = {"task_type": task_type, "state": state, "ts": now(), **extra}
         by_task[task_type] = entry
-
         user_entry = by_task.get("user")
-        if user_entry and user_entry.get("state") in ("running", "retrying", "requesting", "retry") and task_type != "user":
+        if user_entry and user_entry.get("state") in ("running", "retrying", "requesting", "retry") \
+                and task_type != "user":
             top = dict(user_entry, tasks=by_task)
         else:
             top = dict(entry, tasks=by_task)
@@ -11431,16 +11541,18 @@ def _google_status(sid, **kw):
 
 
 def _google_clear_status(sid, task_type=None):
+    """F-2: 現行のタスクマップ方式を維持し、ロックだけ統一する"""
     if not sid:
         return
-    with lock:
+    with lock, google_inflight_guard:
         if task_type:
             cur = google_status.get(sid)
             if cur and "tasks" in cur:
                 by_task = dict(cur.get("tasks") or {})
                 by_task.pop(task_type, None)
                 user_entry = by_task.get("user")
-                if user_entry and user_entry.get("state") in ("running", "retrying", "requesting", "retry"):
+                if user_entry and user_entry.get("state") in ("running", "retrying",
+                                                              "requesting", "retry"):
                     google_status[sid] = dict(user_entry, tasks=by_task)
                     return
                 elif by_task:
@@ -11450,31 +11562,51 @@ def _google_clear_status(sid, task_type=None):
         google_status.pop(sid, None)
 
 
-def _google_model(st, task_type="user"):
-    if task_type == "choices" and (st.get("google_choices_model") or "").strip():
-        return st["google_choices_model"].strip()
-    model = (st.get("google_model") or "").strip()
-    if model:
-        return model
-    try:
-        return google_ai.default_model()
-    except Exception:
-        return ""
+def _purge_google_session_state(sid):
+    with lock, google_inflight_guard:
+        google_status.pop(sid, None)
+        for _k in [k for k in google_retry_at if k.startswith(f"{sid}:")]:
+            google_retry_at.pop(_k, None)
+        for _k in [k for k in google_inflight if k.startswith(f"{sid}:")]:
+            google_inflight.discard(_k)
+
+
+def _cancel_inflight_task(sid, mid, task_type):
+    """破棄時に processing を pending に戻し、google_status を消す"""
+    with lock:
+        if sid not in deleted_sessions and os.path.exists(spath(sid)):
+            try:
+                s = load(sid)
+                m = find_msg(s, mid)
+                if not m and task_type == "choices":
+                    m = next((x for x in reversed(s.get("messages", []))
+                              if x.get("choices_orig_id") == mid), None)
+                if m:
+                    if task_type == "user" and m.get("status") == "processing":
+                        m["status"] = "pending"; m.pop("claimed_ts", None); save(s)
+                    elif task_type == "choices" and m.get("choices_status") == "processing":
+                        m["choices_status"] = "pending"; m.pop("choices_claimed_ts", None); save(s)
+                    elif task_type == "image_refine" and m.get("image_refine_status") == "processing":
+                        m["image_refine_status"] = "pending"
+                        m.pop("image_refine_claimed_ts", None); save(s)
+            except Exception:
+                pass
+    _google_clear_status(sid, task_type)
+
+
+def _reset_session_api_tasks_to_pending(s):
+    for m in s.get("messages") or []:
+        if m.get("status") == "processing":
+            m["status"] = "pending"; m.pop("claimed_ts", None)
+        m.pop("google_retry", None)
+        if m.get("choices_status") == "processing":
+            m["choices_status"] = "pending"; m.pop("choices_claimed_ts", None)
+        if m.get("image_refine_status") == "processing":
+            m["image_refine_status"] = "pending"; m.pop("image_refine_claimed_ts", None)
 
 
 def _google_task_ts(m, task_type):
     return task_ts(m, task_type) if task_type != "user" else (m.get("ts") or "")
-
-
-def _google_task_key(sid, a, b=None):
-    if isinstance(a, dict):
-        return f"{sid}:{b}:{a.get('id')}"
-    elif isinstance(b, dict):
-        return f"{sid}:{a}:{b.get('id')}"
-    elif b is not None:
-        return f"{sid}:{b}:{a}"
-    else:
-        return f"{sid}:{a}"
 
 
 def _google_pick_task(s):
@@ -11528,6 +11660,10 @@ def _google_claim(sid, task_type, mid):
 
 
 def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
+    filter_slot = None
+    filter_task_ts = ""
+    target_mid = ""
+    attempts = 0
     with lock:
         try:
             s = load(sid)
@@ -11535,39 +11671,58 @@ def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
             return
         m = find_msg(s, mid)
         if not m and task_type == "choices":
-            m = next((x for x in reversed(s.get("messages", [])) if x.get("choices_orig_id") == mid), None)
+            m = next((x for x in reversed(s.get("messages", []))
+                      if x.get("choices_orig_id") == mid), None)
         if not m:
             return
         attempts = int(m.get("error_retries") or 0)
+        claimed_ts = m.get("choices_claimed_ts") if task_type == "choices" else ""
         if retryable and attempts < 2:
             m["error_retries"] = attempts + 1
             if task_type == "user":
-                m["status"] = "pending"
-                m.pop("claimed_ts", None)
+                m["status"] = "pending"; m.pop("claimed_ts", None)
             elif task_type == "choices":
-                m["choices_status"] = "pending"
-                m.pop("choices_claimed_ts", None)
+                m["choices_status"] = "pending"; m.pop("choices_claimed_ts", None)
             elif task_type == "image_refine":
-                m["image_refine_status"] = "pending"
-                m.pop("image_refine_claimed_ts", None)
+                m["image_refine_status"] = "pending"; m.pop("image_refine_claimed_ts", None)
             m["google_retry"] = msg
             if key:
-                google_retry_at[key] = time.monotonic() + min(30, 2 ** (attempts + 1))
+                with google_inflight_guard:
+                    google_retry_at[key] = time.monotonic() + min(30, 2 ** (attempts + 1))
         else:
             if task_type == "user":
-                m["status"] = "error"
-                m["error"] = msg
-                m.pop("claimed_ts", None)
+                m["status"] = "error"; m["error"] = msg; m.pop("claimed_ts", None)
             elif task_type == "choices":
-                m["choices_status"] = "error"
-                m["choices_error"] = msg
+                m["choices_status"] = "error"; m["choices_error"] = msg
                 m.pop("choices_claimed_ts", None)
+                if _is_filter_error_msg(msg):
+                    slot = str(m.get("choices_slot") or m.get("choices_type") or "normal").lower()
+                    filter_slot = slot if slot in ("normal", "erotic") else "normal"
+                    filter_task_ts = claimed_ts or m.get("choices_ts") or now()
+                    if m.get("role") == "assistant":
+                        target_mid = m["id"]
+                    else:
+                        msgs = s.get("messages") or []
+                        idx = next((i for i, x in enumerate(msgs) if x.get("id") == m.get("id")), -1)
+                        ans = (next((x for x in reversed(msgs[idx + 1:])
+                                     if x.get("role") == "assistant"), None)
+                               if idx >= 0 else None)
+                        if ans and ans.get("id"):
+                            target_mid = ans["id"]
+                        elif m.get("status") in ("pending", "processing"):
+                            m["staged_choices_notice"] = {"kind": "filter", "slot": filter_slot,
+                                                          "task": filter_task_ts, "ts": now()}
             elif task_type == "image_refine":
-                m["image_refine_status"] = "error"
-                m["image_refine_error"] = msg
+                m["image_refine_status"] = "error"; m["image_refine_error"] = msg
                 m.pop("image_refine_claimed_ts", None)
+            elif task_type == "memory_extract":
+                m["memory_status"] = "error"; m.pop("memory_claimed_ts", None)
+            elif task_type == "consolidation":
+                m["consolidation_status"] = "error"; m.pop("consolidation_claimed_ts", None)
             m.pop("google_retry", None)
         save(s)
+    if filter_slot and target_mid:
+        _set_choices_notice(sid, target_mid, "filter", filter_slot, filter_task_ts)
     _set_google_status(sid, task_type, "retry" if retryable and attempts < 2 else "error", error=msg)
 
 
@@ -11600,13 +11755,15 @@ def _google_choices_contract():
 
 def _google_choices_output_text(s, m, erotic=False):
     try:
-        if m.get("role") == "user" or erotic:
+        if m.get("role") == "user":
             base = parallel_choices_output_text(s, m, erotic=erotic)
+        elif erotic:
+            base = choices_regen_output_text(s, m)
         else:
             base = normal_choices_output_text(s, m)
     except Exception:
         base = ""
-    base = re.split(r"\n■ JSON出力ルール", base, maxsplit=1)[0].strip()
+    base = re.split(r"\n■ ?JSON出力ルール[\s\S]*|\n- outbox/[\s\S]*", base, maxsplit=1)[0].strip()
     if base:
         return base + "\n\n■ JSON出力ルール\n" + _google_choices_contract()
     return _google_choices_contract()
@@ -11661,6 +11818,10 @@ def _google_prepare_attachments(m):
 def _google_build_prompt(s, m, task_type):
     if task_type == "user":
         ctx = build_context(s, m, transport="google")
+        try:
+            save_rag_hits(s["id"], m.get("id"), ctx.get("retrieved"))
+        except Exception:
+            pass
         ctx["sections"] = [sec for sec in (ctx.get("sections") or [])
                            if not str(sec.get("label", "")).startswith("ユーザーが今回の発言に添付")]
         prompt = _google_section_text(ctx)
@@ -11686,9 +11847,13 @@ def _google_build_prompt(s, m, task_type):
     raise ValueError("unknown task")
 
 
-def _google_write_outbox(sid, mid, task_type, rep):
-    os.makedirs(DONE, exist_ok=True)
-    name = f"{sid}_google_{task_type}_{mid}_{int(time.time() * 1000)}.json"
+def _google_write_outbox(sid, mid, task_type, rep, slot=""):
+    os.makedirs(OUTBOX, exist_ok=True)
+    if task_type == "choices" and slot in ("normal", "erotic"):
+        mark = f"_choices_{slot}_"
+    else:
+        mark = f"_{task_type}_"
+    name = f"{sid}_google{mark}{mid}_{int(time.time() * 1000)}.json"
     path = os.path.join(OUTBOX, name)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -11698,41 +11863,70 @@ def _google_write_outbox(sid, mid, task_type, rep):
 
 
 def run_google_task(sid, mid, task_type=None, key=None):
-    if task_type not in ("user", "choices", "image_refine", "memory_extract", "consolidation") and mid in ("user", "choices", "image_refine", "memory_extract", "consolidation"):
+    if task_type not in ("user", "choices", "image_refine", "memory_extract", "consolidation") \
+            and mid in ("user", "choices", "image_refine", "memory_extract", "consolidation"):
         task_type, mid = mid, task_type
     try:
         with lock:
             s = load(sid)
         m = find_msg(s, mid)
         if not m and task_type == "choices":
-            m = next((x for x in reversed(s.get("messages", [])) if x.get("choices_orig_id") == mid), None)
+            m = next((x for x in reversed(s.get("messages", []))
+                      if x.get("choices_orig_id") == mid), None)
         if not m:
             return
-        if task_type == "choices" and m.get("choices_status") not in ("pending", "processing"):
-            m = next((x for x in reversed(s.get("messages", [])) if x.get("choices_orig_id") == mid), m)
         st = s.get("setting") or {}
-        model = _google_model(st, task_type)
-        if not model:
-            _google_fail(sid, task_type, mid, "Googleのモデルが未設定です", key=key)
+        if not is_api_provider(st):
+            _cancel_inflight_task(sid, mid, task_type)
             return
+        provider = api_provider_of(st)
+        model = active_api_model(st, task_type)
+        if not model:
+            _google_fail(sid, task_type, mid,
+                         f"{'Vertex AI' if provider == 'vertex' else 'Google'}のモデルが未設定です", key=key)
+            return
+        start_model_setting = _api_model_setting(st, task_type)
+        start_fp = google_ai.load_vertex_config().get("fingerprint") if provider == "vertex" else ""
+        choices_slot = ""
+        if task_type == "choices":
+            choices_slot = "erotic" if _google_choice_type(m) == "erotic" else "normal"
         prompt, images, out_type, system = _google_build_prompt(s, m, task_type)
         use_fetch = bool(st.get("google_fetch", True)) and (task_type == "user")
-        _set_google_status(sid, task_type, "requesting", model=model,
+        _set_google_status(sid, task_type, "requesting", provider=provider, model=model,
                            fetch=use_fetch, images=len(images))
         res = google_ai.generate(
             model, prompt, system,
             safety_off=bool(st.get("google_safety_off", True)),
             max_output_tokens=int(st.get("google_max_output_tokens") or 8192),
-            fetch=use_fetch,
-            images=images,
+            fetch=use_fetch, images=images, provider=provider,
         )
+        if sid in deleted_sessions:
+            return
+        cancelled = False
+        with lock:
+            if sid in deleted_sessions or not os.path.exists(spath(sid)):
+                return
+            try:
+                cur_st = (load(sid).get("setting") or {})
+                if (cur_st.get("ai_provider") != provider
+                        or _api_model_setting(cur_st, task_type) != start_model_setting
+                        or (provider == "vertex"
+                            and google_ai.load_vertex_config().get("fingerprint") != start_fp)):
+                    cancelled = True
+            except Exception:
+                return
+        if cancelled:
+            print(f"[google] cancelled (config/provider changed) {sid} {task_type}")
+            _cancel_inflight_task(sid, mid, task_type)
+            return
         if res.get("error"):
             _google_fail(sid, task_type, mid, str(res["error"]),
                          retryable=bool(res.get("retryable")), key=key)
             return
         obj, json_ok = google_ai.parse_json_text(res.get("text") or "")
         if not isinstance(obj, dict):
-            _google_fail(sid, task_type, mid, "応答をJSONとして解釈できませんでした", retryable=True, key=key)
+            _google_fail(sid, task_type, mid, "応答をJSONとして解釈できませんでした",
+                         retryable=True, key=key)
             return
         if task_type == "user":
             text = str(obj.get("text") or "").strip()
@@ -11747,9 +11941,7 @@ def run_google_task(sid, mid, task_type=None, key=None):
             if not isinstance(choices, list) or not choices:
                 _google_fail(sid, task_type, mid, "応答JSONに choices がありません", retryable=True, key=key)
                 return
-            rep = {"choices": choices}
-            if obj.get("slot"):
-                rep["slot"] = obj["slot"]
+            rep = {"choices": choices, "slot": choices_slot}
             if obj.get("target_id"):
                 rep["target_id"] = obj["target_id"]
         elif task_type == "image_refine":
@@ -11766,10 +11958,11 @@ def run_google_task(sid, mid, task_type=None, key=None):
         rep["session"] = sid
         rep["reply_to"] = target_mid
         rep["type"] = out_type
-        name = _google_write_outbox(sid, target_mid, task_type, rep)
+        name = _google_write_outbox(sid, target_mid, task_type, rep, slot=choices_slot)
         _set_google_status(sid, task_type, "waiting_import", model=model,
                            fetch=bool(res.get("fetch_called")), outbox=name,
-                           elapsed_ms=res.get("elapsed_ms"), usage=res.get("meta", {}).get("usage") or {})
+                           elapsed_ms=res.get("elapsed_ms"),
+                           usage=(res.get("meta") or {}).get("usage") or {})
         print(f"[google] queued outbox {name} -> {sid} ({task_type})")
     except Exception as e:
         print(f"[google] task error {sid} {task_type}: {e}")
@@ -11777,17 +11970,18 @@ def run_google_task(sid, mid, task_type=None, key=None):
 
 
 def google_reset_processing():
-    """再起動時にGoogleの processing を pending に戻す（HTTPリクエストは失われているため）。"""
+    """再起動時に API ワーカーの processing を pending に戻す（HTTP リクエストは失われているため）"""
     try:
         sids = list_ids()
     except OSError:
         return
+    woke = False
     for sid in sids:
         try:
             with lock:
                 s = load(sid)
                 st = s.get("setting") or {}
-                if st.get("ai_provider") != "google":
+                if not is_api_provider(st):
                     continue
                 changed = False
                 for m in s.get("messages") or []:
@@ -11803,79 +11997,72 @@ def google_reset_processing():
                         m["image_refine_status"] = "pending"
                         m.pop("image_refine_claimed_ts", None)
                         changed = True
-                    if m.get("memory_status") == "processing":
-                        m["memory_status"] = "pending"
+                    # API プロバイダは記憶タスクを拾わないので pending に戻さず除去する
+                    if m.get("memory_status") in ("pending", "processing"):
+                        m.pop("memory_status", None)
+                        m.pop("memory_ts", None)
                         m.pop("memory_claimed_ts", None)
                         changed = True
-                    if m.get("consolidation_status") == "processing":
-                        m["consolidation_status"] = "pending"
+                    if m.get("consolidation_status") in ("pending", "processing"):
+                        m.pop("consolidation_status", None)
+                        m.pop("consolidation_ts", None)
                         m.pop("consolidation_claimed_ts", None)
                         changed = True
                 if changed:
                     save(s)
+                    woke = True
         except Exception as e:
             print(f"[google] reset error {sid}: {e}")
+    if woke:
+        google_event.set()
 
 
 def _google_pick_tasks():
-    """実行可能な Google API タスクを複数件（本文＋並列選択肢など）リストで返す"""
+    """実行可能な API タスクを返す。user / choices / image_refine の3種のみ"""
     tasks = []
+    stale_mem = []          # F-6: readonly のセッションは書き換えず、後でロック内で処理する
     now_mono = time.monotonic()
     with lock:
         for sid in list_ids():
             try:
-                s = load(sid, readonly=True)
+                s = load(sid, readonly=True)     # 参照。書き換え禁止
             except Exception:
                 continue
             st = s.get("setting") or {}
-            if st.get("ai_provider") != "google":
+            if not is_api_provider(st):
                 continue
-            msgs = s.get("messages") or []
-            for m in msgs:
-                mid = m.get("id")
-                if not mid:
+            for m in s.get("messages") or []:
+                if not m.get("id"):
                     continue
-
-                # 1. 本文タスク（user）
                 if m.get("role") == "user" and m.get("status") in ("pending", "processing"):
-                    tkey = _google_task_key(sid, mid, "user")
-                    with google_inflight_guard:
-                        in_flight = tkey in google_inflight
-                    if not in_flight and now_mono >= google_retry_at.get(tkey, 0.0):
-                        tasks.append((sid, mid, "user", tkey))
-
-                # 2. 選択肢タスク（choices）※本文の完了を待たずに同時ピックアップ
+                    tkey = _google_inflight_key(sid, "user", m)
+                    if now_mono >= google_retry_at.get(tkey, 0.0) and not _google_inflight_has(tkey):
+                        tasks.append((sid, m["id"], "user", tkey))
                 if m.get("choices_status") in ("pending", "processing"):
-                    ctype = str(m.get("choices_type") or m.get("choices_slot") or "normal").lower()
-                    orig_mid = m.get("choices_orig_id") or mid
-                    tkey = _google_task_key(sid, orig_mid, f"choices:{ctype}")
-                    with google_inflight_guard:
-                        in_flight = tkey in google_inflight
-                    if not in_flight and now_mono >= google_retry_at.get(tkey, 0.0):
-                        tasks.append((sid, mid, "choices", tkey))
-
-                # 3. その他のサブタスク（既存のピックアップ条件を維持）
+                    tkey = _google_inflight_key(sid, "choices", m)
+                    if now_mono >= google_retry_at.get(tkey, 0.0) and not _google_inflight_has(tkey):
+                        tasks.append((sid, m["id"], "choices", tkey))
                 if m.get("image_refine_status") in ("pending", "processing"):
-                    tkey = _google_task_key(sid, mid, "image_refine")
-                    with google_inflight_guard:
-                        in_flight = tkey in google_inflight
-                    if not in_flight and now_mono >= google_retry_at.get(tkey, 0.0):
-                        tasks.append((sid, mid, "image_refine", tkey))
-
-                if m.get("role") == "assistant":
-                    if m.get("memory_status") in ("pending", "processing"):
-                        tkey = _google_task_key(sid, mid, "memory_extract")
-                        with google_inflight_guard:
-                            in_flight = tkey in google_inflight
-                        if not in_flight and now_mono >= google_retry_at.get(tkey, 0.0):
-                            tasks.append((sid, mid, "memory_extract", tkey))
-
-                    if m.get("consolidation_status") in ("pending", "processing"):
-                        tkey = _google_task_key(sid, mid, "consolidation")
-                        with google_inflight_guard:
-                            in_flight = tkey in google_inflight
-                        if not in_flight and now_mono >= google_retry_at.get(tkey, 0.0):
-                            tasks.append((sid, mid, "consolidation", tkey))
+                    tkey = _google_inflight_key(sid, "image_refine", m)
+                    if now_mono >= google_retry_at.get(tkey, 0.0) and not _google_inflight_has(tkey):
+                        tasks.append((sid, m["id"], "image_refine", tkey))
+                if (m.get("memory_status") in ("pending", "processing")
+                        or m.get("consolidation_status") in ("pending", "processing")):
+                    stale_mem.append((sid, m["id"]))
+        # 2段階目: ロック内で読み直して滞留ステータスを落とす（無限リトライ防止）
+        for sid, mid in stale_mem:
+            try:
+                s2 = load(sid)
+            except Exception:
+                continue
+            m2 = find_msg(s2, mid)
+            if not m2:
+                continue
+            m2.pop("memory_status", None); m2.pop("memory_ts", None)
+            m2.pop("memory_claimed_ts", None)
+            m2.pop("consolidation_status", None); m2.pop("consolidation_ts", None)
+            m2.pop("consolidation_claimed_ts", None)
+            save(s2)
     return tasks
 
 
@@ -12476,7 +12663,7 @@ class H(BaseHTTPRequestHandler):
                             continue
                         s = load(sid, readonly=True)
                         st = s["setting"]
-                        if st.get("ai_provider") == "google":
+                        if is_api_provider(st):
                             continue
                         par = has_choices_ide_session(st)
                         if ide:
@@ -12614,12 +12801,14 @@ class H(BaseHTTPRequestHandler):
                 # 応答待ちのあいだ、担当の会話がいま何をしているか（ツール呼び出しの一覧。読むだけ）
                 s = load(q.get("sid", [""])[0])
                 st = s["setting"]
-                if st.get("ai_provider") == "google":
+                if is_api_provider(st):
+                    prov = api_provider_of(st)
                     with google_inflight_guard:
                         gs = dict(google_status.get(s["id"]) or {})
                     running = bool(gs.get("state") in ("requesting", "retry"))
-                    note = gs.get("error") or ("Google APIで生成中" if running else "Google APIの応答待ち")
-                    return self.send_json({"items": [], "running": running, "provider": "google",
+                    label = "Vertex AI" if prov == "vertex" else "Google API"
+                    note = gs.get("error") or (f"{label}で生成中" if running else f"{label}の応答待ち")
+                    return self.send_json({"items": [], "running": running, "provider": prov,
                                            "google": gs, "note": note})
                 m_user = next((x for x in s["messages"] if x["role"] == "user" and x.get("status") in ("pending", "processing")), None)
                 m_refine = next((x for x in s["messages"] if x.get("image_refine_status") in ("pending", "processing")), None)
@@ -12679,6 +12868,34 @@ class H(BaseHTTPRequestHandler):
                 with google_inflight_guard:
                     st = dict(google_status.get(sid) or {})
                 return self.send_json({"provider": "google", "status": st})
+            if p == "/api/vertex/status":
+                cfg = google_ai.load_vertex_config()
+                cfg.pop("fingerprint", None)
+                return self.send_json(cfg)
+            if p == "/api/vertex/models":
+                refresh = q.get("refresh", ["0"])[0] in ("1", "true")
+                # probe=1 のときは実際に generateContent が通るモデルかを実測する。
+                # 一覧APIはリージョン非依存に全モデルを返すため、これが無いと 404 のモデルを
+                # UI が提示してしまう（Gemini 2.x やリージョン未提供のモデル）。
+                probe = q.get("probe", ["0"])[0] in ("1", "true")
+                try:
+                    models = google_ai.list_models(refresh=refresh, provider="vertex",
+                                                   probe=probe)
+                except google_ai.GoogleAPIError as e:
+                    return self.send_json({"models": [], "error": str(e), "code": e.code}, 200)
+                except Exception as e:
+                    return self.send_json({"models": [], "error": str(e)}, 200)
+                err = google_ai.last_models_error(provider="vertex") or None
+                cfg = google_ai.load_vertex_config()
+                return self.send_json({
+                    "models": models,
+                    "error": err,
+                    "location": cfg.get("location") or "",
+                    "effective_location": cfg.get("effective_location") or "",
+                    "location_note": cfg.get("location_note") or "",
+                    "probed": probe,
+                    "suggest_model": google_ai.default_vertex_model(),
+                })
             if p == "/api/agents":
                 # チャンネルの作業フォルダと AGENTS.md の様子（中身のプレビューつき）
                 with lock:
@@ -12981,7 +13198,11 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/ide/poke" and d.get("now"):
             # 今すぐ1回だけ合図する（動作確認・取りこぼし用）。送り終わるまで数秒かかるので、ほかを止めないよう lock の外で
             try:
-                st = load(d.get("sid", ""))["setting"]
+                s = load(d.get("sid", ""))
+                st = (s.get("setting") if isinstance(s, dict) else None) or {}
+                if is_api_provider(st):
+                    return self.send_json({"ok": False,
+                                           "msg": "APIプロバイダ（Google/Vertex）では会話への合図は使いません"})
                 target = d.get("target") or "main"
                 ide = st.get("choices_ide_session") if target == "choices" else st.get("ide_session")
             except (FileNotFoundError, ValueError):
@@ -13249,6 +13470,110 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/google/key/delete":
             google_ai.delete_key()
             google_event.set()
+            return self.send_json({"ok": True})
+        if p == "/api/vertex/config":
+            try:
+                cfg = google_ai.save_vertex_config(
+                    sa_json=d.get("sa_json"),
+                    project_id=d.get("project_id"),
+                    location=d.get("location"),
+                )
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 400)
+            except OSError as e:
+                return self.send_json({"error": f"設定ファイルの保存に失敗しました: {e}"}, 500)
+            auth_err = None
+            try:
+                google_ai.get_vertex_access_token(force_refresh=True, timeout=15)
+                google_ai.list_models(refresh=True, timeout=15, provider="vertex")
+                auth_err = google_ai.last_models_error(provider="vertex") or None
+            except Exception as e:
+                auth_err = str(e)
+
+            # 「一覧は取れるが generateContent は 404」を設定時に検出する。
+            # モデル一覧はリージョン非依存なので、リージョン違いは実測でしか分からない。
+            location_corrected = ""
+            suggest_model, available_models, models = "", [], []
+            if not auth_err:
+                probe_model = google_ai.default_vertex_model()
+                info = google_ai.probe_vertex_model(probe_model, cfg.get("location"))
+                if not info.get("available") and cfg.get("location") != google_ai.VERTEX_DEFAULT_LOCATION:
+                    alt = google_ai.VERTEX_DEFAULT_LOCATION
+                    info_alt = google_ai.probe_vertex_model(probe_model, alt)
+                    if info_alt.get("available"):
+                        try:
+                            cfg = google_ai.save_vertex_config(location=alt)
+                            location_corrected = alt
+                            info = info_alt
+                            print(f"[vertex] location を '{alt}' に自動修正しました（それ以外では 404）")
+                        except Exception as e:
+                            print(f"[vertex] location 自動修正に失敗: {e}")
+                try:
+                    models = google_ai.servable_vertex_models()
+                    available_models = [m["id"] for m in models if m.get("available")]
+                except Exception as e:
+                    print(f"[vertex] モデル実測に失敗: {e}")
+                if not info.get("available"):
+                    auth_err = (info.get("error")
+                                or f"モデル {probe_model} がリージョン {cfg.get('location')} で利用できません")
+                for _cand in (probe_model, google_ai.VERTEX_DEFAULT_MODEL):
+                    if _cand in available_models:
+                        suggest_model = _cand
+                        break
+                if not suggest_model and available_models:
+                    suggest_model = available_models[0]
+            google_event.set()
+            cfg.pop("fingerprint", None)
+            for m in models:
+                m.pop("probe_error", None)
+            return self.send_json({
+                "ok": not bool(auth_err),
+                "status": cfg,
+                "error": auth_err,
+                "location_corrected": location_corrected,
+                "suggest_model": suggest_model,
+                "available_models": available_models,
+                "models": models,
+            })
+        if p == "/api/vertex/config/delete":
+            try:
+                google_ai.delete_vertex_config()
+            except OSError as e:
+                return self.send_json({"error": f"設定ファイルの削除に失敗しました: {e}"}, 500)
+            target_sids = []
+            for _sid in list_ids():
+                try:
+                    raw_s = read_json(spath(_sid), {})
+                    if ((raw_s.get("setting") or {}).get("ai_provider") == "vertex"):
+                        target_sids.append(_sid)
+                except Exception:
+                    target_sids.append(_sid)
+            for _sid in target_sids:
+                try:
+                    with lock:
+                        _s = load(_sid)
+                        _st = _s["setting"]
+                        if _st.get("ai_provider") != "vertex":
+                            continue
+                        _st["ai_provider"] = "antigravity"
+                        _st["vertex_model"] = ""
+                        _st["vertex_choices_model"] = ""
+                        if not (_st.get("ide_session") or "").strip():
+                            _st["ide_auto"] = True
+                        if (_st.get("suggest_choices", True)
+                                and not _st.get("choices_ide_manual_off")
+                                and not has_choices_ide_session(_st)):
+                            _st["choices_ide_auto"] = True
+                        _reset_session_api_tasks_to_pending(_s)
+                        save(_s)
+                        write_sent(_sid, {"ide": "", "choices_ide": "", "msgs": [], "mem_ids": [],
+                                          "card_sig": {}, "card_for_mid": None,
+                                          "reset": True, "why": "Vertex設定削除", "ts": now()})
+                        _purge_google_session_state(_sid)
+                except Exception as e:
+                    print(f"[vertex] config delete session reset error ({_sid}): {e}")
+            ide_auto_event.set()
+            poke_event.set()
             return self.send_json({"ok": True})
         with lock:
             if p == "/api/app-settings":
@@ -13752,7 +14077,8 @@ class H(BaseHTTPRequestHandler):
                     return self.send_json({"error": str(e)}, 400)
                 if not text and not files:
                     return self.send_json({"error": "empty"}, 400)
-                if s["setting"].get("ai_provider") == "google":
+                prov = s["setting"].get("ai_provider")
+                if prov == "google":
                     key, _ = google_ai.load_key()
                     if not key:
                         return self.send_json({"error": "GoogleのAPIキーが未設定です。設定からAPIキーを保存してください。",
@@ -13763,6 +14089,13 @@ class H(BaseHTTPRequestHandler):
                         except Exception as e:
                             return self.send_json({"error": f"Googleのモデルを取得できません: {e}",
                                                    "code": "google_model_unavailable"}, 400)
+                elif prov == "vertex":
+                    if not google_ai.vertex_configured():
+                        return self.send_json({"error": "Vertex AIの認証またはプロジェクトIDが未設定です。",
+                                               "code": "vertex_not_configured"}, 400)
+                    v_mdl = (s["setting"].get("vertex_model") or "").strip()
+                    if not v_mdl or not google_ai.MODEL_ID_RE.fullmatch(v_mdl):
+                        s["setting"]["vertex_model"] = google_ai.default_vertex_model()
                 m = {"id": new_id(), "role": "user", "text": text, "ts": now(), "status": "pending"}
                 if files:
                     m["files"] = files
@@ -13783,6 +14116,7 @@ class H(BaseHTTPRequestHandler):
                     msg.pop("staged_choices", None)
                     msg.pop("staged_choices_dec", None)
                     msg.pop("staged_choices_slot", None)
+                    msg.pop("staged_choices_notice", None)
                     msg.pop("memory_status", None)
                     msg.pop("memory_ts", None)
                     msg.pop("memory_claimed_ts", None)
@@ -13795,8 +14129,11 @@ class H(BaseHTTPRequestHandler):
                 s["setting"]["total_turns"] = max(prev_total, in_file - 1) + 1
                 rotation_maybe_arm(s)      # ← P2-1（30ターン目なら armed / 数ミリ秒）
                 save(s)
-                if s["setting"].get("ai_provider") == "google":
+                if is_api_provider(s["setting"]):
                     google_event.set()
+                else:
+                    ide_auto_event.set()
+                    poke_event.set()
                 return self.send_json({"ok": True, "id": m["id"], "session": s})
             if p == "/api/send/stop":
                 # 送信中の入力を取り消す（応答待ちの表示を止める）。
@@ -13819,7 +14156,7 @@ class H(BaseHTTPRequestHandler):
                 ide_id = (s.get("setting") or {}).get("ide_session") or ""
                 revert_at = None
                 if (target_seen and ide_id and ide_poke
-                        and s.get("setting", {}).get("ai_provider") != "google"
+                        and not is_api_provider(s.get("setting", {}))
                         and s.get("setting", {}).get("ide_revert", True)):
                     st_sum = ide_poke.summary(ide_id)
                     if st_sum and st_sum.get("lastUserInputStepIndex") is not None:
@@ -13937,6 +14274,7 @@ class H(BaseHTTPRequestHandler):
                     new_user.pop("pasted", None)  # 担当の会話は巻き戻すので、画像はもう一度貼る
                     new_user.pop("staged_choices", None)
                     new_user.pop("staged_choices_dec", None)
+                    new_user.pop("staged_choices_notice", None)
                     new_user["ts"] = now()
                     if has_parallel_choices_ide(s["setting"]):
                         new_user["choices_status"] = "pending"
@@ -13959,6 +14297,7 @@ class H(BaseHTTPRequestHandler):
                         msg.pop("choices_orig_id", None)
                         msg.pop("staged_choices", None)
                         msg.pop("staged_choices_dec", None)
+                        msg.pop("staged_choices_notice", None)
                 remaining_turn = user_turns_of(s["messages"])
                 # 削除したユーザーターン数だけ通算を戻す（in_file から再計算しない＝巻き戻り事故の防止）
                 removed = max(0, before_turns - remaining_turn)
@@ -13978,8 +14317,11 @@ class H(BaseHTTPRequestHandler):
                         memory_store.delete_after_turn(sid, current_total)
                 restore_latest_snapshot(s)
                 save(s)
-                if s["setting"].get("ai_provider") == "google":
+                if is_api_provider(s["setting"]):
                     google_event.set()
+                else:
+                    ide_auto_event.set()
+                    poke_event.set()
                 return self.send_json({"ok": True, "id": new_user["id"] if new_user else None, "revert": rv})
             if p == "/api/message/regenerate-choices":
                 target_id = d.get("id")
@@ -14099,97 +14441,117 @@ class H(BaseHTTPRequestHandler):
                 save(s)
                 return self.send_json({"ok": True, "title": title})
             if p == "/api/ai/provider":
-                provider = str(d.get("provider") or "").strip()
-                if provider not in ("antigravity", "google"):
-                    return self.send_json({"error": "provider must be antigravity or google"}, 400)
-                model = str(d.get("model") or "").strip()
-                if model and not re.fullmatch(r"[A-Za-z0-9._-]+", model):
-                    return self.send_json({"error": "モデルIDが不正です"}, 400)
+                sid = d.get("sid") or sid or ""
+                provider = str(d.get("provider") or "antigravity").strip().lower()
+                if provider not in ("antigravity", "google", "vertex"):
+                    return self.send_json({"error": "provider は antigravity / google / vertex のいずれかを指定してください"}, 400)
+                req_model = str(d.get("model") or "").strip()
+                if req_model and not google_ai.MODEL_ID_RE.fullmatch(req_model):
+                    return self.send_json({"error": "モデルIDの形式が不正です"}, 400)
+
+                if provider == "google":
+                    key, _ = google_ai.load_key()
+                    if not key:
+                        return self.send_json({"error": "Google APIキーが未設定です", "code": "google_no_key"}, 400)
+                elif provider == "vertex":
+                    if not google_ai.vertex_configured():
+                        return self.send_json({"error": "Vertex AIの認証またはプロジェクトIDが未設定です",
+                                               "code": "vertex_not_configured"}, 400)
+
                 with lock:
-                    live = load(sid)
-                    lst = live["setting"]
-                    pending = any(
+                    s = load(sid)
+                    st = s["setting"]
+                    prev = st.get("ai_provider") or "antigravity"
+                    # 既存の 409 条件と完全一致させる（role 条件も維持）
+                    if any(
                         (m.get("role") == "user" and m.get("status") in ("pending", "processing"))
                         or m.get("choices_status") in ("pending", "processing")
                         or m.get("image_refine_status") in ("pending", "processing")
-                        for m in live.get("messages") or []
-                    )
-                    if pending:
-                        return self.send_json({"error": "応答待ちが終わってからプロバイダを切り替えてください"}, 409)
-                    if provider == "google":
-                        key, _ = google_ai.load_key()
-                        if not key:
-                            return self.send_json({"error": "GoogleのAPIキーが未設定です", "code": "google_no_key"}, 400)
-                        if not model:
-                            model = (lst.get("google_model") or "").strip()
-                        if not model:
+                        for m in s.get("messages", [])
+                    ):
+                        return self.send_json({"error": "応答待ち中はAIプロバイダを切り替えられません。停止してから切り替えてください。"}, 409)
+
+                    st["ai_provider"] = provider
+                    if provider in ("google", "vertex"):
+                        if provider == "google":
+                            model = req_model or st.get("google_model") or google_ai.default_model()
+                            st["google_model"] = model
+                        else:
+                            model = req_model or st.get("vertex_model") or google_ai.default_vertex_model()
+                            st["vertex_model"] = model
+                        if "fetch" in d:
+                            st["google_fetch"] = bool(d.get("fetch"))
+                        if "safety_off" in d:
+                            st["google_safety_off"] = bool(d.get("safety_off"))
+                        if "max_output_tokens" in d:
                             try:
-                                model = google_ai.default_model()
-                            except Exception as e:
-                                return self.send_json({"error": f"モデル一覧を取得できません: {e}"}, 400)
-                        lst["ai_provider"] = "google"
-                        lst["google_model"] = model
-                        lst["google_fetch"] = bool(d.get("fetch", lst.get("google_fetch", True)))
-                        lst["google_safety_off"] = bool(d.get("safety_off", lst.get("google_safety_off", True)))
-                        try:
-                            lst["google_max_output_tokens"] = max(256, min(65536, int(d.get("max_output_tokens") or lst.get("google_max_output_tokens") or 8192)))
-                        except (TypeError, ValueError):
-                            lst["google_max_output_tokens"] = 8192
-                        # 既存の ide_session / choices_ide_session と choices_ide_manual_off は温存する
-                        lst["ide_auto"] = False
-                        lst["choices_ide_auto"] = False
-                        lst.pop("rotation", None)
-                        lst.pop("rotation_reserve", None)
+                                st["google_max_output_tokens"] = max(256, min(65536, int(d.get("max_output_tokens") or 8192)))
+                            except (TypeError, ValueError):
+                                pass
+                        st["ide_auto"] = False
+                        st["choices_ide_auto"] = False
+                        s.pop("rotation", None)
                     else:
-                        lst["ai_provider"] = "antigravity"
-                        if model:
-                            lst["ide_model"] = model
-                        if not (lst.get("ide_session") or "").strip():
-                            lst["ide_auto"] = True
-                        if (
-                            lst.get("suggest_choices", True)
-                            and not lst.get("choices_ide_manual_off")
-                            and not has_choices_ide_session(lst)
-                        ):
-                            lst["choices_ide_auto"] = True
-                        lst.pop("rotation", None)
-                        lst.pop("rotation_reserve", None)
-                    live["setting"] = lst
-                    save(live)
-                    ide_auto_event.set()
-                    with google_inflight_guard:
-                        google_status.pop(sid, None)
-                        google_retry_at.clear()
-                # プロバイダ切替時はAGの差分履歴をリセットする（戻したときに全部送る）
-                write_sent(sid, {"ide": "", "choices_ide": "", "msgs": [], "mem_ids": [],
-                                 "card_sig": {}, "card_for_mid": None,
-                                 "reset": True, "why": "AIプロバイダ切替", "ts": now()})
-                if provider == "google":
+                        if req_model:
+                            st["ide_model"] = req_model
+                        model = st.get("ide_model") or ""
+                        s.pop("rotation", None)
+                        s.pop("rotation_reserve", None)
+                        if not (st.get("ide_session") or "").strip():
+                            st["ide_auto"] = True
+                        if (st.get("suggest_choices", True)
+                                and not st.get("choices_ide_manual_off")
+                                and not has_choices_ide_session(st)):
+                            st["choices_ide_auto"] = True
+
+                    if prev != provider:
+                        _purge_google_session_state(sid)
+                        write_sent(sid, {"ide": "", "choices_ide": "", "msgs": [], "mem_ids": [],
+                                         "card_sig": {}, "card_for_mid": None,
+                                         "reset": True, "why": f"AIプロバイダ切替({prev}->{provider})", "ts": now()})
+                    save(s)
+
+                if provider in ("google", "vertex"):
                     google_event.set()
                 else:
+                    ide_auto_event.set()
                     poke_event.set()
-                return self.send_json({"ok": True, "provider": lst["ai_provider"],
-                                       "model": lst.get("google_model") if provider == "google" else lst.get("ide_model"),
-                                       "fetch": bool(lst.get("google_fetch")),
-                                       "safety_off": bool(lst.get("google_safety_off")),
-                                       "max_output_tokens": int(lst.get("google_max_output_tokens") or 8192)})
+
+                return self.send_json({
+                    "ok": True,
+                    "provider": provider,
+                    "model": st.get("vertex_model") if provider == "vertex" else (
+                        st.get("google_model") if provider == "google" else st.get("ide_model")),
+                    "choices_model": st.get("vertex_choices_model") if provider == "vertex" else (
+                        st.get("google_choices_model") if provider == "google" else st.get("choices_ide_model")),
+                    "fetch": st.get("google_fetch", True),
+                    "safety_off": st.get("google_safety_off", True),
+                    "max_output_tokens": st.get("google_max_output_tokens", 8192),
+                })
             if p == "/api/ide/model":
                 # 合図を送るときのモデル。空なら会話の最後の入力と同じ
                 model = d.get("model") or ""
-                target = d.get("target") or "main"
-                provider = d.get("provider") or ""
                 if not isinstance(model, str):
                     return self.send_json({"error": "model must be a string"}, 400)
-                if target == "choices" and provider == "google":
-                    field = "google_choices_model"   # Google は会話が無いので API のモデルIDを別枠で持つ
+                model = model.strip()
+                if model and not google_ai.MODEL_ID_RE.fullmatch(model):
+                    return self.send_json({"error": "モデルIDの形式が不正です"}, 400)
+                target = d.get("target") or "main"
+                provider = d.get("provider") or ""
+                if target == "choices" and provider == "vertex":
+                    field = "vertex_choices_model"
+                elif target == "choices" and provider == "google":
+                    field = "google_choices_model"
+                elif target == "main" and provider == "vertex":
+                    field = "vertex_model"
                 else:
                     field = "choices_ide_model" if target == "choices" else "ide_model"
-                s["setting"][field] = model.strip()
+                s["setting"][field] = model
                 save(s)
                 return self.send_json({"ok": True, "model": s["setting"][field]})
             if p == "/api/claim":
-                if s["setting"].get("ai_provider") == "google":
-                    return self.send_json({"error": "このチャンネルはGoogleプロバイダです"}, 409)
+                if is_api_provider(s["setting"]):
+                    return self.send_json({"error": "このチャンネルはAPIプロバイダ（Google/Vertex）です"}, 409)
                 m = find_msg(s, d.get("id"))
                 req_type = d.get("type")
                 # type 未指定時のフォールバック。優先順位は /api/pending の type_prio と一致させる
@@ -14431,7 +14793,7 @@ class H(BaseHTTPRequestHandler):
                     new.pop("memo_as_initial", None)
                 # 固定キャラ（AI が応答で足す）と担当IDE（専用の操作で変える）はフォームから上書きさせない
                 keep = {k: s["setting"].get(k, v) for k, v in NO_IDE.items()}
-                for _pk in ("ai_provider", "google_model", "google_fetch", "google_safety_off", "google_max_output_tokens"):
+                for _pk in ("ai_provider", "google_model", "google_fetch", "google_safety_off", "google_max_output_tokens", "vertex_model", "vertex_choices_model"):
                     keep[_pk] = s["setting"].get(_pk)
                 keep["chars"] = s["setting"].get("chars") or []
                 keep["total_turns"] = s["setting"].get("total_turns", 0)

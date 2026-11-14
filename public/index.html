@@ -61,6 +61,7 @@
             <select id="aiProvider">
               <option value="antigravity">Antigravity</option>
               <option value="google">Google Gemini（AI Studio）</option>
+              <option value="vertex">Google Cloud（Vertex AI）</option>
             </select>
           </label>
         </div>
@@ -84,6 +85,28 @@
             <span id="googleApplyMsg" class="muted"></span>
           </div>
           <span class="muted">GoogleはSFW向けです。NSFWはAGまたは別APIを使ってください。Googleでブロックされた場合、自動でAGへは切り替えません。</span>
+        </div>
+        <div id="vertexBox" class="hidden" style="border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:10px">
+          <div class="row" style="justify-content:space-between">
+            <strong>Google Cloud（Vertex AI）</strong>
+            <span id="vertexKeyState" class="muted">確認中…</span>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <button id="vertexConfigSet" type="button" class="sub">認証・リージョン設定</button>
+            <button id="vertexConfigDelete" type="button" class="sub danger">設定削除</button>
+            <button id="vertexModelsReload" type="button" class="sub">モデル一覧を更新</button>
+          </div>
+          <label>Vertexモデル<select id="vertexModel"><option value="">認証・プロジェクトを設定してください</option></select></label>
+          <label>カスタムモデルID（任意・一覧にないモデルを指定する場合）
+            <input id="vertexCustomModel" type="text" placeholder="例: gemini-2.5-pro / gemini-2.0-flash-001">
+          </label>
+          <label class="check"><input type="checkbox" id="vertexFetch"> プロンプト取り寄せ（function calling）を使う</label>
+          <label class="check"><input type="checkbox" id="vertexSafetyOff"> 調整可能な安全カテゴリをOFFにする</label>
+          <label>最大出力トークン<input id="vertexMaxTokens" type="number" min="256" max="65536" step="256" value="8192"></label>
+          <div class="row">
+            <button id="vertexApply" type="button">Vertex設定を保存</button>
+            <span id="vertexApplyMsg" class="muted"></span>
+          </div>
         </div>
         <div id="agAiBox">
         <span class="muted">Antigravityの会話を選ぶと、その会話だけがこのチャンネルの入力を受け取ります</span>
@@ -575,6 +598,39 @@
     <div id="googleKeyMsg" class="muted"></div>
   </div>
 </div>
+<div id="vertexConfigModal" class="modal hidden">
+  <div class="modal-card modal-content" style="max-width:520px">
+    <h3>Vertex AI 認証・リージョン設定</h3>
+    <p class="muted" style="font-size:12px">
+      GCPサービスアカウントのJSONキーを選択（または貼り付け）するか、ADC（<code>gcloud auth application-default login</code>）を設定した状態でプロジェクトIDを指定してください。<br>
+      ※サービスアカウントには最小権限（<code>Vertex AI ユーザー / roles/aiplatform.user</code>）のみを付与することを推奨します。
+    </p>
+    <label>サービスアカウントJSONファイルを選択
+      <input id="vertexSaFile" type="file" accept=".json,application/json">
+    </label>
+    <label>またはサービスアカウントJSONを直接貼り付け（任意・既存認証を使う場合は空欄可）
+      <textarea id="vertexSaInput" rows="4" placeholder='{"type": "service_account", "project_id": "...", ...}'></textarea>
+    </label>
+    <label>GCP プロジェクトID（必須）
+      <input id="vertexProjectInput" type="text" placeholder="例: my-gcp-project-123">
+    </label>
+    <label>リージョン（Location）
+      <input id="vertexLocationInput" type="text" list="vertexLocationList" value="global" placeholder="global">
+      <datalist id="vertexLocationList">
+        <option value="global"></option>
+        <option value="us-central1"></option>
+        <option value="us-east5"></option>
+        <option value="asia-northeast1"></option>
+        <option value="europe-west1"></option>
+      </datalist>
+    </label>
+    <div id="vertexConfigMsg" class="muted" style="min-height:1.4em; margin:6px 0"></div>
+    <div class="row" style="justify-content:flex-end; gap:8px">
+      <button id="vertexConfigCancel" type="button" class="sub">キャンセル</button>
+      <button id="vertexConfigSave" type="button">保存して認証確認</button>
+    </div>
+  </div>
+</div>
 <div id="modelSheet" class="modal hidden">
   <div class="modal-content compact">
     <h2>モデル</h2>
@@ -586,6 +642,6 @@
   </div>
 </div>
 <script src="prompt_toolbar.js"></script>
-<script src="app.js?v=103"></script>
+<script src="app.js?v=104"></script>
 </body>
 </html>
