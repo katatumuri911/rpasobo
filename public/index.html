@@ -23,7 +23,7 @@
   <div id="sideBottomSection" class="side-bottom-section">
     <div id="sideModelContainer" class="side-model-slot"></div>
     <div class="side-ai-summary-row" id="sideAiSummaryRow">
-      <span id="sideAiSummaryText" class="side-ai-summary-text">AI: -</span>
+      <span id="sideAiSummaryText" class="side-ai-summary-text">Antigravity</span>
       <button id="sideAiToolBtn" type="button" class="sub side-ai-tool-btn" title="AI・モデル・認証設定を開く">⚡</button>
     </div>
     <div class="side-actions-row">
@@ -265,10 +265,13 @@
 
   <footer>
     <div id="footBar" class="foot-bar hidden">
-      <label class="ide-model" title="アプリが入力を送るときに使うモデル。送信で始まるターンはこのモデルで動く（Antigravity の画面で自分で打ったターンは、画面で選んだモデルのまま）">モデル<select id="ideModel">
+      <label class="ide-model" title="アプリが入力を送るときに使うモデル。送信で始まるターンはこのモデルで動く（Antigravity の画面で自分で打ったターンは、画面で選んだモデルのまま）"><span class="ide-model-label">モデル</span><select id="ideModel">
         <option value="">会話の最後の入力と同じ</option>
       </select></label>
-      <button id="ideModelReload" type="button" class="sub" title="残りを読み直す（Antigravity のモデル一覧と残りの利用枠）">↻</button>
+      <div id="footModelSubRow" class="foot-model-sub-row">
+        <span id="footModelSubInfo" class="foot-model-sub-info"></span>
+        <button id="ideModelReload" type="button" class="sub" title="残りを読み直す（Antigravity のモデル一覧と残りの利用枠）">↻</button>
+      </div>
       <div id="footThinkingSection" class="foot-thinking-section hidden">
         <div class="foot-thinking-bar" id="footThinkingBar" role="group" aria-label="思考の深さ">
           <button type="button" class="segment-btn" data-level="auto" title="自動: モデル既定">自動</button>

@@ -240,6 +240,12 @@ assert("sideAiSummaryText is rendered for Sidebar",
   elements.sideAiSummaryText.textContent.includes("Google: gemini-3.8-flash")
 );
 
+T.render.call(T, { ai_provider: "antigravity" });
+assert("sideAiSummaryText is rendered as Antigravity for AG",
+  elements.sideAiSummaryText.textContent === "Antigravity"
+);
+T.render.call(T, sandbox.state.setting);
+
 assert("footThinkingBar segment 'minimal' is active and marked as rounded (3.8-flash)",
   elements.footThinkingSection.children.find(b => b.dataset.level === "minimal").classList.contains("active") &&
   elements.footThinkingSection.children.find(b => b.dataset.level === "minimal").classList.contains("is-rounded")

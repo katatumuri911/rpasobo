@@ -1730,11 +1730,20 @@ function renderModels() {
   const left = (r) => (typeof r.left !== "number" ? ""
     : r.left > 0 ? `（残り${Math.max(1, Math.round(r.left * 100))}%）` : `（使い切り${reset(r)}）`);
 
+  const splitModelLabel = (label) => {
+    const m = String(label || "").match(/^(.*?)\s*(\(.*?\))\s*$/);
+    return { name: m ? m[1] : (label || ""), sub: m ? m[2] : "" };
+  };
+
   const agOpts = [`<option value="ag:">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
-    .concat(rows.map((r) => `<option value="ag:${esc(r.model)}">${esc(r.label)}${left(r)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
+    .concat(rows.map((r) => {
+      const parts = splitModelLabel(r.label);
+      return `<option value="ag:${esc(r.model)}">${esc(parts.name || r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`;
+    }));
   const currentAg = state?.setting?.ide_model || "";
   if (isAg && currentAg && !rows.some((r) => r.model === currentAg)) {
-    agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(currentAg)}（いまは選べない）</option>`);
+    const curParts = splitModelLabel(currentAg);
+    agOpts.push(`<option value="ag:${esc(currentAg)}">${esc(curParts.name || currentAg)}（いまは選べない）</option>`);
   }
 
   const googleOpts = [];
@@ -1834,6 +1843,7 @@ function renderModels() {
     selChoices.value = wantChoices;
   }
   updateModelSheetLeft();
+  updateFootModelSubInfo();
   ThinkingUI.render(state?.setting);
 }
 
@@ -2027,7 +2037,7 @@ const ThinkingUI = {
         const pName = isGoogle ? "Google" : "Vertex";
         sideSummaryEl.textContent = `${pName}: ${currentModelId || "-"} (${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
       } else {
-        sideSummaryEl.textContent = `AG: ${st.ide_model || "会話と同じ"}`;
+        sideSummaryEl.textContent = "Antigravity";
       }
     }
 
@@ -3678,6 +3688,36 @@ function updateModelSheetLeft() {
   const txt = r ? modelLeftText(r) : "";
   el.textContent = txt ? `残り利用可能: ${txt}` : "";
   el.classList.toggle("hidden", !txt);
+}
+function updateFootModelSubInfo() {
+  const el = $("footModelSubInfo");
+  if (!el) return;
+  const prov = state?.setting?.ai_provider || "antigravity";
+  if (prov === "google") {
+    const curId = state?.setting?.google_model || "";
+    const cur = googleModels.find((m) => m.id === curId);
+    el.textContent = cur?.outputTokenLimit ? `（出力上限 ${cur.outputTokenLimit}）` : "";
+    return;
+  }
+  if (prov === "vertex") {
+    const curId = state?.setting?.vertex_model || "";
+    const cur = vertexModels.find((m) => m.id === curId);
+    el.textContent = cur?.outputTokenLimit ? `（出力上限 ${cur.outputTokenLimit}）` : "";
+    return;
+  }
+  const val = $("ideModel") ? $("ideModel").value : "";
+  const model = val.startsWith("ag:") ? val.slice(3) : val;
+  const r = (ideModels?.models || []).find((x) => x.model === model);
+  if (!r) {
+    el.textContent = "";
+    return;
+  }
+  const m = String(r.label || "").match(/^(.*?)\s*(\(.*?\))\s*$/);
+  const sub = m ? m[2] : "";
+  const reset = modelResetText;
+  const left = (typeof r.left !== "number" ? ""
+    : r.left > 0 ? `（残り${Math.max(1, Math.round(r.left * 100))}%）` : `（使い切り${reset(r)}）`);
+  el.textContent = (sub ? " " + sub : "") + left;
 }
 function openModelSheet() {
   if (!state || !state.setting) {

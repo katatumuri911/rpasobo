@@ -61,7 +61,53 @@ header h1#title { cursor: pointer; }
   .side-actions-row { display: flex; gap: 6px; }
   .side-action-btn { flex: 1; padding: 6px 0; font-size: 12px; text-align: center; }
   .side-model-slot { margin-top: 8px; }
-  .side-model-slot .foot-bar { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #aaa; background: #151518; padding: 6px 8px; border-radius: 6px; border: 1px solid #34343d; }
+  .side-model-slot .foot-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: stretch;
+    font-size: 12px;
+    color: #aaa;
+    background: #151518;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid #34343d;
+  }
+  .side-model-slot .foot-bar label.ide-model {
+    width: 100%;
+    margin: 0;
+    display: flex;
+  }
+  .side-model-slot .foot-bar label.ide-model select {
+    width: 100%;
+    flex: 1;
+    min-width: 0;
+  }
+  .side-model-slot .ide-model-label {
+    display: none;
+  }
+  .side-model-slot .foot-model-sub-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+  }
+  .side-model-slot .foot-model-sub-info {
+    font-size: 11px;
+    color: #94a3b8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+  .side-model-slot .foot-model-sub-row button {
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 1.2;
+    flex-shrink: 0;
+  }
   .side-model-slot .foot-bar.hidden { display: none !important; }
   .side-model-slot:empty,
   .side-model-slot:has(.foot-bar.hidden) {
@@ -326,6 +372,8 @@ footer { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; pa
 .foot-bar { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #aaa; }
 .foot-bar label.ide-model { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; margin: 0; }
 .foot-bar select { flex: 1; min-width: 0; background: #1a1a1e; color: #e6e6e6; border: 1px solid #44444c; border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px; }
+.foot-model-sub-row { display: flex; align-items: center; gap: 6px; }
+.foot-model-sub-info { font-size: 11px; color: #94a3b8; }
 footer .foot-bar button { background: #44444c; color: #e6e6e6; padding: 3px 10px; border-radius: 6px; font-size: 12px; }
 .form .field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .form label.inline { display: inline; }
@@ -2111,8 +2159,51 @@ button.rag-entry-pin.is-pinned {
   }
   /* モデル行は「ドロワー下段」と「シート」で同じ見た目（.side-model-slot 側は既存ルール） */
   .foot-bar-slot .foot-bar {
-    display: flex; gap: 6px; align-items: center; font-size: 12px; color: #aaa;
-    background: #151518; padding: 6px 8px; border-radius: 6px; border: 1px solid #34343d;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: stretch;
+    font-size: 12px;
+    color: #aaa;
+    background: #151518;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid #34343d;
+  }
+  .foot-bar-slot .foot-bar label.ide-model {
+    width: 100%;
+    margin: 0;
+    display: flex;
+  }
+  .foot-bar-slot .foot-bar label.ide-model select {
+    width: 100%;
+    flex: 1;
+    min-width: 0;
+  }
+  .foot-bar-slot .ide-model-label {
+    display: none;
+  }
+  .foot-bar-slot .foot-model-sub-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+  }
+  .foot-bar-slot .foot-model-sub-info {
+    font-size: 11px;
+    color: #94a3b8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+  .foot-bar-slot .foot-model-sub-row button {
+    padding: 1px 6px;
+    font-size: 11px;
+    line-height: 1.2;
+    flex-shrink: 0;
   }
   .foot-bar-slot .foot-bar.hidden { display: none !important; }
   .foot-bar-slot:empty, .foot-bar-slot:has(.foot-bar.hidden) { display: none !important; margin-top: 0; }
