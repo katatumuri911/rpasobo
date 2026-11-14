@@ -1,8 +1,10 @@
+import base64
 import copy
 import io
 import json
 import os
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
@@ -553,12 +555,22 @@ class TestVertexAI(unittest.TestCase):
         # 3. POST /api/vertex/config (正常保存)
         with patch("google_ai.parse_and_validate_sa_json", return_value=SAMPLE_SA), \
              patch("google_ai.get_vertex_access_token", return_value=("tok", "sa", "")), \
-             patch("google_ai.list_models", return_value=[]):
+             patch("google_ai.list_models", return_value=[]), \
+             patch("google_ai.probe_vertex_model", return_value={"id": "gemini-2.5-flash", "available": True, "status": 200, "error": ""}), \
+             patch("google_ai.servable_vertex_models", return_value=[{"id": "gemini-2.5-flash", "available": True}]):
             h = FakeHandler("/api/vertex/config", {"sa_json": json.dumps(SAMPLE_SA), "project_id": "demo-gcp-proj", "location": "global"})
             server.H.do_POST(h)
         self.assertEqual(h.status, 200)
         self.assertTrue(h.result.get("ok"))
         self.assertTrue(h.result["status"]["configured"])
+
+        # 3b. GET /api/vertex/models (probe=None の既定プローブ動作)
+        with patch("google_ai.list_models", return_value=[{"id": "gemini-2.5-flash", "available": True}]) as mock_lm:
+            h = FakeHandler("/api/vertex/models")
+            server.H.do_GET(h)
+            self.assertEqual(h.status, 200)
+            self.assertTrue(h.result.get("probed"))
+            mock_lm.assert_called_once_with(refresh=False, provider="vertex", probe=None)
 
         # 4. GET /api/vertex/status (設定後)
         h = FakeHandler("/api/vertex/status")
@@ -608,6 +620,449 @@ class TestVertexAI(unittest.TestCase):
         msg, code = google_ai._error_message(400, raw)
         self.assertEqual(code, "INVALID_ARGUMENT")
         self.assertIn("Field required", msg)
+
+    # 31: probe_vertex_model のステータス判定とキャッシュ制御
+    def test_31_probe_vertex_model_statuses(self):
+        cfg = {"project_id": "test-proj", "location": "global", "configured": True, "fingerprint": "fp1"}
+        google_ai.invalidate_models_cache()
+
+        # status 200 -> available=True, cached
+        with patch("google_ai._vertex_rest_post", return_value=(200, {})):
+            res = google_ai.probe_vertex_model("gemini-2.5-flash", cfg=cfg)
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status"], 200)
+            with google_ai._vertex_probe_lock:
+                self.assertIn(("fp1", "global", "gemini-2.5-flash"), google_ai._vertex_probe_cache)
+
+        # status 400 -> available=True, cached
+        with patch("google_ai._vertex_rest_post", return_value=(400, {})):
+            res = google_ai.probe_vertex_model("gemini-2.5-pro", cfg=cfg)
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status"], 400)
+            with google_ai._vertex_probe_lock:
+                self.assertIn(("fp1", "global", "gemini-2.5-pro"), google_ai._vertex_probe_cache)
+
+        # status 429 -> available=True, NOT cached
+        google_ai.invalidate_models_cache()
+        with patch("google_ai._vertex_rest_post", return_value=(429, {})):
+            res = google_ai.probe_vertex_model("gemini-4-hydrogen", cfg=cfg)
+            self.assertTrue(res["available"])
+            self.assertEqual(res["status"], 429)
+            with google_ai._vertex_probe_lock:
+                self.assertNotIn(("fp1", "global", "gemini-4-hydrogen"), google_ai._vertex_probe_cache)
+
+        # status 404 -> available=False, cached
+        google_ai.invalidate_models_cache()
+        import urllib.error
+        err_404 = urllib.error.HTTPError("http://test", 404, "Not Found", {}, None)
+        err_404.read = lambda: b'{"error": {"code": 404, "message": "Model not found"}}'
+        with patch("google_ai._vertex_rest_post", side_effect=err_404):
+            res = google_ai.probe_vertex_model("nonexistent-model", cfg=cfg)
+            self.assertFalse(res["available"])
+            self.assertEqual(res["status"], 404)
+            with google_ai._vertex_probe_lock:
+                self.assertIn(("fp1", "global", "nonexistent-model"), google_ai._vertex_probe_cache)
+
+        # status 403 -> available=False, cached
+        google_ai.invalidate_models_cache()
+        err_403 = urllib.error.HTTPError("http://test", 403, "Forbidden", {}, None)
+        err_403.read = lambda: b'{"error": {"code": 403, "message": "Permission denied"}}'
+        with patch("google_ai._vertex_rest_post", side_effect=err_403):
+            res = google_ai.probe_vertex_model("forbidden-model", cfg=cfg)
+            self.assertFalse(res["available"])
+            self.assertEqual(res["status"], 403)
+            with google_ai._vertex_probe_lock:
+                self.assertIn(("fp1", "global", "forbidden-model"), google_ai._vertex_probe_cache)
+
+        # status 0 (network exception) -> available=False, NOT cached
+        google_ai.invalidate_models_cache()
+        with patch("google_ai._vertex_rest_post", side_effect=Exception("connection drop")):
+            res = google_ai.probe_vertex_model("drop-model", cfg=cfg)
+            self.assertFalse(res["available"])
+            self.assertEqual(res["status"], 0)
+            with google_ai._vertex_probe_lock:
+                self.assertNotIn(("fp1", "global", "drop-model"), google_ai._vertex_probe_cache)
+
+    # 32: servable_vertex_models の無限再帰防止と利用可能モデルのフィルタ
+    def test_32_servable_vertex_models_no_recursion_and_filters(self):
+        cfg = {"project_id": "test-proj", "location": "global", "configured": True, "fingerprint": "fp1"}
+        raw_models = [
+            {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+            {"id": "gemini-404-model", "label": "Gemini 404 Model"},
+        ]
+
+        def fake_probe(model_id, loc, **kwargs):
+            if model_id == "gemini-2.5-flash":
+                return {"id": model_id, "available": True, "status": 200, "error": ""}
+            return {"id": model_id, "available": False, "status": 404, "error": "Not Found"}
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai.effective_vertex_location", return_value="global"), \
+             patch("google_ai.probe_vertex_model", side_effect=fake_probe), \
+             patch.object(google_ai, "list_models", wraps=google_ai.list_models):
+            # probe=None (既定) で呼び出したときに無限再帰せず、available=True のみ返ること
+            models = google_ai.list_models(provider="vertex", probe=None)
+            self.assertEqual(len(models), 1)
+            self.assertEqual(models[0]["id"], "gemini-2.5-flash")
+            self.assertTrue(models[0]["available"])
+
+        # 全滅時（全て available=False）はデバッグ用に全件返すこと
+        def fake_probe_all_down(model_id, loc, **kwargs):
+            return {"id": model_id, "available": False, "status": 404, "error": "Not Found"}
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai.effective_vertex_location", return_value="global"), \
+             patch("google_ai.probe_vertex_model", side_effect=fake_probe_all_down):
+            models = google_ai.servable_vertex_models(models=raw_models)
+            self.assertEqual(len(models), 2)
+            self.assertFalse(models[0]["available"])
+            self.assertFalse(models[1]["available"])
+
+        # 文字列リスト入力でも TypeError にならず正常処理されること
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai.effective_vertex_location", return_value="global"), \
+             patch("google_ai.probe_vertex_model", side_effect=fake_probe):
+            models_str = google_ai.servable_vertex_models(models=["gemini-2.5-flash", "gemini-404-model"])
+            self.assertEqual(len(models_str), 1)
+            self.assertEqual(models_str[0]["id"], "gemini-2.5-flash")
+
+    # 33: _is_thinking_model および思考モデル向け generationConfig
+    def test_33_is_thinking_model(self):
+        self.assertTrue(google_ai._is_thinking_model("gemini-2.5-flash"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-2.5-pro"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-3.7-flash"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-3-flash-preview"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-4-hydrogen"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-4.0-flash"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-2.0-flash-thinking-exp-0121"))
+        self.assertTrue(google_ai._is_thinking_model("gemini-thinking-exp"))
+        self.assertFalse(google_ai._is_thinking_model("gemini-2.0-flash"))
+        self.assertFalse(google_ai._is_thinking_model("gemini-1.5-pro"))
+        self.assertFalse(google_ai._is_thinking_model(""))
+        self.assertFalse(google_ai._is_thinking_model(None))
+
+        # step1 generationConfig
+        c_flash = google_ai._step1_generation_config("gemini-2.5-flash")
+        self.assertEqual(c_flash["maxOutputTokens"], 1024)
+        self.assertEqual(c_flash["thinkingConfig"]["thinkingBudget"], 0)
+
+        c_hydro = google_ai._step1_generation_config("gemini-4-hydrogen")
+        self.assertEqual(c_hydro["maxOutputTokens"], 2048)
+        self.assertEqual(c_hydro["thinkingConfig"]["thinkingBudget"], 128)
+
+        c_20 = google_ai._step1_generation_config("gemini-2.0-flash")
+        self.assertEqual(c_20["maxOutputTokens"], 256)
+        self.assertNotIn("thinkingConfig", c_20)
+
+        # step2 generationConfig
+        c2 = google_ai._step2_generation_config("gemini-4-hydrogen", 4096, provider="vertex")
+        self.assertGreaterEqual(c2["maxOutputTokens"], 16384)
+
+        c2_non_vertex = google_ai._step2_generation_config("gemini-4-hydrogen", 4096, provider="google")
+        self.assertEqual(c2_non_vertex["maxOutputTokens"], 4096)
+
+    # 34: GCE メタデータフォールバック時の UnboundLocalError 防止
+    def test_34_gce_metadata_token_no_unbound_local(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self):
+                return b'{"access_token": "gce-token-xyz", "expires_in": 3600}'
+
+        with patch("google_ai._vertex_sa_path", return_value=None), \
+             patch("google_ai._default_adc_path", return_value=None), \
+             patch("urllib.request.urlopen", return_value=FakeResponse()):
+            tok, auth_type, quota, ttl = google_ai._fetch_vertex_token_unlocked(google_ai.CLOUD_PLATFORM_SCOPE)
+            self.assertEqual(tok, "gce-token-xyz")
+            self.assertEqual(auth_type, "adc")
+            self.assertEqual(quota, "")
+            self.assertEqual(ttl, 3600)
+
+    # 35: default_vertex_model の優先順位と未プローブ時フォールバック
+    def test_35_default_vertex_model_selection(self):
+        cfg = {"project_id": "test-proj", "location": "global", "configured": True, "fingerprint": "fp_test"}
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai.effective_vertex_location", return_value="global"):
+            # キャッシュ未登録時は VERTEX_DEFAULT_MODEL ("gemini-2.5-flash") を返す
+            google_ai.invalidate_models_cache()
+            self.assertEqual(google_ai.default_vertex_model(), "gemini-2.5-flash")
+
+            # gemini-4-hydrogen が利用可能なら VERTEX_PREFERRED_MODELS[0] として優先選択される
+            with google_ai._vertex_probe_lock:
+                google_ai._vertex_probe_cache[("fp_test", "global", "gemini-4-hydrogen")] = {
+                    "available": True, "ts": time.time(), "id": "gemini-4-hydrogen", "location": "global"
+                }
+                google_ai._vertex_probe_cache[("fp_test", "global", "gemini-2.5-flash")] = {
+                    "available": True, "ts": time.time(), "id": "gemini-2.5-flash", "location": "global"
+                }
+            self.assertEqual(google_ai.default_vertex_model(), "gemini-4-hydrogen")
+
+            # gemini-4-hydrogen が利用不可 (404) のときは gemini-2.5-flash が選ばれる
+            with google_ai._vertex_probe_lock:
+                google_ai._vertex_probe_cache[("fp_test", "global", "gemini-4-hydrogen")]["available"] = False
+            self.assertEqual(google_ai.default_vertex_model(), "gemini-2.5-flash")
+
+            # 優先リスト外の独自モデルのみが利用可能な場合はソート順で先頭が選ばれる
+            with google_ai._vertex_probe_lock:
+                google_ai._vertex_probe_cache.clear()
+                google_ai._vertex_probe_cache[("fp_test", "global", "custom-model-z")] = {
+                    "available": True, "ts": time.time(), "id": "custom-model-z", "location": "global"
+                }
+            self.assertEqual(google_ai.default_vertex_model(), "custom-model-z")
+
+    # 36: SDK 404 時の REST global 切替と _vertex_location_override の SDK への伝播
+    def test_36_sdk_404_rest_global_fallback_and_override(self):
+        cfg = {"project_id": "test-proj", "location": "us-central1", "configured": True, "fingerprint": "fp_reg"}
+        google_ai.invalidate_vertex_token()
+        google_ai._clear_vertex_location_override()
+
+        from google.genai import errors as genai_errors
+        fake_sdk_404 = genai_errors.APIError(404, "404 NOT_FOUND. {'error': {'code': 404, 'message': 'Model not found in us-central1'}}")
+
+        import urllib.error
+        err_404 = urllib.error.HTTPError("http://test-us", 404, "Not Found", {}, None)
+        err_404.read = lambda: b'{"error": {"code": 404, "message": "Model not found in us-central1"}}'
+
+        class FakeRestSuccess:
+            status = 200
+            def read(self):
+                return b'{"candidates": [{"content": {"parts": [{"text": "hello"}]}}]}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        def fake_urlopen(req, timeout=None):
+            if "us-central1" in req.full_url:
+                raise err_404
+            if "global" in req.full_url or "aiplatform.googleapis.com" in req.full_url:
+                return FakeRestSuccess()
+            raise RuntimeError(f"Unexpected URL: {req.full_url}")
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai._should_use_sdk", return_value=True), \
+             patch("google_ai._sdk_generate", side_effect=[(None, None), (200, {"candidates": [{"content": {"parts": [{"text": "from-sdk-global"}]}}]})]), \
+             patch("google_ai.get_vertex_access_token", return_value=("tok", "sa", "")), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+
+            # 1回目: SDK が 404 で None, None -> REST us-central1 (404) -> REST global (200)
+            status, data = google_ai.request("gemini-4-hydrogen", {"contents": []}, provider="vertex")
+            self.assertEqual(status, 200)
+
+            # global で成功したため location override が記録されていること
+            self.assertEqual(google_ai.effective_vertex_location(cfg), "global")
+
+            # 2回目: SDK は effective_vertex_location を使うため global 向けクライアントになり成功
+            status2, data2 = google_ai.request("gemini-4-hydrogen", {"contents": []}, provider="vertex")
+            self.assertEqual(status2, 200)
+            self.assertEqual(data2["candidates"][0]["content"]["parts"][0]["text"], "from-sdk-global")
+
+        # global でも 404 の場合は override が残らず例外になること
+        google_ai._clear_vertex_location_override()
+        err_global_404 = urllib.error.HTTPError("http://test-global", 404, "Not Found", {}, None)
+        err_global_404.read = lambda: b'{"error": {"code": 404, "message": "Model not found in global"}}'
+
+        def fake_urlopen_all_404(req, timeout=None):
+            raise err_global_404
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai._should_use_sdk", return_value=True), \
+             patch("google_ai._sdk_generate", return_value=(None, None)), \
+             patch("google_ai.get_vertex_access_token", return_value=("tok", "sa", "")), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen_all_404):
+            with self.assertRaises(google_ai.GoogleAPIError) as cm:
+                google_ai.request("gemini-4-hydrogen", {"contents": []}, provider="vertex")
+            self.assertEqual(cm.exception.status, 404)
+            # 誤った override が残っていないこと
+            self.assertEqual(google_ai.effective_vertex_location(cfg), "us-central1")
+
+    # 37: SDK bytes/Enum サニタイズおよび json.dumps default
+    def test_37_sdk_sanitize_bytes_and_enum(self):
+        import enum
+
+        class DummyFinishReason(enum.Enum):
+            STOP = "STOP"
+            MAX_TOKENS = "MAX_TOKENS"
+
+        # 1. _sanitize_sdk_value 単体テスト
+        val_bytes = b"my_signature_bytes_123"
+        sanitized = google_ai._sanitize_sdk_value({
+            "thoughtSignature": val_bytes,
+            "finishReason": DummyFinishReason.STOP,
+            "nested": [{"data": b"nested_bytes"}]
+        })
+        self.assertEqual(sanitized["thoughtSignature"], base64.b64encode(val_bytes).decode("ascii"))
+        self.assertEqual(sanitized["finishReason"], "STOP")
+        self.assertEqual(sanitized["nested"][0]["data"], base64.b64encode(b"nested_bytes").decode("ascii"))
+
+        # 2. _sdk_response_to_dict での bytes/Enum サニタイズ
+        mock_resp = MagicMock()
+        mock_resp.to_json_dict.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "thinking...", "thought": True, "thoughtSignature": val_bytes}
+                    ]
+                },
+                "finishReason": DummyFinishReason.STOP,
+            }]
+        }
+        res_dict = google_ai._sdk_response_to_dict(mock_resp)
+        self.assertIsNotNone(res_dict)
+        c0 = res_dict["candidates"][0]
+        self.assertEqual(c0["finishReason"], "STOP")
+        part0 = c0["content"]["parts"][0]
+        self.assertEqual(part0["thoughtSignature"], base64.b64encode(val_bytes).decode("ascii"))
+
+        # 3. snake_case ガードに "thought_signature" が効いていること
+        mock_snake_resp = MagicMock()
+        mock_snake_resp.to_json_dict.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "thinking...", "thought": True, "thought_signature": val_bytes}
+                    ]
+                },
+                "finishReason": "STOP",
+            }]
+        }
+        self.assertIsNone(google_ai._sdk_response_to_dict(mock_snake_resp))
+
+        # 4. _json_default が bytes と Enum を直列化できること
+        val_ba = bytearray(b"bytearray_123")
+        dumped = json.dumps({
+            "sig": val_bytes,
+            "ba": val_ba,
+            "reason": DummyFinishReason.MAX_TOKENS,
+            "tags": {"tagA", "tagB"},
+        }, default=google_ai._json_default)
+        loaded = json.loads(dumped)
+        self.assertEqual(loaded["sig"], base64.b64encode(val_bytes).decode("ascii"))
+        self.assertEqual(loaded["ba"], base64.b64encode(b"bytearray_123").decode("ascii"))
+        self.assertEqual(loaded["reason"], "MAX_TOKENS")
+        self.assertEqual(set(loaded["tags"]), {"tagA", "tagB"})
+
+    # 38: probe_vertex_model の 404 時 global 自動フォールバック
+    def test_38_probe_vertex_model_404_global_fallback(self):
+        cfg = {"project_id": "test-proj", "location": "us-central1", "configured": True, "fingerprint": "fp_probe"}
+        google_ai.invalidate_models_cache()
+        google_ai._clear_vertex_location_override()
+
+        def fake_rest_post(loc, model, payload, timeout=10, cfg=None):
+            if loc == "us-central1":
+                import urllib.error
+                err = urllib.error.HTTPError("http://us", 404, "Not Found", {}, None)
+                err.read = lambda: b'{"error": {"code": 404, "message": "Model not found in us-central1"}}'
+                raise err
+            if loc == "global":
+                return 200, {"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}
+            raise RuntimeError(f"Unexpected loc: {loc}")
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai._vertex_rest_post", side_effect=fake_rest_post):
+            # us-central1 で 404 だが global で 200 -> global にフォールバックして available=True
+            res = google_ai.probe_vertex_model("gemini-4-hydrogen", location="us-central1", cfg=cfg)
+            self.assertTrue(res["available"])
+            self.assertEqual(res["location"], "global")
+            self.assertEqual(res["status"], 200)
+
+            # location override が記録されていること
+            self.assertEqual(google_ai.effective_vertex_location(cfg), "global")
+
+            # 2回目呼び出し（キャッシュヒット時）も available=True (global) が一貫して返ること（キャッシュ汚染防止）
+            res2 = google_ai.probe_vertex_model("gemini-4-hydrogen", location="us-central1", cfg=cfg)
+            self.assertTrue(res2["available"])
+            self.assertEqual(res2["location"], "global")
+            self.assertEqual(res2["status"], 200)
+
+        # global でも 404 の場合は override されず available=False になること
+        google_ai._clear_vertex_location_override()
+        google_ai.invalidate_models_cache()
+
+        def fake_rest_post_all_404(loc, model, payload, timeout=10, cfg=None):
+            import urllib.error
+            err = urllib.error.HTTPError(f"http://{loc}", 404, "Not Found", {}, None)
+            err.read = lambda: b'{"error": {"code": 404, "message": "Not found"}}'
+            raise err
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai._vertex_rest_post", side_effect=fake_rest_post_all_404):
+            res = google_ai.probe_vertex_model("gemini-4-hydrogen", location="us-central1", cfg=cfg)
+            self.assertFalse(res["available"])
+            self.assertEqual(res["status"], 404)
+            self.assertEqual(google_ai.effective_vertex_location(cfg), "us-central1")
+
+    # 39: generate() 末尾の INTERNAL_ERROR ガード
+    def test_39_generate_internal_error_guard(self):
+        with patch("google_ai.configured", return_value=True), \
+             patch("google_ai.request", side_effect=TypeError("unexpected typing crash")):
+            res = google_ai.generate("gemini-2.5-flash", "プロンプト", provider="google")
+            self.assertEqual(res["code"], "INTERNAL_ERROR")
+            self.assertEqual(res["http_status"], 500)
+            self.assertIn("内部エラー", res["error"])
+            self.assertFalse(res["retryable"])
+
+    # 40: _is_tool_400 の自然言語スペース区切り判定
+    def test_40_is_tool_400_natural_language(self):
+        self.assertTrue(google_ai._is_tool_400("Error: function call execution failed"))
+        self.assertTrue(google_ai._is_tool_400("Missing function response in turn"))
+        self.assertTrue(google_ai._is_tool_400("Thought signature mismatch"))
+        self.assertTrue(google_ai._is_tool_400("Invalid tool config for mode"))
+        self.assertTrue(google_ai._is_tool_400("Empty function declarations provided"))
+        self.assertFalse(google_ai._is_tool_400("Quota limit exceeded"))
+        self.assertFalse(google_ai._is_tool_400("Internal server error 500"))
+
+    # 41: list_models と last_models_error の effective_vertex_location 統一
+    def test_41_list_models_and_last_error_effective_location(self):
+        cfg = {"project_id": "test-proj", "location": "us-central1", "configured": True, "fingerprint": "fp_eff"}
+        google_ai.invalidate_models_cache()
+        google_ai._set_vertex_location_override("fp_eff", "global")
+
+        resp = MagicMock()
+        resp.status = 200
+        resp.read.return_value = b'{"publisherModels": [{"name": "publishers/google/models/gemini-2.5-flash"}]}'
+        resp.__enter__.return_value = resp
+
+        requested_urls = []
+        def fake_urlopen(req, timeout=None):
+            requested_urls.append(req.full_url)
+            return resp
+
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai._should_use_sdk", return_value=False), \
+             patch("google_ai.get_vertex_access_token", return_value=("tok", "sa", "")), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            models = google_ai.list_models(refresh=True, provider="vertex", probe=False)
+            self.assertEqual(len(models), 1)
+            self.assertEqual(models[0]["id"], "gemini-2.5-flash")
+            # リクエスト先 URL が global ホストになっていること
+            self.assertTrue(any("aiplatform.googleapis.com" in u and "us-central1" not in u for u in requested_urls))
+
+            # キャッシュキーが ("vertex", "fp_eff", "test-proj", "global") で引けること
+            with google_ai._models_lock:
+                ck = ("vertex", "fp_eff", "test-proj", "global")
+                self.assertIn(ck, google_ai._models_cache_by_key)
+
+            # last_models_error も同じキーを参照してエラーなしを返すこと
+            self.assertEqual(google_ai.last_models_error(provider="vertex"), "")
+
+    # 42: _sdk_client の cfg=None ガード
+    def test_42_sdk_client_cfg_none_guard(self):
+        cfg = {"project_id": "demo-gcp-proj", "location": "asia-east1", "configured": True, "fingerprint": "fp_cfg_none"}
+        with patch("google_ai.load_vertex_config", return_value=cfg), \
+             patch("google_ai.effective_vertex_location", return_value="asia-east1"), \
+             patch("google_ai._should_use_sdk", return_value=True):
+            with google_ai._sdk_client_lock:
+                google_ai._sdk_client_cache.clear()
+            # cfg を渡さない (None) でも TypeError にならずクライアントが取得できること
+            cli = google_ai._sdk_client("vertex", None)
+            self.assertIsNotNone(cli)
+
+            # 部分 dict (fingerprint 等の欠落) でも KeyError にならずクライアントが取得できること
+            cli_partial = google_ai._sdk_client("vertex", {"project_id": "demo-partial", "location": "global"})
+            self.assertIsNotNone(cli_partial)
 
 
 if __name__ == "__main__":

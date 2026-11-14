@@ -7,6 +7,7 @@ Google AI Studio (Gemini Developer API) および Google Cloud Vertex AI プロ�
 """
 import base64
 import copy
+import enum
 import hashlib
 import json
 import os
@@ -52,11 +53,19 @@ VERTEX_DEFAULT_LOCATION = "global"
 # Gemini 2.x / 一部 3.x は現行の Vertex で 404（提供終了・リージョン限定）になるため、
 # 既定は「実在が確認できる新しい Flash 系」を優先し、後の probe（実疎通）で確定させる。
 VERTEX_PREFERRED_MODELS = (
+    "gemini-4-hydrogen",
     "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
     "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
     "gemini-2.5-flash", "gemini-2.0-flash",
 )
-VERTEX_DEFAULT_MODEL = VERTEX_PREFERRED_MODELS[0]
+# 未プローブ時のフォールバック既定値は確実に存在する安定モデルにする
+VERTEX_DEFAULT_MODEL = "gemini-2.5-flash"
+
+
+def _is_thinking_model(model_id):
+    low = str(model_id or "").lower()
+    return any(k in low for k in ("2.5", "3.", "3-", "4.", "4-", "thinking"))
+
 
 SAFETY_CATEGORIES = [
     "HARM_CATEGORY_HARASSMENT",
@@ -84,7 +93,7 @@ VERTEX_EXCLUDE_MODEL_PARTS = tuple(EXCLUDE_MODEL_PARTS) + ("gemini-1.0", "gemini
 # 一覧APIが失敗しても選択肢を出すための予備（実際の提供状況は probe で判定する）
 VERTEX_CURATED_MODELS = [
     {"id": m, "label": m, "inputTokenLimit": 1048576, "outputTokenLimit": 65536,
-     "thinking": True}
+     "thinking": _is_thinking_model(m)}
     for m in VERTEX_PREFERRED_MODELS
 ]
 
@@ -739,7 +748,7 @@ def _fetch_vertex_token_unlocked(scope, timeout=15):
                 with urllib.request.urlopen(req, timeout=3) as r:
                     d = json.loads(r.read().decode("utf-8"))
                     token, auth_type = d["access_token"], "adc"
-                    quota = str(a.get("project_id") or a.get("quota_project_id") or "")
+                    quota = ""
                     ttl = int(d.get("expires_in") or 3600)
             except Exception:
                 pass
@@ -807,10 +816,6 @@ class _SdkFallbackToRest(Exception):
     """SDK 変換で情報が失われる payload を REST へフォールバックさせる内部例外"""
 
 
-def default_vertex_model():
-    return VERTEX_DEFAULT_MODEL
-
-
 def _vertex_host_prefix(location):
     """F-4: ホスト名の前段（.com は _https が付ける）"""
     loc = (location or VERTEX_DEFAULT_LOCATION).strip()
@@ -864,21 +869,37 @@ def _is_model_not_found(status, msg):
     return ("not_found" in low or "was not found" in low) and "model" in low
 
 
+def _json_default(obj):
+    """json.dumps の default 引数用。bytes や Enum を安全に直列化する"""
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(obj)).decode("ascii")
+    if isinstance(obj, enum.Enum):
+        return obj.value
+    if isinstance(obj, (set, frozenset)):
+        return list(obj)
+    if hasattr(obj, "to_json_dict") and callable(obj.to_json_dict):
+        return obj.to_json_dict()
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return obj.model_dump()
+    return str(obj)
+
+
 def _vertex_rest_post(location, model, payload, timeout=60, cfg=None):
     """probe 専用の素の REST POST（SDK・フォールバックを経由しない）"""
     cfg = cfg or load_vertex_config()
-    url = vertex_generate_url(cfg["project_id"], location, model)
+    pid = cfg.get("project_id") or ""
+    url = vertex_generate_url(pid, location, model)
     tok, auth_type, quota = get_vertex_access_token(timeout=timeout)
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {tok}"}
     if auth_type == "adc":
-        headers["x-goog-user-project"] = quota or cfg["project_id"]
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["x-goog-user-project"] = quota or pid
+    body = json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, json.loads(r.read().decode("utf-8", "replace"))
 
 
-def probe_vertex_model(model, location=None, timeout=30, refresh=False, cfg=None):
+def probe_vertex_model(model, location=None, timeout=10, refresh=False, cfg=None):
     """指定モデルがそのリージョンで実際に generateContent できるかを実測する。
     200/400 は「モデルは存在する」（=使用可能）、404 は「無い・権限無し・リージョン違い）。
     戻りは dict: {"id", "location", "available", "status", "error"}
@@ -898,7 +919,7 @@ def probe_vertex_model(model, location=None, timeout=30, refresh=False, cfg=None
 
     payload = {
         "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-        "generationConfig": {"maxOutputTokens": 8},
+        "generationConfig": {"maxOutputTokens": 1},
     }
     status, error = 0, ""
     try:
@@ -909,26 +930,40 @@ def probe_vertex_model(model, location=None, timeout=30, refresh=False, cfg=None
         error = _error_message(e.code, raw)[0]
     except Exception as e:
         status, error = 0, f"確認できません: {e}"
-    available = status in (200, 400)   # 400 でもモデル自体は存在する
+    available = status in (200, 400, 429)   # 400 や 429（レート制限）でもモデル自体は存在する
     out = {"id": model, "location": loc, "available": available,
            "status": status, "error": "" if available else error}
-    with _vertex_probe_lock:
-        _vertex_probe_cache[ck] = dict(out, ts=now_ts)
+
+    if status == 404 and loc != VERTEX_DEFAULT_LOCATION:
+        g_out = probe_vertex_model(model, location=VERTEX_DEFAULT_LOCATION,
+                                   timeout=timeout, refresh=refresh, cfg=cfg)
+        if g_out.get("available"):
+            _set_vertex_location_override(cfg.get("fingerprint"), VERTEX_DEFAULT_LOCATION)
+            with _vertex_probe_lock:
+                _vertex_probe_cache[ck] = dict(g_out, ts=now_ts)
+            return g_out
+
+    if status in (200, 400, 403, 404):
+        with _vertex_probe_lock:
+            _vertex_probe_cache[ck] = dict(out, ts=now_ts)
+
     return out
 
 
-def servable_vertex_models(location=None, timeout=30, refresh=False, models=None):
+def servable_vertex_models(location=None, timeout=10, refresh=False, models=None):
     """一覧の各モデルを実測して available を付ける（モデル×リージョンの真の提供状況）"""
     cfg = load_vertex_config()
     loc = (location or effective_vertex_location(cfg)).strip() or VERTEX_DEFAULT_LOCATION
-    rows = list(models if models is not None else list_models(provider="vertex"))
+    rows = list(models if models is not None else list_models(refresh=refresh, timeout=timeout, provider="vertex", probe=False))
     if not rows:
         return []
 
     def one(m):
-        info = probe_vertex_model(m["id"], loc, timeout=timeout, refresh=refresh, cfg=cfg)
-        return dict(m, **{"available": info["available"], "probe_status": info["status"],
-                          "probe_error": info["error"], "location": loc})
+        mid = m["id"] if isinstance(m, dict) else str(m)
+        info = probe_vertex_model(mid, loc, timeout=timeout, refresh=refresh, cfg=cfg)
+        base = m if isinstance(m, dict) else {"id": mid, "label": mid}
+        return dict(base, **{"available": info["available"], "probe_status": info["status"],
+                             "probe_error": info["error"], "location": info.get("location") or loc})
 
     try:
         from concurrent.futures import ThreadPoolExecutor
@@ -936,7 +971,8 @@ def servable_vertex_models(location=None, timeout=30, refresh=False, models=None
             out = list(ex.map(one, rows))
     except Exception:
         out = [one(m) for m in rows]
-    return out
+    ok_rows = [m for m in out if m.get("available")]
+    return ok_rows or out
 
 
 def default_vertex_model():
@@ -971,7 +1007,8 @@ def last_models_error(provider="vertex"):
     """現在の設定 fingerprint に対応するモデル一覧エラーのみを返す"""
     if provider == "vertex":
         cfg = load_vertex_config()
-        ck = ("vertex", cfg["fingerprint"], cfg["project_id"], cfg["location"])
+        loc = effective_vertex_location(cfg)
+        ck = ("vertex", cfg.get("fingerprint") or "", cfg.get("project_id") or "", loc)
         with _models_lock:
             return (_models_cache_by_key.get(ck) or {}).get("error") or ""
     with _models_lock:
@@ -982,7 +1019,11 @@ def _sdk_client(provider, cfg=None, api_key=""):
     if not _should_use_sdk(provider):
         return None
     if provider == "vertex":
-        key = ("vertex", cfg["fingerprint"], cfg["project_id"], cfg["location"])
+        cfg = cfg or load_vertex_config()
+        loc = effective_vertex_location(cfg)
+        fp = cfg.get("fingerprint") or ""
+        pid = cfg.get("project_id") or ""
+        key = ("vertex", fp, pid, loc)
     else:
         key = ("google", (api_key or "")[-8:])
     with _sdk_client_lock:
@@ -1000,8 +1041,8 @@ def _sdk_client(provider, cfg=None, api_key=""):
                             sa, scopes=[CLOUD_PLATFORM_SCOPE])
                 except Exception:
                     creds = None
-                cli = genai.Client(vertexai=True, project=cfg["project_id"],
-                                   location=cfg["location"], credentials=creds)
+                cli = genai.Client(vertexai=True, project=pid,
+                                   location=loc, credentials=creds)
             else:
                 cli = genai.Client(api_key=api_key)
         except (TypeError, AttributeError, ImportError, ValueError) as e:
@@ -1015,6 +1056,23 @@ def _sdk_client(provider, cfg=None, api_key=""):
             _sdk_client_cache.pop(old_k, None)
         _sdk_client_cache[key] = cli
         return cli
+
+
+def _sanitize_sdk_value(v):
+    """SDK 応答に含まれる bytes（thoughtSignature 等）や Enum を JSON 直列化可能な型へ再帰変換"""
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(v)).decode("ascii")
+    if isinstance(v, enum.Enum):
+        return v.value
+    if isinstance(v, dict):
+        return {k: _sanitize_sdk_value(sub) for k, sub in v.items()}
+    if isinstance(v, list):
+        return [_sanitize_sdk_value(sub) for sub in v]
+    if isinstance(v, tuple):
+        return tuple(_sanitize_sdk_value(sub) for sub in v)
+    if isinstance(v, (set, frozenset)):
+        return [_sanitize_sdk_value(sub) for sub in v]
+    return v
 
 
 def _sdk_response_to_dict(resp):
@@ -1036,13 +1094,14 @@ def _sdk_response_to_dict(resp):
                     content = c0.get("content")
                     if isinstance(content, dict):
                         parts = content.get("parts") or []
-                        if any(isinstance(p, dict) and ("function_call" in p or "inline_data" in p)
-                               for p in parts):
+                        if any(isinstance(p, dict) and (
+                            "function_call" in p or "inline_data" in p or "thought_signature" in p
+                        ) for p in parts):
                             continue
                     if "content" in c0 or "finishReason" in c0:
-                        return d
+                        return _sanitize_sdk_value(d)
                 elif "promptFeedback" in d and "prompt_feedback" not in d:
-                    return d
+                    return _sanitize_sdk_value(d)
             except TypeError:
                 continue
             except Exception:
@@ -1181,20 +1240,21 @@ def _sdk_generate(model, payload, provider, timeout=180):
         return None, None
 
 
-def list_models(refresh=False, timeout=30, *, provider="google", probe=False):
+def list_models(refresh=False, timeout=30, *, provider="google", probe=None):
     if provider == "vertex":
-        if probe:
+        if probe is None or probe:
             return servable_vertex_models(timeout=timeout, refresh=refresh)
         cfg = load_vertex_config()
         if not cfg.get("configured"):
             raise GoogleAPIError("Vertex AIの認証またはプロジェクトIDが未設定です", code="NO_VERTEX_CRED")
-        ck = ("vertex", cfg["fingerprint"], cfg["project_id"], cfg["location"])
+        loc = effective_vertex_location(cfg)
+        ck = ("vertex", cfg.get("fingerprint") or "", cfg.get("project_id") or "", loc)
         with _models_lock:
             cached = _models_cache_by_key.get(ck)
             if not refresh and cached and cached.get("models") and time.time() - cached["ts"] < 600:
                 return list(cached["models"])
 
-        by_id = {m["id"]: dict(m) for m in VERTEX_CURATED_MODELS}
+        by_id = {}
         err = ""
         rows_raw = []
         if _should_use_sdk("vertex"):
@@ -1217,7 +1277,7 @@ def list_models(refresh=False, timeout=30, *, provider="google", probe=False):
                 if auth_type == "adc":
                     headers["x-goog-user-project"] = quota or cfg["project_id"]
                 req = urllib.request.Request(
-                    _https(_vertex_host_prefix(cfg["location"]),
+                    _https(_vertex_host_prefix(loc),
                            "/v1beta1/publishers/google/models?pageSize=1000"),
                     headers=headers)
                 with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -1231,26 +1291,29 @@ def list_models(refresh=False, timeout=30, *, provider="google", probe=False):
                 err = f"モデル一覧を取得できません: {e}"
 
         for m in rows_raw or []:
-            name = str(m.get("name") or "")
+            name = str(m.get("name") or m.get("id") or "")
             mid = name.rsplit("/", 1)[-1] if "/" in name else name
             if not mid:
                 continue
             low = mid.lower()
-            if not (low.startswith("gemini-") or low.startswith("gemma-")):
+            if not low.startswith("gemini-"):
                 continue
             if any(p in low for p in VERTEX_EXCLUDE_MODEL_PARTS):
                 continue
             methods = m.get("supportedGenerationMethods")
             if isinstance(methods, list) and methods and "generateContent" not in methods:
                 continue
-            cur = by_id.get(mid) or {}
             by_id[mid] = {
                 "id": mid,
-                "label": m.get("displayName") or cur.get("label") or mid,
-                "inputTokenLimit": m.get("inputTokenLimit") or cur.get("inputTokenLimit") or 1048576,
-                "outputTokenLimit": m.get("outputTokenLimit") or cur.get("outputTokenLimit") or 65536,
-                "thinking": bool(m["thinking"] if "thinking" in m else ("2.5" in low or "3." in low)),
+                "label": m.get("displayName") or mid,
+                "inputTokenLimit": m.get("inputTokenLimit") or 1048576,
+                "outputTokenLimit": m.get("outputTokenLimit") or 65536,
+                "thinking": bool(m["thinking"] if "thinking" in m else _is_thinking_model(low)),
             }
+
+        if not by_id:
+            by_id = {m["id"]: dict(m) for m in VERTEX_CURATED_MODELS}
+
         rows = sorted(by_id.values(), key=lambda x: x["id"])
         with _models_lock:
             _models_cache_by_key[ck] = {"ts": time.time(), "models": list(rows), "error": err}
@@ -1382,7 +1445,7 @@ def request(model, payload, timeout=180, *, provider="google"):
             return status, data
 
     if provider == "vertex":
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8")
         # 設定リージョンで 404（多くは「そのリージョンには無い」）なら global で再挑戦する。
         # 新しい Gemini は global エンドポイントのみ提供のことがあるため。
         first_loc = effective_vertex_location(cfg)
@@ -1433,7 +1496,7 @@ def request(model, payload, timeout=180, *, provider="google"):
     if not key:
         raise GoogleAPIError("APIキーが未設定です", code="NO_KEY")
     url = f"{BASE}/models/{urllib.parse.quote(model, safe='')}:generateContent"
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    body = json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json", "x-goog-api-key": key})
     try:
@@ -1544,8 +1607,11 @@ def _is_tool_400(msg):
     """Function Calling 起因の 400 のみ判定（'tool' 単体は含めない）"""
     low = str(msg or "").lower()
     return any(w in low for w in (
-        "functionresponse", "function_response", "functioncall", "function_call",
-        "functiondeclarations", "function_declarations", "toolconfig", "tool_config",
+        "functionresponse", "function_response", "function response",
+        "functioncall", "function_call", "function call",
+        "functiondeclarations", "function_declarations", "function declarations",
+        "toolconfig", "tool_config", "tool config",
+        "thoughtsignature", "thought_signature", "thought signature",
     ))
 
 
@@ -1560,7 +1626,7 @@ def _step1_generation_config(model):
     low = str(model or "").lower()
     if "2.5-flash" in low:
         return {"maxOutputTokens": 1024, "thinkingConfig": {"thinkingBudget": 0}}
-    if ("2.5" in low) or ("3." in low):
+    if _is_thinking_model(low):
         return {"maxOutputTokens": 2048, "thinkingConfig": {"thinkingBudget": 128}}
     return {"maxOutputTokens": 256}
 
@@ -1569,7 +1635,7 @@ def _step2_generation_config(model, max_output_tokens, provider="google"):
     """2段目・直接生成。Vertex の思考モデルは思考で JSON が切れないよう下限を上げる"""
     tok = int(max_output_tokens or 8192)
     low = str(model or "").lower()
-    if provider == "vertex" and (("2.5" in low) or ("3." in low)):
+    if provider == "vertex" and _is_thinking_model(low):
         tok = max(tok, 16384)
     return {"maxOutputTokens": tok, "responseMimeType": "application/json"}
 
@@ -1789,3 +1855,9 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
                 "elapsed_ms": int((time.time() - t0) * 1000),
                 "error": str(e), "retryable": bool(e.retryable),
                 "http_status": e.status, "code": e.code}
+    except Exception as e:
+        return {"text": "", "meta": {}, "fetch_called": fetch_called,
+                "first_status": first_status, "second_status": second_status,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "error": f"内部エラー: {e}", "retryable": False,
+                "http_status": 500, "code": "INTERNAL_ERROR"}

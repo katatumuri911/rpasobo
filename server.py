@@ -12877,7 +12877,10 @@ class H(BaseHTTPRequestHandler):
                 # probe=1 のときは実際に generateContent が通るモデルかを実測する。
                 # 一覧APIはリージョン非依存に全モデルを返すため、これが無いと 404 のモデルを
                 # UI が提示してしまう（Gemini 2.x やリージョン未提供のモデル）。
-                probe = q.get("probe", ["0"])[0] in ("1", "true")
+                if "probe" in q:
+                    probe = q.get("probe", ["0"])[0] in ("1", "true")
+                else:
+                    probe = None
                 try:
                     models = google_ai.list_models(refresh=refresh, provider="vertex",
                                                    probe=probe)
@@ -12893,7 +12896,7 @@ class H(BaseHTTPRequestHandler):
                     "location": cfg.get("location") or "",
                     "effective_location": cfg.get("effective_location") or "",
                     "location_note": cfg.get("location_note") or "",
-                    "probed": probe,
+                    "probed": True if probe is None else probe,
                     "suggest_model": google_ai.default_vertex_model(),
                 })
             if p == "/api/agents":
