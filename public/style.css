@@ -143,14 +143,65 @@ header h1#title { cursor: pointer; }
   #toast.fade-out { animation: none; opacity: 0; }
   #toast[data-kind="progress"] .toast-icon { animation: none; }
 }
+/* ===== モバイル：サイドドロワー スワイプ開閉（146行目の第1 @media 内を置換） ===== */
 @media (max-width: 768px) {
+  /* P-01: body/main に touch-action を付けない（ピンチズームと任意の横スクロールを守る） */
+  html, body { overscroll-behavior-x: none; }
+
+  /* 横スクロール・専用UIはネイティブ操作を優先 */
+  pre, code, table, .table-scroll, .code-scroll,
+  [data-no-drawer-swipe] { touch-action: auto; }
+
   header { display: none !important; }
-  /* ドロワー幅。狭い端末では 78vw で頭打ち（left は必ず幅より大きくして隠す） */
-  #sidebar { position: fixed; left: -320px; top: 0; bottom: 0; width: min(270px, 74vw); z-index: 50; transition: left .22s cubic-bezier(0.16, 1, 0.3, 1); }
-  body.side-open #sidebar { left: 0; }
+
+  /* ドロワー本体：display/left ではなく transform で制御（F-23） */
+  #sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: min(270px, 74vw);
+    z-index: 50;                                    /* #mobileFab(65)・#toast(68) より下、#sideBackdrop(45) より上 */
+    transform: translate3d(-100%, 0, 0);
+    transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);  /* all 禁止（F-26） */
+    touch-action: pan-y pinch-zoom;                 /* 横はJSへ、ピンチは許可 */
+    will-change: auto;                              /* F-25 */
+  }
+  #sidebar.open,
+  body.side-open #sidebar,
+  #sidebar.is-dragging { will-change: transform; }
+
+  #sidebar:not(.open):not(.is-dragging) { box-shadow: none; pointer-events: none; }
+  body.side-open #sidebar:not(.is-dragging) { box-shadow: initial; pointer-events: auto; }
+  #sidebar.open,
+  body.side-open #sidebar { transform: translate3d(0, 0, 0); pointer-events: auto; }
+  #sidebar.is-dragging { pointer-events: auto; transition: none !important; }
+
   #sideToggle { display: none; }
-  /* 一覧の右側を覆う透明に近い幕。タップで一覧を閉じる（下の会話を誤って触らないように） */
-  body.side-open #sideBackdrop { display: block; position: fixed; inset: 0; z-index: 45; background: rgba(0,0,0,.5); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+
+  /* オーバーレイ：L41 の display:none を上書きするため display:block が必須 */
+  #sideBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;                                    /* #sidebar(50) の下 */
+    background: rgba(0, 0, 0, .5);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+    touch-action: none;
+  }
+  #sideBackdrop.open,
+  body.side-open #sideBackdrop,
+  #sideBackdrop.is-peeking { visibility: visible; pointer-events: auto; }
+  #sideBackdrop.open,
+  body.side-open #sideBackdrop { opacity: 1; }
+  #sideBackdrop.is-dragging { transition: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #sidebar, #sideBackdrop { transition-duration: 0.01s !important; }
+  }
 
   .side-top-section { display: block; border-bottom: 1px solid #38383f; padding: 12px; background: #1c1c21; }
   .side-channel-card { display: flex; flex-direction: column; gap: 8px; }
