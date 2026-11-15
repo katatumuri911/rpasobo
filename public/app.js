@@ -1203,27 +1203,19 @@ function alignCardToTopRetry(el) {
   setTimeout(retry, 90);
   setTimeout(retry, 280);
 }
-// 送信した自分の発言を、すぐ読める位置（画面上端）へ移す。
-// チャット全体が画面に収まるほど短いときだけ、余白を足さず一番下まで。
-// 返り値: 上端合わせにしたら true（最下段なら false）
+// 送信したら、自分の発言が入っている最新の最下段へ移す。
+// 上端合わせのような一時的な下余白は足さない（#chatLog 本来の下余白のまま）。
 function revealSentUserMessage() {
-  if (!log) return false;
-  const wraps = log.querySelectorAll(".msg-wrap.user");
-  const wrap = wraps.length ? wraps[wraps.length - 1] : null;
-  const toBottom = () => {
-    navHoldBottom = false;
-    pinnedBottom = true;
-    clearTopAlignHold();
-    log.scrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
-    updateRpBg();
-    return false;
-  };
-  const wr = wrap ? wrap.getBoundingClientRect() : null;
-  if (!wr || !wr.height) return toBottom();
-  // チャット全体が画面に収まる（短い）ときは、余白を足さず一番下まで
-  if (log.scrollHeight - topAlignSpacerPx <= log.clientHeight) return toBottom();
-  alignCardToTop(wrap);
-  return true;
+  if (!log) return;
+  // 返信の上端合わせで足した一時余白が残っていたら、元の padding-bottom に戻す。
+  // （余白を外すとスクロール位置がクランプされるので、必ずスクロール設定より先に外す）
+  clearTopAlignHold();
+  navHoldBottom = false;
+  pinnedBottom = true;
+  // 自分の操作スクロールではないので、続けて届く返信は上端合わせの対象にする
+  userScrolledSinceAlign = false;
+  log.scrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+  updateRpBg();
 }
 function jumpToPrevAssistantReply() { jumpToAssistantReply(-1); }
 function jumpToNextAssistantReply() { jumpToAssistantReply(1); }
@@ -2063,7 +2055,8 @@ function resolveCurrentMainModel(provider, st) {
     const sel = $("vertexModel") || $("vertexModelSelect");
     return String(st.vertex_model || sel?.value || sel?.options?.[0]?.value || "").trim();
   }
-  return String(st.ide_model || $("agModel")?.value || $("ideModel")?.value || "").trim();
+  const raw = String(st.ide_model || $("agModel")?.value || $("ideModel")?.value || "").trim();
+  return raw.startsWith("ag:") ? raw.slice(3).trim() : raw;
 }
 
 function currentModelConfig() {
@@ -2121,9 +2114,10 @@ function modelPoolFor(provider) {
 }
 
 function shortModelLabel(provider, modelId) {
-  if (!modelId) return provider === "antigravity" ? "会話と同じ" : "モデル未設定";
+  const mid = String(modelId || "").replace(/^ag:/, "").trim();
+  if (!mid) return provider === "antigravity" ? "会話と同じ" : "モデル未設定";
   const pool = modelPoolFor(provider);
-  const m = pool.find((x) => x && (x.id === modelId || x.model === modelId));
+  const m = pool.find((x) => x && (x.id === mid || x.model === mid));
   if (m) {
     const lbl = String(m.shortLabel || m.label || m.name || m.id || m.model || "");
     if (lbl) {
@@ -2134,7 +2128,7 @@ function shortModelLabel(provider, modelId) {
       if (clean) return clean;
     }
   }
-  return String(modelId).replace(/^models\//, "");
+  return mid.replace(/^models\//, "");
 }
 
 function choicesThinkingLabel(level) {
@@ -5367,14 +5361,13 @@ async function saveElapsedModal() {
   const btn = $("elapsedSave");
   if (btn) btn.disabled = true;
   try {
-    await checked("/api/setting", { setting: newSetting });   // post() は error を投げないので checked を使う
+    await checked("/api/setting", { sid, setting: newSetting });   // post() は error を投げないので checked を使う
   } catch (e) {
     toast("時間を変更できませんでした: " + e.message, 8000);   // 失敗時はモーダルを開いたまま
     return;
   } finally { if (btn) btn.disabled = false; }
   state.setting = newSetting;
   updateElapsedTimeUI(newSetting.elapsed_time);
-  // 設定パネルの経過時間欄だけ合わせる（fillForm(...,true) は書きかけの編集を消すので使わない）
   if ($("f_elapsed_day")) { $("f_elapsed_day").value = day; dirtyFields.delete("f_elapsed_day"); }
   if ($("f_elapsed_period")) { $("f_elapsed_period").value = period; dirtyFields.delete("f_elapsed_period"); }
   closeElapsedModal();
@@ -5928,9 +5921,9 @@ async function send() {
     navHoldBottom = false;
     // この時点の最新返信は「もう読んだ」扱いにする（返信が届いたときだけ上端合わせするため）
     lastAutoScrolledAsstId = renderLastAsstId || "";
-    // 自分の発言をすぐ読める位置へ（短ければ最下段、長ければ上端合わせ）
+    // 送信したら、自分の発言のある最下段へ移る（下余白は #chatLog 本来のまま）
     revealSentUserMessage();
-    {   // 折り返しや添付画像の高さが確定したあとにもう一度合わせる
+    {   // 折り返しや添付画像の高さが確定したあとにもう一度最下段へ合わせる
       const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
       raf(() => { revealSentUserMessage(); });
     }
@@ -8087,53 +8080,32 @@ if ($("micBtn")) {
 // お気に入りモデル: タップ/クリックでシートを開く
 if ($("favModelBtn")) {
   const favBtn = $("favModelBtn");
-  let favBtnPressed = false;
-  let favPressStartX = 0;
-  let favPressStartY = 0;
-  let favPressMoved = false;
-  let suppressClickUntil = 0;
-  const TAP_SLOP = 12;
 
-  const handleOpenFav = () => {
-    const ae = document.activeElement;
-    if (ae && typeof ae.blur === "function") ae.blur();
+  const handleOpenFav = (e) => {
+    if (e) {
+      if (typeof e.preventDefault === "function") e.preventDefault();
+      if (typeof e.stopPropagation === "function") e.stopPropagation();
+    }
     openFavModelSheet();
   };
 
-  // 入力欄フォーカス中に押したとき、フォーカス外れ（blur）による縮小や非表示で
-  // click が破棄されるのを防ぐため、pointerdown で preventDefault する
-  favBtn.addEventListener("pointerdown", (e) => {
-    if (e && e.button !== undefined && e.button !== 0) return;
-    favBtnPressed = true;
-    favPressStartX = e.clientX || 0;
-    favPressStartY = e.clientY || 0;
-    favPressMoved = false;
-    if (typeof e.preventDefault === "function") e.preventDefault();
+  // PCでのフォーカス外れ防止用（マウスで押したときに textarea が blur して縮むのを防ぐ）
+  favBtn.addEventListener("mousedown", (e) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+  });
+
+  // スマホのタッチで確実に即座に開く
+  let lastTouchOpenTime = 0;
+  favBtn.addEventListener("touchend", (e) => {
+    lastTouchOpenTime = Date.now();
+    handleOpenFav(e);
   }, { passive: false });
 
-  favBtn.addEventListener("pointermove", (e) => {
-    if (!favBtnPressed) return;
-    const dx = (e.clientX || 0) - favPressStartX;
-    const dy = (e.clientY || 0) - favPressStartY;
-    if (Math.hypot(dx, dy) > TAP_SLOP) favPressMoved = true;
-  }, { passive: true });
-
-  favBtn.addEventListener("pointerup", () => {
-    if (!favBtnPressed) return;
-    favBtnPressed = false;
-    if (favPressMoved) return;
-    suppressClickUntil = Date.now() + 600;
-    handleOpenFav();
-  }, { passive: true });
-
-  favBtn.addEventListener("pointercancel", () => {
-    favBtnPressed = false;
-  }, { passive: true });
-
-  favBtn.onclick = () => {
-    if (Date.now() < suppressClickUntil) return;
-    handleOpenFav();
-  };
+  // 通常クリック（PC、または touchend を発火しない環境用）
+  favBtn.addEventListener("click", (e) => {
+    if (Date.now() - lastTouchOpenTime < 500) return;
+    handleOpenFav(e);
+  });
 }
 if ($("favModelSheetClose")) $("favModelSheetClose").onclick = closeFavModelSheet;
 if ($("favOpenAiModalBtn")) $("favOpenAiModalBtn").onclick = openAiModalFromFavSheet;

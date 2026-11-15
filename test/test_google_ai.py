@@ -201,12 +201,22 @@ class TestGoogleServerIntegration(unittest.TestCase):
         os.environ.pop("GEMINI_API_KEY", None)
         os.environ.pop("GOOGLE_API_KEY", None)
 
+        self.orig_dirs = {}
+        for name in ("DATA", "SESS_DIR", "STATES_DIR", "IMAGES_DIR", "CHOICES_DIR", "RAG_DIR", "SENT", "CTX", "TRASH", "OUTBOX", "DONE"):
+            self.orig_dirs[name] = getattr(server, name, None)
+            path = os.path.join(self.tmp, name.lower())
+            os.makedirs(path, exist_ok=True)
+            setattr(server, name, path)
+
         google_ai.DATA = self.tmp
         google_ai.ENV_FILE = os.path.join(self.tmp, ".env")
         google_ai.KEY_FILE = google_ai.ENV_FILE
         google_ai.invalidate_models_cache()
 
     def tearDown(self):
+        for name, val in self.orig_dirs.items():
+            if val is not None:
+                setattr(server, name, val)
         google_ai.DATA = self.orig_data
         google_ai.ENV_FILE = self.orig_env_file
         google_ai.KEY_FILE = self.orig_key_file

@@ -385,6 +385,28 @@ def _safe_int_env(key: str, default: int | None = None) -> int | None:
             return default
 
 
+def _as_int(v, default=0):
+    try:
+        if isinstance(v, bool):
+            return int(v)
+        return int(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+# 作中時間の進行（サーバーが「番」、AIが「判断と描写」）
+TIME_FIRST_TURNS = max(1, _safe_int_env("RPCHAT_TIME_FIRST", 30) or 30)
+TIME_EVERY_TURNS = max(1, _safe_int_env("RPCHAT_TIME_EVERY", 20) or 20)
+_esc_env = _safe_int_env("RPCHAT_TIME_ESCALATE_AFTER", 3)
+TIME_ESCALATE_AFTER = max(0, 3 if _esc_env is None else _esc_env)
+TIME_FORCE_AFTER = max(1, _safe_int_env("RPCHAT_TIME_FORCE_AFTER", 10) or 10)
+
+
+def log_event(category, message, level="INFO"):
+    prefix = f"[{category}]" if level == "INFO" else f"[{category}:{level}]"
+    print(f"{prefix} {message}")
+
+
 def calc_dynamic_rag_budget(other_bytes: int, is_compact: bool = True) -> tuple[int, int, bool, int, bool]:
     """9,400B から非RAGセクションの消費バイト数を逆算し、
     RAGの動的ソフト上限（soft_budget）と想起枠上限（recall_budget）、
@@ -475,6 +497,8 @@ DEFAULT_SETTING = {
         "period": "午前"
     },
     "turns_in_period": 0,
+    "time_last_turn": 0,
+    "time_silent_until_turn": 0,
     "total_turns": 0,
     "rotation_count": 0,
     "last_rotation_turn": 0,
@@ -559,6 +583,8 @@ RESET_PROGRESS = {
     "memo_over_target": False,
     "memo_over_budget": False,
     "turns_in_period": 0,
+    "time_last_turn": 0,
+    "time_silent_until_turn": 0,
     "total_turns": 0,
     "rotation_count": 0,
     "last_rotation_turn": 0,
@@ -646,7 +672,9 @@ def calc_turn_idx(msgs, i, total_turns=None):
     return idx_in_file
 
 
-def merge_defaults(setting):
+def merge_defaults(setting=None):
+    raw_setting = setting if isinstance(setting, dict) else {}
+    had_time_last = "time_last_turn" in raw_setting
     out = copy.deepcopy(DEFAULT_SETTING)
     for k, v in (setting or {}).items():
         if k in DEPRECATED_SETTING_KEYS:
@@ -698,6 +726,24 @@ def merge_defaults(setting):
     out["thinking_level"] = tl if tl in google_ai.VALID_THINKING_LEVELS else "auto"
     ctl = str(out.get("choices_thinking_level") or "low").strip().lower()
     out["choices_thinking_level"] = ctl if ctl in google_ai.VALID_CHOICES_THINKING_LEVELS else "low"
+
+    el = out.get("elapsed_time")
+    if not isinstance(el, dict):
+        el = {"day": 1, "period": "午前"}
+    out["elapsed_time"] = {
+        "day": max(1, _as_int(el.get("day"), 1)),
+        "period": normalize_period(el.get("period")),
+    }
+    if not had_time_last:
+        tot = max(0, _as_int(out.get("total_turns"), 0))
+        tip = max(0, _as_int(out.get("turns_in_period"), 0))
+        if tot > 0:
+            out["time_last_turn"] = max(0, tot - min(tip, TIME_EVERY_TURNS - 1))
+        else:
+            out["time_last_turn"] = 0
+    else:
+        out["time_last_turn"] = max(0, _as_int(out.get("time_last_turn"), 0))
+    out["time_silent_until_turn"] = max(0, _as_int(out.get("time_silent_until_turn"), 0))
     return out
 
 
@@ -2063,10 +2109,10 @@ def rotation_abort_if_active(s, why):
 
 
 def enqueue_consolidation(s, why="rotation"):
-    """世代交代の睡眠プロセス（一括蒸留＆作中時間確定）を1件だけ積む（ロック内・RPC なし・冪等）。
+    """世代交代の睡眠プロセス（一括蒸留＆あらすじ更新）を1件だけ積む（ロック内・RPC なし・冪等）。
     実際の実行は poke_worker が拾って wait_input.py の mode=consolidation で行い、
-    応答は process_outbox が memo / elapsed_time / state に反映する。
-    作中時間を進めるのはこの経路だけ（日常ターンでは時間帯を強制移動しない）。"""
+    応答は process_outbox が memo / state に反映する。
+    作中時間はメイン返信側で管理するため、ここでは時間を変更しない。"""
     msgs = s.get("messages") or []
     if any(m.get("consolidation_status") in ("pending", "processing") for m in msgs):
         return False                    # すでに積んである（二重発行しない）
@@ -2176,17 +2222,322 @@ def backup(s, why):
 
 
 VALID_PERIODS = ("早朝", "午前", "昼", "夕方", "夜", "深夜")
+PERIODS = VALID_PERIODS
+
+_PERIOD_ALIASES = {
+    "朝": "早朝", "あさ": "早朝", "朝方": "早朝", "明け方": "早朝", "夜明け": "早朝",
+    "午前": "午前",
+    "昼": "昼", "午後": "昼", "昼下がり": "昼", "昼過ぎ": "昼", "正午": "昼",
+    "夕方": "夕方", "夕暮れ": "夕方", "夕刻": "夕方", "日暮れ": "夕方", "放課後": "夕方",
+    "夜": "夜", "晩": "夜", "夜間": "夜",
+    "深夜": "深夜", "夜中": "深夜", "真夜中": "深夜", "未明": "深夜", "夜更け": "深夜",
+}
+
+
+def period_index(p):
+    s = _PERIOD_ALIASES.get(str(p or "").strip(), str(p or "").strip())
+    try:
+        return PERIODS.index(s)
+    except ValueError:
+        return -1
 
 
 def normalize_period(p):
-    p = str(p or "").strip()
-    if p in VALID_PERIODS:
-        return p
-    if p in ("朝", "あさ"):
-        return "早朝"
-    if p in ("午後", "昼下がり"):
-        return "昼"
-    return "午前"
+    idx = period_index(p)
+    return PERIODS[idx] if idx >= 0 else "午前"
+
+
+def _safe_day(v, default=1):
+    return max(1, _as_int(v, default))
+
+
+def period_after(day, idx, steps):
+    total = int(idx) + int(steps)
+    return max(1, int(day) + total // len(PERIODS)), total % len(PERIODS)
+
+
+def time_tick_info(st, total_turn):
+    st = st if isinstance(st, dict) else {}
+    total = max(0, _as_int(total_turn, 0))
+    # 未来のカーソルで時計が止まらないようにclamp
+    last = min(max(0, _as_int(st.get("time_last_turn"), 0)), total)
+    threshold = TIME_FIRST_TURNS if last <= 0 else TIME_EVERY_TURNS
+    overdue = total - last - threshold
+    return overdue >= 0, overdue, threshold
+
+
+_TIME_CUE_RE = re.compile(
+    r"(翌朝|翌日|次の日|明くる日|翌晩|翌週|翌月|数日後|数時間後|数週間後|何週間後|二日後|数ヶ月後|数カ月後|数か月後|何ヶ月後|何カ月後|何か月後|一週間後|"
+    r"三日後|朝まで|夜通し|一晩中|一晩|徹夜|寝落ち|おやすみ|寝よう|眠ろう|就寝|床に就|ベッドに入|眠りにつ|一眠り|仮眠|"
+    r"(?:(?:もう|そろそろ|今日は|今夜は|先に|お先に)寝る(?:よ|ね|わ|ぞ|ぜ|かな)?|寝る(?:よ|ね|わ|ぞ|ぜ|かな)|寝ます|眠る(?:よ|ね|わ))|"
+    r"目が覚め|起きたら|日が暮れ|日が昇|夜になった|朝になった|夕方になった|夜が明|朝が来|"
+    r"その夜|その日の夜|何日か後|時間を飛ば|時間が飛|気づけば|"
+    r"next morning|next day|the next day|morning came|night fell|hours later|days later)",
+    re.IGNORECASE,
+)
+_TIME_MENTION_RE = re.compile(
+    r"(翌朝|翌日|次の日|明くる日|翌晩|その夜|朝になった|夜になった|夕方になった|"
+    r"日が暮れ|日が昇|目が覚め|朝が来|夜が明け|一晩|夜通し|数日後|一週間後|"
+    r"next morning|next day|morning came|night fell)"
+)
+_TIME_ASK_RE = re.compile(r"(今何時|何時|時刻|時間帯|朝か夜|昼か夜)")
+
+
+def time_skip_cued(text):
+    return bool(_TIME_CUE_RE.search(str(text or "")))
+
+
+def time_asked(text):
+    return bool(_TIME_ASK_RE.search(str(text or "")))
+
+
+def time_transition_mentions(text):
+    m = _TIME_MENTION_RE.search(str(text or ""))
+    return m.group(1) if m else ""
+
+
+_SEX_ACTION_TAGS = {
+    "penetration", "vaginal penetration", "anal penetration", "sex", "vaginal", "anal",
+    "fellatio", "deepthroat", "blowjob", "irrumatio", "cunnilingus", "paizuri", "handjob",
+    "fingering", "anal fingering", "masturbation", "orgasm", "creampie", "anal creampie",
+    "cum in mouth", "cum on body", "squirting", "nipple stimulation",
+    "double penetration", "group sex", "intercourse", "vaginal intercourse", "anal intercourse",
+    "oral sex", "titfuck", "footjob", "tribadism", "scissoring", "pegging", "face sitting", "facesitting",
+}
+_COMBAT_ACTION_TAGS = {
+    "fighting", "combat", "battle", "attacking", "slashing", "shooting", "firing",
+    "aiming", "holding weapon", "spell casting", "casting spell", "punching", "kicking",
+    "sword fight", "dodging", "blocking",
+}
+_SEX_JA_RE = re.compile(
+    r"(挿入|結合|ピストン|抽送|フェラ|口淫|咥え|しゃぶ|クンニ|手コキ|パイズリ|"
+    r"絶頂|イッて|射精|中出し|種付け|突かれ|貫かれ|喘ぎ|自慰|オナニー|潮吹き|愛撫|交わり|絡み合|"
+    r"おまんこ|マンコ|アナル|ケツ|膣|尻穴|ペニス|チンポ|肉棒|"
+    r"行為中|セックス中|エッチ中)"
+)
+_COMBAT_RE = re.compile(
+    r"(戦闘|交戦|戦っている|戦って|斬り合|斬りかか|撃ち合|殴り合|銃撃|射撃|"
+    r"爆発|爆炎|詠唱|魔法を放|盾を構|剣を構|武器を構|対峙|敵[がとに]|魔物|モンスター|"
+    r"襲いかか|襲撃|悲鳴|絶叫|血しぶき|倒れ伏|追い詰め|逃亡|逃げ回|防御|避けた|かわした|防戦)"
+)
+
+_NO_PEN_SET = {"なし", "無し", "特になし", "無", "none", "null", "-", "0", "false", "[]"}
+
+
+def scene_is_showpiece(states):
+    """性的行為・戦闘の最中か。stateだけを見る（本文は見ない＝余韻を塞がない）。
+    body_fluids / equipped_items / ahegao も見ない（余韻を塞がないため）。"""
+    if isinstance(states, dict):
+        states = [states]
+    for ch in (states or []):
+        if not isinstance(ch, dict):
+            continue
+        pen_raw = ch.get("penetration")
+        if isinstance(pen_raw, (list, tuple)):
+            pen_raw = " ".join(str(x) for x in pen_raw)
+        pen = str(pen_raw or "").strip().lower()
+        if pen and pen not in _NO_PEN_SET:
+            return True
+
+        acts = ch.get("action")
+        if isinstance(acts, str):
+            acts = [acts]
+        elif isinstance(acts, dict):
+            acts = [acts]
+        elif not isinstance(acts, (list, tuple)):
+            acts = []
+        for a in acts:
+            for tok in re.split(r"[,/;]", str(a).lower()):
+                t = tok.strip()
+                if t in _SEX_ACTION_TAGS or t in _COMBAT_ACTION_TAGS:
+                    return True
+                words = set(t.split())
+                if words & {
+                    "penetration", "intercourse", "fellatio", "blowjob", "cunnilingus",
+                    "paizuri", "titfuck", "handjob", "footjob", "fingering", "masturbation",
+                    "deepthroat", "orgasm", "creampie", "squirting", "tribadism", "pegging",
+                    "fighting", "slashing", "shooting",
+                }:
+                    return True
+                if "sex" in words and not (words & {"unisex", "sexy", "homosexual"}):
+                    return True
+
+        sit = ch.get("situation")
+        if isinstance(sit, str):
+            sit = [sit]
+        elif isinstance(sit, dict):
+            sit = [sit]
+        elif not isinstance(sit, (list, tuple)):
+            sit = []
+        s_text = " ".join(str(x) for x in (list(acts) + list(sit)))
+        if _SEX_JA_RE.search(s_text) or _COMBAT_RE.search(s_text):
+            return True
+    return False
+
+
+def state_prompt(states):
+    if not states:
+        return ""
+    if isinstance(states, list):
+        return json.dumps(states, ensure_ascii=False)
+    return str(states)
+
+
+def apply_reported_time(st, rep_el, *, user_text, gate_states, total_turn):
+    """AIのelapsed_timeを検証。戻り値: (適用したか, 理由)"""
+    if not isinstance(rep_el, dict):
+        return False, "invalid_reported_time"
+    st = st if isinstance(st, dict) else {}
+    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
+    cur_day = _safe_day(cur.get("day"))
+    cur_idx = period_index(cur.get("period"))
+    if cur_idx < 0:
+        cur_idx = period_index("午前")
+
+    rep_idx = period_index(rep_el.get("period"))
+    if rep_idx < 0:
+        return False, "unknown_period"
+
+    cue = time_skip_cued(user_text)
+
+    raw_rep_day = _safe_day(rep_el.get("day"), default=cur_day) if rep_el.get("day") is not None else None
+    if raw_rep_day is None or raw_rep_day == cur_day:
+        if rep_idx < cur_idx:
+            if cue or (cur_idx == len(PERIODS) - 1 and rep_idx == 0):
+                default_day = cur_day + 1
+            else:
+                default_day = cur_day
+        elif rep_idx == cur_idx and cue and re.search(r"(翌日|次の日|明くる日|数日後|一週間後|next day|the next day)", str(user_text or "")):
+            default_day = cur_day + 1
+        else:
+            default_day = cur_day
+    else:
+        default_day = raw_rep_day
+
+    rep_day = _safe_day(default_day, default=cur_day)
+    step = (rep_day - cur_day) * len(PERIODS) + (rep_idx - cur_idx)
+    if step == 0:
+        return False, "hold"
+    if step < 0:
+        return False, "backwards"
+
+    due, _, _ = time_tick_info(st, total_turn)
+    if not due and not cue:
+        return False, "not_due"
+
+    # ★AIの自力ジャンプは時計を動かさない（+1の通常進行だけ許可）
+    if not cue and step > 1:
+        return False, "self_jump"
+    if not cue and scene_is_showpiece(gate_states):
+        return False, "showpiece"
+
+    step = min(step, 30 * len(PERIODS)) if cue else step
+    new_day, new_idx = period_after(cur_day, cur_idx, step)
+    st["elapsed_time"] = {"day": new_day, "period": PERIODS[new_idx]}
+    st["turns_in_period"] = 0
+    st["time_last_turn"] = max(0, _as_int(total_turn, 0))
+    st["time_silent_until_turn"] = 0
+    return True, ""
+
+
+def force_time_tick(st, total_turn):
+    """長期保留時の無言/事後描写用の進行。次ターンで silent か narrate を選ぶ"""
+    st = st if isinstance(st, dict) else {}
+    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
+    cur_day = _safe_day(cur.get("day"))
+    cur_idx = period_index(cur.get("period"))
+    if cur_idx < 0:
+        cur_idx = period_index("午前")
+    new_day, new_idx = period_after(cur_day, cur_idx, 1)
+    old = copy.deepcopy(st.get("elapsed_time"))
+    st["elapsed_time"] = {"day": new_day, "period": PERIODS[new_idx]}
+    st["turns_in_period"] = 0
+    st["time_last_turn"] = max(0, _as_int(total_turn, 0))
+    # 「強制の次ターン」マーカー。次ターンのsceneでsilent/narrateを決める
+    st["time_silent_until_turn"] = max(0, _as_int(total_turn, 0)) + 1
+    return old, st["elapsed_time"]
+
+
+def time_tick_section(st, overdue):
+    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
+    cur_day = _safe_day(cur.get("day"))
+    cur_idx = period_index(cur.get("period"))
+    if cur_idx < 0:
+        cur_idx = period_index("午前")
+    nd, ni = period_after(cur_day, cur_idx, 1)
+    target = json.dumps({"day": nd, "period": PERIODS[ni]}, ensure_ascii=False)
+    text = (
+        f"現在: {cur_day}日目・{PERIODS[cur_idx]} ／ 次: {nd}日目・{PERIODS[ni]}\n"
+        "・会話・移動・休息・場面転換の区切りなら、本文の早い段階で時間帯が進んだことを"
+        "地の文（光・空の色・気温・空気・音・体の感覚）で示す。\n"
+        "・進めるのは1段階だけ。日付を飛ばさない（「翌朝」「翌日」にしない）。\n"
+        "・時刻をセリフで言わない。「夕方になった」のような説明調も避ける。\n"
+        "・戦闘・性行為・絶頂・その直前の見せ場の最中なら進めない。"
+        "elapsed_time を省略し、本文でも時間に触れない。\n"
+        f"・進めたら elapsed_time に {target} を入れ、"
+        "state の background（day/night/evening/sunset）と place も現在に合わせる。\n"
+        "・AIメモに古い時刻があっても、この現在時刻を優先する。"
+    )
+    if overdue >= TIME_ESCALATE_AFTER:
+        text += f"\n・すでに{overdue}ターン保留。見せ場の最中でなければ、このターン必ず進める。"
+    return {"label": "【時間経過】今ターンが進める番", "text": text}
+
+
+def time_cue_section(st):
+    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
+    cur_day = _safe_day(cur.get("day"))
+    cur_idx = period_index(cur.get("period"))
+    if cur_idx < 0:
+        cur_idx = period_index("午前")
+    text = (
+        f"進行前: {cur_day}日目・{PERIODS[cur_idx]}\n"
+        "・ユーザー入力に時間経過（睡眠・翌朝・数日後など）の指示がある。\n"
+        "・指示に合わせて時間を進め、変更後の day と period（早朝/午前/昼/夕方/夜/深夜）を"
+        " elapsed_time に必ず出力する。\n"
+        "・state の background と place も新しい時間帯に合わせる。"
+    )
+    return {"label": "【時間経過】ユーザーの指示", "text": text}
+
+
+def time_after_force_section(st, is_showpiece):
+    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
+    cur_day = _safe_day(cur.get("day"))
+    cur_idx = period_index(cur.get("period"))
+    if cur_idx < 0:
+        cur_idx = period_index("午前")
+    period_name = PERIODS[cur_idx]
+    if is_showpiece:
+        return {
+            "label": "【作中時間】",
+            "text": (
+                f"現在: {cur_day}日目・{period_name}\n"
+                "・行為・戦闘の継続中。時間の経過には一切触れず、そのまま場面を続ける。\n"
+                "・state の background は現在の時間帯に合わせる。"
+            ),
+        }
+    return {
+        "label": "【時間経過】余韻・区切り",
+        "text": (
+            f"現在: {cur_day}日目・{period_name}（直前の場面のあいだに時間が進んでいる）\n"
+            "・行為や戦闘が落ち着いた流れなら、いつの間にかこの時間帯になっていたことを"
+            "地の文（窓の外の光・空気・静けさなど）で一言だけ自然に示す。\n"
+            "・まだ行為や戦闘を続けるなら時間には触れない。\n"
+            "・時計はすでに進んでいるため elapsed_time は出力不要。"
+            "state の background は現在の時間帯に合わせる。"
+        ),
+    }
+
+
+def time_question_section(st):
+    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
+    cur_day = _safe_day(cur.get("day"))
+    cur_idx = period_index(cur.get("period"))
+    if cur_idx < 0:
+        cur_idx = period_index("午前")
+    return {
+        "label": "【現在の作中時間】",
+        "text": f"{cur_day}日目・{PERIODS[cur_idx]}（時間自体は進めない。elapsed_time は出力しない）",
+    }
 
 
 def infer_initial_period(text):
@@ -2207,36 +2558,100 @@ def infer_initial_period(text):
     return "午前"
 
 
-def restore_latest_snapshot(s):
-    st = s["setting"]
+def restore_latest_snapshot(s, preserve_total_turns=False):
+    st = s.get("setting", {})
+    msgs = s.get("messages", [])
+    restored_state = ""
+    restored_elapsed = None
+    restored_turns_in_period = None
+    restored_time_last = None
+    restored_time_silent = None
+    for m in reversed(msgs):
+        if m.get("role") != "assistant":
+            continue
+        if not restored_state and m.get("state_snapshot"):
+            restored_state = m["state_snapshot"]
+        if restored_elapsed is None and isinstance(m.get("elapsed_snapshot"), dict):
+            restored_elapsed = copy.deepcopy(m["elapsed_snapshot"])
+            if "turns_in_period_snapshot" in m:
+                restored_turns_in_period = m["turns_in_period_snapshot"]
+            if "time_last_turn_snapshot" in m:
+                restored_time_last = _as_int(m.get("time_last_turn_snapshot"), 0)
+            if "time_silent_until_snapshot" in m:
+                restored_time_silent = _as_int(m.get("time_silent_until_snapshot"), 0)
+        if restored_elapsed is None and isinstance(m.get("elapsed_time") or m.get("snapshot_elapsed_time"), dict):
+            restored_elapsed = copy.deepcopy(m.get("elapsed_time") or m.get("snapshot_elapsed_time"))
+        if restored_state and restored_elapsed is not None:
+            break
+
+    st["current_state"] = restored_state
+    if restored_elapsed is not None:
+        st["elapsed_time"] = {
+            "day": _safe_day(restored_elapsed.get("day"), 1),
+            "period": normalize_period(restored_elapsed.get("period")),
+        }
+        st["turns_in_period"] = _as_int(restored_turns_in_period, 0) if restored_turns_in_period is not None else 0
+    else:
+        init_el = st.get("initial_elapsed_time")
+        if isinstance(init_el, dict) and init_el.get("period"):
+            st["elapsed_time"] = {
+                "day": _safe_day(init_el.get("day"), 1),
+                "period": normalize_period(init_el.get("period")),
+            }
+        else:
+            scenario_text = (st.get("scenario") or "") + " " + (st.get("first_message") or "") + " " + (st.get("summary") or "")
+            st["elapsed_time"] = {"day": 1, "period": infer_initial_period(scenario_text)}
+        st["turns_in_period"] = 0
+        st["time_last_turn"] = 0
+        st["time_silent_until_turn"] = 0
+
+    user_turns = sum(1 for m in msgs if m.get("role") == "user")
+    asst_turns = sum(1 for m in msgs if m.get("role") == "assistant")
+    completed_in_file = min(user_turns, asst_turns)
+    rot_cnt = max(0, _as_int(st.get("rotation_count"), 0))
+    recomputed_turns = (rot_cnt * ROTATION_PERIOD) + completed_in_file
+    if not preserve_total_turns:
+        st["total_turns"] = recomputed_turns
+    else:
+        recomputed_turns = max(recomputed_turns, _as_int(st.get("total_turns"), 0))
+
+    if restored_time_last is not None:
+        st["time_last_turn"] = min(max(0, restored_time_last), recomputed_turns)
+        st["time_silent_until_turn"] = max(0, restored_time_silent or 0)
+    elif _as_int(st.get("time_last_turn"), 0) > recomputed_turns:
+        tip = max(0, _as_int(st.get("turns_in_period"), 0))
+        st["time_last_turn"] = max(0, recomputed_turns - tip)
+        st["time_silent_until_turn"] = 0
+    final_tot = max(0, _as_int(st.get("total_turns"), 0))
+    if _as_int(st.get("time_last_turn"), 0) > final_tot:
+        st["time_last_turn"] = final_tot
+        st["time_silent_until_turn"] = 0
+    if _as_int(st.get("time_silent_until_turn"), 0) > final_tot + 1:
+        st["time_silent_until_turn"] = 0
+
+    buf = st.get("Consolidation_buffer", [])
+    if isinstance(buf, list) and len(buf) > recomputed_turns:
+        st["Consolidation_buffer"] = buf[:recomputed_turns]
+    st["turns_since_Consolidation"] = len(st.get("Consolidation_buffer", []))
+    if _as_int(st.get("last_Consolidation_turn"), 0) > recomputed_turns:
+        st["last_Consolidation_turn"] = recomputed_turns
+
     # 巻き戻し先の snapshot に合わせるため、後続ブランチの手動編集マーカーは持ち越さない
     st.pop("memo_manual_edit_mid", None)
     st.pop("memo_manual_edit_ts", None)
-    last_asst = next((m for m in reversed(s.get("messages", [])) if m.get("role") == "assistant"), None)
-    if last_asst:
-        et = last_asst.get("elapsed_time") or last_asst.get("snapshot_elapsed_time")
-        if et:
-            st["elapsed_time"] = copy.deepcopy(et)
-
-        memo_asst = next(
-            (m for m in reversed(s.get("messages", [])) if m.get("role") == "assistant" and m.get("memo") is not None),
-            None,
-        )
-        if memo_asst is not None:
-            st["memo"] = memo_asst["memo"]
-            if memo_asst.get("id"):
-                st["last_memo_mid"] = memo_asst["id"]
-        elif st.get("last_memo_mid"):
-            all_ids = {m.get("id") for m in s.get("messages", []) if m.get("id")}
-            if st["last_memo_mid"] not in all_ids:
-                st.pop("last_memo_mid", None)
-    else:
-        # 会話が全削除された場合は初期設定スナップショットへ完全復帰
-        if st.get("initial_elapsed_time"):
-            st["elapsed_time"] = copy.deepcopy(st["initial_elapsed_time"])
-        else:
-            st["elapsed_time"] = copy.deepcopy(DEFAULT_SETTING.get("elapsed_time", {"day": 1, "period": "午前"}))
-
+    memo_asst = next(
+        (m for m in reversed(msgs) if m.get("role") == "assistant" and m.get("memo") is not None),
+        None,
+    )
+    if memo_asst is not None:
+        st["memo"] = memo_asst["memo"]
+        if memo_asst.get("id"):
+            st["last_memo_mid"] = memo_asst["id"]
+    elif st.get("last_memo_mid"):
+        all_ids = {m.get("id") for m in msgs if m.get("id")}
+        if st["last_memo_mid"] not in all_ids:
+            st.pop("last_memo_mid", None)
+    if not any(m.get("role") == "assistant" for m in msgs):
         if st.get("initial_memo") is not None:
             st["memo"] = st["initial_memo"]
         else:
@@ -2277,8 +2692,21 @@ def create_session(setting=None, messages=None):
             st["elapsed_time"] = {"day": 1, "period": inferred}
         elif not isinstance(st.get("elapsed_time"), dict) or not st["elapsed_time"].get("period"):
             st["elapsed_time"] = {"day": 1, "period": "午前"}
-        if not has_custom_initial or not isinstance(st.get("initial_elapsed_time"), dict) or not st["initial_elapsed_time"].get("period"):
+        else:
+            st["elapsed_time"] = {
+                "day": _safe_day(st["elapsed_time"].get("day"), 1),
+                "period": normalize_period(st["elapsed_time"].get("period")),
+            }
+        if not has_custom_initial or not isinstance(st.get("initial_elapsed_time"), dict):
             st["initial_elapsed_time"] = copy.deepcopy(st["elapsed_time"])
+        else:
+            st["initial_elapsed_time"] = {
+                "day": _safe_day(st["initial_elapsed_time"].get("day"), 1),
+                "period": normalize_period(st["initial_elapsed_time"].get("period")),
+            }
+        if not setting or "time_last_turn" not in setting:
+            st["time_last_turn"] = 0
+            st["time_silent_until_turn"] = 0
         if not st.get("initial_memo"):
             st["initial_memo"] = st.get("memo", "")
         st.update(memo_stats(st.get("memo", "")))
@@ -2516,10 +2944,6 @@ def settings_parts(st, agents=None, files=None, transport="ag"):
     if rag:
         parts.append(("参照知識（RAG）", "rag.md", rag))
 
-    el = st.get("elapsed_time") or {"day": 1, "period": "午前"}
-    el_text = f"作中時間: {el.get('day', 1)}日目・{el.get('period', '午前')}"
-    parts.append(("作中経過時間", "elapsed_time", el_text))
-
     if os.path.isfile(WRITING_STYLE):
         try:
             parts.append(("執筆スタイル", "writing_style.md", read_text(WRITING_STYLE)))
@@ -2739,7 +3163,7 @@ def output_text(st, is_diff=False, transport="ag"):
         memo_note = "。更新時は「memoの予算と構成」に従う" if memo_budget_on() else ""
         lines.append(
             f"- 任意: memo（{MEMO_REMIND_TURNS}ターンごと／定期更新時のみ全文{memo_note}）、"
-            "elapsed_time（時間帯が進んだ時だけ。移行はセリフで口に出させず地の文で描写）、"
+            "elapsed_time（【時間経過】指示時のみ出力。通常ターンは省略）、"
             "resolved_ids（達成・解除した記憶ID）、memory_query（想起用キーワード）。"
         )
     else:
@@ -2768,8 +3192,9 @@ def output_text(st, is_diff=False, transport="ag"):
             (f"  - memo: {MEMO_REMIND_TURNS}ターンごとの定期更新指示時、または大きな場面転換時のみ"
              "「これまでの主な出来事＋現在の状況」の全文を出力（それ以外は省略）。"
              + ("今回が更新ターンなら、別途表示される「memoの予算と構成」に従う。" if memo_budget_on() else "")),
-            "  - elapsed_time: 時間帯が進んだ時のみ {\"day\": 日数, \"period\": \"早朝/午前/昼/夕方/夜/深夜\"} を追加"
-            "（行為中ホールド時は時間を維持し省略）。時間帯が進んだことはキャラのセリフで口に出させず、地の文で描写する。",
+            "  - elapsed_time（任意）: 【時間経過】セクションで指示された時だけ出力する: "
+            '{"day": 日数(整数), "period": "早朝|午前|昼|夕方|夜|深夜"}\n'
+            "    指示がないターンでは elapsed_time キー自体を省略し、本文でも時刻や時間帯の経過に触れない。",
             "  - resolved_ids: 達成した約束、消費/返却/消失したアイテム・痕跡、解除されたルールの記憶ID配列 [\"mem_...\"]（該当がある時のみ）。",
             "  - memory_query: 次回想起用キーワード文字列（必要な時のみ）。",
         ]
@@ -2939,7 +3364,9 @@ def history_section(sid, name, label, text, split=True):
 
 
 def msg_sig(m):
-    return [m["id"], sig_of(m.get("text", ""))]
+    mid = m.get("id") or "" if isinstance(m, dict) else ""
+    txt = (m.get("text") or m.get("content") or "") if isinstance(m, dict) else ""
+    return [mid, sig_of(txt)]
 
 
 def sent_path(sid):
@@ -3354,11 +3781,17 @@ def build_context(s, m, transport="ag"):
     google = transport == "google"
     if not google and st.get("agents_md") and sync_agents(s):  # PC で System ファイルを書き換えていても、ここで AGENTS.md に反映する
         save(s)
+    msgs = s.get("messages", [])
+    if isinstance(m, int):
+        idx = m
+        m = msgs[idx] if 0 <= idx < len(msgs) and isinstance(msgs[idx], dict) else {}
+    else:
+        idx = msgs.index(m) if (isinstance(m, dict) and m in msgs) else (len(msgs) - 1)
     if not google:
         # 並列（専用会話）か本文にインラインで作るかは、「いまの設定」ではなく、この発言を作ったときに
         # 並列タスクが積まれたか（choices_status / staged_choices）で決める。専用会話の作成直後・解除直後は
         # 設定と実態がずれ、並列タスクもインライン指示も無い空白ターンになるため（st はコピーなので保存しない）
-        st = dict(st, _choices_parallel=bool(m.get("choices_status") or m.get("staged_choices")))
+        st = dict(st, _choices_parallel=bool(isinstance(m, dict) and (m.get("choices_status") or m.get("staged_choices"))))
     light = False if google else (st.get("input_mode") == "light")
     paths = {}
     parts, missing = settings_parts(st, None if google else agents_in_use(s), paths, transport=transport)
@@ -3366,11 +3799,9 @@ def build_context(s, m, transport="ag"):
     parts.append(("AIメモ（これまでのあらすじ）", "memo", memo_val if memo_val else f"（これまでの出来事＋現在の状況を{MEMO_REMIND_TURNS}ターンごと又は大きな場面転換時に記録）"))
     if st.get("image_mode") != "off" and st.get("chars"):
         parts.append(("固定キャラ（画像に写るときこの外見タグが自動で付く）", "chars", chars_block(st["chars"])))
-    msgs = s["messages"]
-    idx = msgs.index(m)
     ide = "" if google else (st.get("ide_session") or "")
     raw_old = {} if google else read_sent(s["id"])
-    if raw_old.get("inflight_mid") == m.get("id") and isinstance(raw_old.get("prev_sent"), dict) and raw_old.get("prev_sent"):
+    if isinstance(m, dict) and raw_old.get("inflight_mid") == m.get("id") and isinstance(raw_old.get("prev_sent"), dict) and raw_old.get("prev_sent"):
         old = copy.deepcopy(raw_old["prev_sent"])
         prev_snapshot = copy.deepcopy(raw_old["prev_sent"])
     else:
@@ -3526,8 +3957,30 @@ def build_context(s, m, transport="ag"):
         elif new:
             sections.append({"label": "前回のあとに増えた会話", "text": history_text(new, user)})
 
-    # 作中時間（elapsed_time）は世代交代の睡眠プロセスでのみ進める。
-    # 日常ターンで時間帯を強制移動させると、キャラが脈絡なく時間を口に出すため、ここでは何もしない。
+    _last_msg = msgs[idx] if 0 <= idx < len(msgs) and isinstance(msgs[idx], dict) else {}
+    _is_user = _last_msg.get("role") == "user"
+    _user_text = str(_last_msg.get("content") or _last_msg.get("text") or "") if _is_user else ""
+    _due, _overdue, _ = time_tick_info(st, total_turns_val) if _is_user else (False, -1, TIME_EVERY_TURNS)
+    _cue = time_skip_cued(_user_text) if _is_user else False
+    _ask = time_asked(_user_text) if _is_user else False
+    _after = _as_int(st.get("time_silent_until_turn"), 0)
+    _total_now = _as_int(total_turns_val, 0)
+    _after_active = bool(_is_user and not _cue and not _due and not _ask and _after and (_total_now <= _after <= _total_now + 1))
+
+    _need_state = bool(st.get("rp_state")) or _due or _after_active
+    prev_state = state_before(msgs, idx, sid=s.get("id")) if _need_state else []
+    _showpiece = scene_is_showpiece(prev_state)
+
+    time_sec = None
+    if _is_user:
+        if _cue:
+            time_sec = time_cue_section(st)
+        elif _due and not _showpiece:
+            time_sec = time_tick_section(st, _overdue)
+        elif _after_active:
+            time_sec = time_after_force_section(st, _showpiece)
+        elif _ask:
+            time_sec = time_question_section(st)
 
     # 世代交代の節目（armed のときだけ・同じターンで1回だけ）
     if rot_armed:
@@ -3573,13 +4026,23 @@ def build_context(s, m, transport="ag"):
             "label": "【memo短縮】",
             "text": memo_over_budget_text(),
         })
+    dynamic_sections = []
+    current = (st.get("current_state") or "").strip()
+    if current:
+        sec_cs = {"label": "【現在の状況（AIメモ）】", "text": current}
+        sections.append(sec_cs)
+        dynamic_sections.append(sec_cs)
     if st.get("rp_state"):  # 全部・差分に関係なく毎回（AI が前のターンを覚えていなくても、手で直した分も届くように）
-        prev_state = state_before(msgs, idx, sid=s.get("id"))
         state_hint = STATE_HINT_DELTA if prev_state else STATE_HINT_FULL
-        sections.append({
+        sec_st = {
             "label": "キャラの状態（前の応答のとき。これを踏まえて書き、応答の state で更新する）",
             "text": state_hint + state_block(prev_state),
-        })
+        }
+        sections.append(sec_st)
+        dynamic_sections.append(sec_st)
+    if time_sec:
+        sections.append(time_sec)
+        dynamic_sections.append(time_sec)
     if st.get("image_mode") != "off" and os.environ.get("RPCHAT_PREVPROMPT", "0") != "0":
         prev_prompt, prev_chars = last_image_prompt(msgs, idx, sid=s.get("id"))
         if prev_prompt and not prev_chars:
@@ -3598,7 +4061,7 @@ def build_context(s, m, transport="ag"):
                 "label": "直前の画像プロンプト（前回の服装・カラダの状態・場面の参考）",
                 "text": f"{ch_info}{prev_prompt}\n※前回のタグをそのまま貼らないこと。継続している服装・状態だけを残し、今回のユーザーの発言や展開で変化した部分（着替え・脱衣・着崩れ・汗や赤面などのカラダの状態・ポーズ・場所・装具・小道具・液体や排泄など）は必ず書き換え、新しく出た物・行為は実在の Danbooru タグで追加し、もう無い要素の古いタグは削除すること。"
             })
-    if m.get("files"):
+    if isinstance(m, dict) and m.get("files"):
         paths = [upload_abs(f["path"]) for f in m["files"]]
         sections.append({"label": "ユーザーが今回の発言に添付したファイル（"
                          + ("画像はこの会話のチャット欄にも貼った。そこで見えていれば開き直さなくてよい" if m.get("pasted")
@@ -3607,7 +4070,8 @@ def build_context(s, m, transport="ag"):
         files += paths
     # --- Post-RAG セクションの先行準備 ---------------------------------
     post_rag_sections = []
-    post_rag_sections.append({"label": "ユーザーの発言（これに応答する）", "text": m["text"] or "（本文なし。添付だけ）"})
+    user_reply_text = ((m.get("text") or m.get("content") or "") if isinstance(m, dict) else "") or "（本文なし。添付だけ）"
+    post_rag_sections.append({"label": "ユーザーの発言（これに応答する）", "text": user_reply_text})
 
     if st.get("image_mode") != "off":
         if reason:
@@ -3897,6 +4361,8 @@ def build_context(s, m, transport="ag"):
         except Exception as e:
             print(f"[build_context] perf log error: {e}")
     return {"mode": "full" if reason else "diff", "reason": reason, "sections": sections,
+            "dynamic_sections": dynamic_sections,
+            "settings_sections": [section(lb, key, ct) for lb, key, ct in parts],
             "same": same, "files": files, "light": light, "missing": missing, "rules": rules,
             "title": st.get("title"), "retrieved": rag_hits, "compact": compact_on(),
             "transport": transport}
@@ -4359,7 +4825,7 @@ def consolidation_history(s, idx):
 
 
 def build_consolidation_context(s, m):
-    """世代交代の節目での睡眠プロセス（一括蒸留＆作中時間確定タスク）用のコンテキスト"""
+    """世代交代の節目での睡眠プロセス（一括蒸留＆あらすじ更新タスク）用のコンテキスト"""
     st = s["setting"]
     msgs = s["messages"]
     idx = msgs.index(m) if m in msgs else len(msgs) - 1
@@ -4407,10 +4873,6 @@ def build_consolidation_context(s, m):
         "reply_to": m["id"],
         "type": "consolidation",
         "memo": sample_memo,
-        "elapsed_time": {
-            "day": 2,
-            "period": "早朝"
-        },
         "state": [
             {
                 "name": ch_name,
@@ -4432,20 +4894,20 @@ def build_consolidation_context(s, m):
 
     sections = [
         {
-            "label": "睡眠プロセス（世代交代・一括蒸留＆作中時間確定タスク）",
+            "label": "睡眠プロセス（世代交代・一括蒸留＆あらすじ更新タスク）",
             "text": (
-                "【今回のタスク: 世代交代の節目の睡眠プロセス（時間確定と記憶蒸留）】\n"
+                "【今回のタスク: 世代交代の節目の睡眠プロセス（記憶蒸留・あらすじ更新）】\n"
+                f"現在の作中時間: {cur_elapsed.get('day', 1)}日目・{cur_elapsed.get('period', '午前')}\n"
+                "【重要】作中時間は既に確定している。時間帯・日付は変更しない。\n"
                 f"{memo_instruction}"
-                "以下の3点を outbox の JSON に出力してください：\n"
+                "以下の2点を outbox の JSON に出力してください：\n"
                 "1. memo: これまでの出来事史を整理したあらすじ"
                 + ("\n" if memo_budget_on() else "（これまでの主な出来事＋現在の状況の最新全文）\n")
-                + "2. elapsed_time: 原則として時間帯を1段階進める（早朝→午前→昼→夕方→夜→深夜→翌日早朝。day は日付が変わった時だけ +1）。\n"
-                "   【禁止】戦闘中、セックス中では、時間帯を進めてはならない。現在の時間帯をそのまま返し、行為が終わった時だけ進める。\n"
-                "3. state: 新スレッド開始時点のキャラの状態（outfit, outerwear, underwear, equipped_items, penetration, body_fluids, pose, expression, place, camera, situation, inner）。就寝中は pose（仰向け・横向き等）と expression（穏やか・寝顔等）も書く。\n"
+                + "2. state: 新スレッド開始時点のキャラの状態（outfit, outerwear, underwear, equipped_items, penetration, body_fluids, pose, expression, place, camera, situation, inner）。就寝中は pose（仰向け・横向き等）と expression（穏やか・寝顔等）も書く。\n"
                 "   【シチュエーション連動推移ルール】\n"
                 "   - 早朝・ベッドの中への移行: 前夜の全裸・乱れた肌着・装着具挿入状態をそのまま維持（朝の余韻・ピロートークを保護）。\n"
-                "   - 午前・昼へのスキップ: 起床・身支度を済ませた場面転換として、状況に適した衣装（制服・普段着）に自然に更新し、就寝時の器具等は外す。\n\n"
-                "※本文（text）や画像（image）は出力不要です。指定のJSONのみ出力してください。"
+                "   - 起床・身支度を済ませた場面転換: 状況に適した衣装（制服・普段着）に自然に更新し、就寝時の器具等は外す。\n\n"
+                "※本文（text）・画像（image）・elapsed_time は出力不要です。指定のJSONのみ出力してください。"
             )
         },
         {
@@ -5107,8 +5569,9 @@ def state_before(msgs, idx, sid=None):
     sdata = None
     for m in reversed(msgs[:idx]):
         if m.get("role") == "assistant":
-            if isinstance(m.get("state"), list):
-                return m["state"]
+            st_list = m.get("state") if isinstance(m.get("state"), list) else m.get("rp_state")
+            if isinstance(st_list, list):
+                return st_list
             if sid:
                 if sdata is None:
                     sdata = load_states_data(sid, readonly=True)
@@ -7301,15 +7764,6 @@ def process_outbox():
                     cst.pop("memo_manual_edit_ts", None)
                     if cst.get("memo_over_budget"):
                         print(f"[memo] consolidation over budget {cst['memo_bytes']}B sid={sid}")
-                if isinstance(rep.get("elapsed_time"), dict):
-                    raw_period = rep["elapsed_time"].get("period", s["setting"].get("elapsed_time", {}).get("period", "早朝"))
-                    s["setting"]["elapsed_time"] = {
-                        "day": int(rep["elapsed_time"].get("day", s["setting"].get("elapsed_time", {}).get("day", 1))),
-                        "period": normalize_period(raw_period)
-                    }
-                    s["setting"]["turns_in_period"] = 0
-                if target_asst and isinstance(s["setting"].get("elapsed_time"), dict):
-                    target_asst["elapsed_time"] = copy.deepcopy(s["setting"]["elapsed_time"])
                 if rep.get("state"):
                     clean_rep_st = clean_state(rep["state"])
                     new_state = merge_state(state_before(s["messages"], len(s["messages"]), sid=sid), clean_rep_st)
@@ -7821,23 +8275,70 @@ def process_outbox():
                     }
                     queued_images.append((sid, msg["id"]))
                     image_event.set()  # 0.01秒以内に画像生成ワーカを起床
-            # 作中経過時間（elapsed_time）の受取
-            if isinstance(rep.get("elapsed_time"), dict):
-                new_day = int(rep["elapsed_time"].get("day", st.get("elapsed_time", {}).get("day", 1)))
-                raw_period = rep["elapsed_time"].get("period", st.get("elapsed_time", {}).get("period", "午前"))
-                new_period = normalize_period(raw_period)
-                cur_el = st.get("elapsed_time") or {}
-                if new_day != cur_el.get("day") or new_period != cur_el.get("period"):
-                    st["elapsed_time"] = {"day": new_day, "period": new_period}
-                    st["turns_in_period"] = 0
-                else:
-                    st["turns_in_period"] = st.get("turns_in_period", 0) + 1
-            else:
-                st["turns_in_period"] = st.get("turns_in_period", 0) + 1
+            # 作中経過時間（elapsed_time）の検証と進行
+            total_after = max(1, _as_int(st.get("total_turns"), 0) or len([x for x in s["messages"] if x.get("role") == "user"]))
+            user_msg = target_u or (s["messages"][-1] if s["messages"] else {})
+            user_text = (user_msg.get("content") or user_msg.get("text") or "") if user_msg.get("role") == "user" else ""
+            u_idx = s["messages"].index(user_msg) if (user_msg in s["messages"]) else len(s["messages"])
+            prev_for_gate = state_before(s["messages"], u_idx, sid=sid)
+            now_states = (clean_st if isinstance(clean_st, list) else None) or (rep.get("state") if isinstance(rep.get("state"), list) else None) or (rep.get("rp_state") if isinstance(rep.get("rp_state"), list) else [])
+            if isinstance(now_states, dict):
+                now_states = [now_states]
+            gate_states = list(prev_for_gate or []) + list(now_states or [])
 
-            # このターン時点の作中時刻をメッセージ側にも残す（記憶の付与・復元・分岐が参照する）
+            was_after_force = bool(_as_int(st.get("time_silent_until_turn"), 0) and total_after >= _as_int(st.get("time_silent_until_turn"), 0))
+            if was_after_force:
+                st["time_silent_until_turn"] = 0
+
+            reported_elapsed = rep.get("elapsed_time")
+            advanced = False
+            reject_reason = ""
+            if isinstance(reported_elapsed, dict) and reported_elapsed.get("period"):
+                old_el = copy.deepcopy(st.get("elapsed_time"))
+                advanced, reject_reason = apply_reported_time(
+                    st,
+                    reported_elapsed,
+                    user_text=user_text,
+                    gate_states=gate_states,
+                    total_turn=total_after,
+                )
+                if advanced:
+                    log_event(
+                        "time",
+                        f"session={sid} turn={total_after} elapsed_time: {old_el} -> {st['elapsed_time']}",
+                    )
+                elif reject_reason and reject_reason != "hold":
+                    log_event(
+                        "time",
+                        f"session={sid} turn={total_after} ignored advance reason={reject_reason} reported={reported_elapsed}",
+                        level="WARN",
+                    )
+
+            if not advanced:
+                st["turns_in_period"] = _as_int(st.get("turns_in_period"), 0) + 1
+                due_now, overdue_now, _ = time_tick_info(st, total_after)
+                if due_now and overdue_now >= TIME_FORCE_AFTER:
+                    old_el, new_el = force_time_tick(st, total_after)
+                    log_event(
+                        "time",
+                        f"session={sid} turn={total_after} force_tick overdue={overdue_now}: {old_el} -> {new_el}",
+                    )
+                else:
+                    phrase = time_transition_mentions(msg.get("text") or msg.get("content") or "")
+                    if phrase and not time_skip_cued(user_text) and not was_after_force:
+                        log_event(
+                            "time",
+                            f"session={sid} turn={total_after} text mentions '{phrase}' without clock advance (due={due_now}, reason={reject_reason or 'no_elapsed_time'})",
+                            level="WARN",
+                        )
+
+            # このターン時点の作中時刻・スナップショットをメッセージ側にも残す
             if isinstance(st.get("elapsed_time"), dict):
                 msg["elapsed_time"] = copy.deepcopy(st["elapsed_time"])
+                msg["elapsed_snapshot"] = copy.deepcopy(st["elapsed_time"])
+                msg["turns_in_period_snapshot"] = st.get("turns_in_period", 0)
+                msg["time_last_turn_snapshot"] = _as_int(st.get("time_last_turn"), 0)
+                msg["time_silent_until_snapshot"] = _as_int(st.get("time_silent_until_turn"), 0)
 
             if isinstance(rep.get("memo"), str) and rep["memo"].strip():
                 st["memo"] = rep["memo"].strip()
@@ -10690,6 +11191,11 @@ class H(BaseHTTPRequestHandler):
                 st["title"] = (s["setting"].get("title") or "") + " (分岐)"
                 n = create_session(st, msgs)
                 restore_latest_snapshot(n)
+                b_st = n.get("setting", {})
+                b_tot = max(0, _as_int(b_st.get("total_turns"), 0))
+                if _as_int(b_st.get("time_last_turn"), 0) > b_tot:
+                    b_st["time_last_turn"] = b_tot
+                    b_st["time_silent_until_turn"] = 0
                 n["setting"]["initial_elapsed_time"] = copy.deepcopy(n["setting"]["elapsed_time"])
                 n["setting"]["initial_memo"] = n["setting"].get("memo", "")
 
@@ -10729,6 +11235,9 @@ class H(BaseHTTPRequestHandler):
                 # 通算ターンは「分岐元の末尾」ではなく「分岐位置 idx」で計算する（prefix では基準がずれる）
                 last_turn = calc_turn_idx(s["messages"], idx, src_total) if s["messages"] else 0
                 n["setting"]["total_turns"] = last_turn
+                if _as_int(n["setting"].get("time_last_turn"), 0) > last_turn:
+                    n["setting"]["time_last_turn"] = last_turn
+                    n["setting"]["time_silent_until_turn"] = 0
                 save(n)
                 try:
                     # 直近がユーザー発言なら、そのターンの記憶はまだ無い（分岐後に応答を作り直すため）
@@ -11074,7 +11583,7 @@ class H(BaseHTTPRequestHandler):
                         memory_store.delete_after_turn(sid, max(0, current_total - 1))
                     else:
                         memory_store.delete_after_turn(sid, current_total)
-                restore_latest_snapshot(s)
+                restore_latest_snapshot(s, preserve_total_turns=True)
                 save(s)
                 if is_api_provider(s["setting"]):
                     google_event.set()
@@ -11581,7 +12090,7 @@ class H(BaseHTTPRequestHandler):
                     mem_turn = max(0, new_total - 1) if (s["messages"] and s["messages"][-1].get("role") == "user") else new_total
                     s["setting"]["total_turns"] = new_total
                     memory_store.delete_after_turn(sid, mem_turn)
-                restore_latest_snapshot(s)
+                restore_latest_snapshot(s, preserve_total_turns=True)
                 save(s)
                 return self.send_json({"ok": True, "revert": rv})
             if p == "/api/chars/upsert":
@@ -11611,9 +12120,16 @@ class H(BaseHTTPRequestHandler):
                 save(s)
                 return self.send_json({"ok": True})
             if p == "/api/setting":
-                new = d.get("setting", s["setting"])
+                raw_new = d.get("setting", s["setting"])
+                new = copy.deepcopy(raw_new) if isinstance(raw_new, dict) else copy.deepcopy(s["setting"])
                 if not isinstance(new, dict):
                     return self.send_json({"error": "setting must be an object"}, 400)
+                old_st = s.get("setting", {})
+                old_el = old_st.get("elapsed_time") if isinstance(old_st.get("elapsed_time"), dict) else {}
+                old_elapsed_cmp = {
+                    "day": _safe_day(old_el.get("day"), 1),
+                    "period": normalize_period(old_el.get("period")),
+                }
                 old_memo = s["setting"].get("memo") or ""
                 if isinstance(new, dict):
                     new.pop("memo_as_initial", None)
@@ -11627,12 +12143,19 @@ class H(BaseHTTPRequestHandler):
                     keep[_pk] = s["setting"].get(_pk)
                 keep["chars"] = s["setting"].get("chars") or []
                 keep["total_turns"] = s["setting"].get("total_turns", 0)
+                keep["turns_in_period"] = _as_int(s["setting"].get("turns_in_period"), 0)
+                keep["time_last_turn"] = _as_int(s["setting"].get("time_last_turn"), 0)
+                keep["time_silent_until_turn"] = _as_int(s["setting"].get("time_silent_until_turn"), 0)
                 keep["rotation_count"] = s["setting"].get("rotation_count", 0)
                 keep["last_rotation_turn"] = s["setting"].get("last_rotation_turn", 0)
                 keep["turns_since_rotation"] = s["setting"].get("turns_since_rotation", 0)
                 keep["rotation"] = s["setting"].get("rotation")
                 keep["rotation_skip_until"] = s["setting"].get("rotation_skip_until", 0)
                 keep["rotation_reserve"] = s["setting"].get("rotation_reserve")
+                if "elapsed_time" not in new:
+                    keep["elapsed_time"] = s["setting"].get("elapsed_time", {"day": 1, "period": "午前"})
+                if "initial_elapsed_time" not in new and "initial_elapsed_time" in s["setting"]:
+                    keep["initial_elapsed_time"] = s["setting"]["initial_elapsed_time"]
                 # memo の内部アンカー・統計はブラウザの古い state.setting から受け取らない
                 for _mk in (
                     "last_memo_mid",
@@ -11666,8 +12189,18 @@ class H(BaseHTTPRequestHandler):
                     s["setting"].update(memo_stats(new_memo))
                 if d.get("memo_as_initial"):
                     s["setting"]["initial_memo"] = s["setting"].get("memo", "")
-                if s["setting"].get("elapsed_time") and isinstance(s["setting"]["elapsed_time"], dict):
-                    s["setting"]["elapsed_time"]["period"] = normalize_period(s["setting"]["elapsed_time"].get("period"))
+                el = s["setting"].get("elapsed_time")
+                if isinstance(el, dict):
+                    s["setting"]["elapsed_time"] = {
+                        "day": _safe_day(el.get("day"), 1),
+                        "period": normalize_period(el.get("period")),
+                    }
+                else:
+                    s["setting"]["elapsed_time"] = {"day": 1, "period": "午前"}
+                if old_elapsed_cmp != s["setting"].get("elapsed_time"):
+                    s["setting"]["time_last_turn"] = max(0, _as_int(s["setting"].get("total_turns"), 0))
+                    s["setting"]["time_silent_until_turn"] = 0
+                    s["setting"]["turns_in_period"] = 0
                 # 会話開始前（user 発言なし）であれば初期値も追従更新
                 if not any(m.get("role") == "user" for m in s.get("messages", [])):
                     s["setting"]["initial_elapsed_time"] = copy.deepcopy(s["setting"]["elapsed_time"])
@@ -11704,6 +12237,8 @@ class H(BaseHTTPRequestHandler):
                     s["setting"].pop(k, None)
                 s["setting"].update(memo_stats(s["setting"].get("memo", "")))
                 s["setting"]["turns_in_period"] = 0
+                s["setting"]["time_last_turn"] = 0
+                s["setting"]["time_silent_until_turn"] = 0
                 s["setting"]["total_turns"] = 0
                 s["setting"]["rotation_count"] = 0
                 s["setting"]["last_rotation_turn"] = 0

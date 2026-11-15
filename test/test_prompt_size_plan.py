@@ -30,7 +30,7 @@ class TestPromptSizePlan(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_psp_")
         self.orig_dirs = {}
-        for name in ("DATA", "SESS_DIR", "STATES_DIR", "RAG_DIR", "SENT", "CTX", "OUTBOX", "DONE"):
+        for name in ("DATA", "SESS_DIR", "STATES_DIR", "IMAGES_DIR", "CHOICES_DIR", "RAG_DIR", "SENT", "CTX", "TRASH", "OUTBOX", "DONE"):
             self.orig_dirs[name] = getattr(server, name, None)
             path = os.path.join(self.tmp, name.lower())
             os.makedirs(path, exist_ok=True)
@@ -527,6 +527,28 @@ class TestPromptSizePlan(unittest.TestCase):
         # 自発的に時刻を口に出すのを抑える規則は writing_style.md に残す
         with open(server.WRITING_STYLE, encoding="utf-8") as f:
             self.assertIn("作中時間の経過・時間帯", f.read())
+
+    def test_elapsed_time_not_duplicated(self):
+        """通常ターンでは elapsed_time セクションが出ず、dueターンでは dynamic 側に1箇所だけ出ることを検証"""
+        s = server.create_session({"title": "時間重複テスト", "ide_session": "ide-1"})
+        s["setting"]["total_turns"] = 5
+        s["setting"]["time_last_turn"] = 0
+        s["messages"].append(make_msg("user", "ねえ", mid="u1"))
+        server.save(s)
+        # 非番ターン（turn=5）では static / dynamic どちらにも時間セクションは出ない
+        ctx = server.build_context(s, s["messages"][-1])
+        static_labels = [sec["label"] for sec in ctx.get("settings_sections", [])]
+        dynamic_labels = [sec["label"] for sec in ctx.get("dynamic_sections", [])]
+        self.assertFalse(any("作中時間" in str(lb) for lb in static_labels))
+        self.assertNotIn("【時間経過】今ターンが進める番", dynamic_labels)
+
+        # 番のターン（turn=30）では dynamic 側に1箇所だけ出る
+        s["setting"]["total_turns"] = 30
+        ctx_due = server.build_context(s, s["messages"][-1])
+        due_static = [sec["label"] for sec in ctx_due.get("settings_sections", [])]
+        due_dynamic = [sec["label"] for sec in ctx_due.get("dynamic_sections", [])]
+        self.assertFalse(any("作中時間" in str(lb) for lb in due_static))
+        self.assertIn("【時間経過】今ターンが進める番", due_dynamic)
 
 
 if __name__ == "__main__":

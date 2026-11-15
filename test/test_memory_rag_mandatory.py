@@ -29,7 +29,7 @@ class TestMemoryRAGMandatory(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_rag_mand_")
         self.orig_dirs = {}
-        for name in ("DATA", "SESS_DIR", "STATES_DIR", "RAG_DIR", "SENT", "CTX", "OUTBOX", "DONE", "NEW_IDE_DIR"):
+        for name in ("DATA", "SESS_DIR", "STATES_DIR", "IMAGES_DIR", "CHOICES_DIR", "RAG_DIR", "SENT", "CTX", "TRASH", "OUTBOX", "DONE", "NEW_IDE_DIR"):
             self.orig_dirs[name] = getattr(server, name, None)
             path = os.path.join(self.tmp, name.lower())
             os.makedirs(path, exist_ok=True)
@@ -40,8 +40,10 @@ class TestMemoryRAGMandatory(unittest.TestCase):
 
         self.orig_ms_data = memory_store.DATA
         self.orig_ms_rag = memory_store.RAG_DIR
+        self.orig_ms_trash = memory_store.TRASH
         memory_store.DATA = server.DATA
         memory_store.RAG_DIR = server.RAG_DIR
+        memory_store.TRASH = server.TRASH
 
         server.session_cache.clear()
         server.queued_memories.clear()
@@ -57,6 +59,7 @@ class TestMemoryRAGMandatory(unittest.TestCase):
         wait_input.CTX_DIR = server.CTX
         memory_store.DATA = self.orig_ms_data
         memory_store.RAG_DIR = self.orig_ms_rag
+        memory_store.TRASH = self.orig_ms_trash
         server.queued_memories.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 

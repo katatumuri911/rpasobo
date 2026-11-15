@@ -20,6 +20,7 @@ if ROOT_DIR not in sys.path:
 
 import server
 import wait_input
+import memory_store
 import tools.check_context as check_context
 
 # serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
@@ -36,11 +37,21 @@ class TestMemoBudget(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_memo_budget_")
         self.orig_dirs = {}
-        for name in ("DATA", "SESS_DIR", "STATES_DIR", "RAG_DIR", "SENT", "CTX", "OUTBOX", "DONE"):
+        for name in ("DATA", "SESS_DIR", "STATES_DIR", "IMAGES_DIR", "CHOICES_DIR", "RAG_DIR", "SENT", "CTX", "TRASH", "OUTBOX", "DONE"):
             self.orig_dirs[name] = getattr(server, name, None)
             path = os.path.join(self.tmp, name.lower())
             os.makedirs(path, exist_ok=True)
             setattr(server, name, path)
+        self.orig_ms_dirs = {
+            "DATA": memory_store.DATA,
+            "RAG_DIR": memory_store.RAG_DIR,
+            "TRASH": memory_store.TRASH,
+        }
+        memory_store.DATA = server.DATA
+        memory_store.RAG_DIR = server.RAG_DIR
+        memory_store.TRASH = server.TRASH
+        memory_store._memory_cache.clear()
+
         self.orig_outbox = getattr(wait_input, "OUTBOX", None)
         self.orig_done = getattr(wait_input, "DONE", None)
         self.orig_ctx_dir = getattr(wait_input, "CTX_DIR", None)
@@ -68,6 +79,10 @@ class TestMemoBudget(unittest.TestCase):
         for name, val in self.orig_dirs.items():
             if val is not None:
                 setattr(server, name, val)
+        for name, val in self.orig_ms_dirs.items():
+            if val is not None:
+                setattr(memory_store, name, val)
+        memory_store._memory_cache.clear()
         if self.orig_outbox is not None:
             wait_input.OUTBOX = self.orig_outbox
         if self.orig_done is not None:

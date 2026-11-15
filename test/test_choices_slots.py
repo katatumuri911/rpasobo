@@ -33,6 +33,11 @@ class TestChoicesSlots(unittest.TestCase):
         self.orig_data_dir = server.DATA
         self.orig_choices_dir = server.CHOICES_DIR
         self.orig_sess_dir = server.SESS_DIR
+        self.orig_images_dir = server.IMAGES_DIR
+        self.orig_states_dir = server.STATES_DIR
+        self.orig_sent = server.SENT
+        self.orig_ctx = server.CTX
+        self.orig_trash = server.TRASH
         self.orig_outbox = server.OUTBOX
         self.orig_done = server.DONE
         self.orig_wait_outbox = wait_input.OUTBOX
@@ -42,14 +47,20 @@ class TestChoicesSlots(unittest.TestCase):
         server.DATA = os.path.join(self.tmp, "data")
         server.CHOICES_DIR = os.path.join(server.DATA, "choices")
         server.SESS_DIR = os.path.join(server.DATA, "sessions")
+        server.IMAGES_DIR = os.path.join(server.DATA, "images")
+        server.STATES_DIR = os.path.join(server.DATA, "states")
+        server.SENT = os.path.join(server.DATA, "sent")
+        server.CTX = os.path.join(server.DATA, "ctx")
+        server.TRASH = os.path.join(server.DATA, "trash")
         server.OUTBOX = os.path.join(self.tmp, "outbox")
         server.DONE = os.path.join(self.tmp, "outbox", "done")
         wait_input.OUTBOX = server.OUTBOX
 
-        os.makedirs(server.CHOICES_DIR, exist_ok=True)
-        os.makedirs(server.SESS_DIR, exist_ok=True)
-        os.makedirs(server.OUTBOX, exist_ok=True)
-        os.makedirs(server.DONE, exist_ok=True)
+        for d in (
+            server.CHOICES_DIR, server.SESS_DIR, server.IMAGES_DIR, server.STATES_DIR,
+            server.SENT, server.CTX, server.TRASH, server.OUTBOX, server.DONE
+        ):
+            os.makedirs(d, exist_ok=True)
 
         server.session_cache.clear()
         server.choices_cache.clear()
@@ -61,6 +72,11 @@ class TestChoicesSlots(unittest.TestCase):
         server.DATA = self.orig_data_dir
         server.CHOICES_DIR = self.orig_choices_dir
         server.SESS_DIR = self.orig_sess_dir
+        server.IMAGES_DIR = self.orig_images_dir
+        server.STATES_DIR = self.orig_states_dir
+        server.SENT = self.orig_sent
+        server.CTX = self.orig_ctx
+        server.TRASH = self.orig_trash
         server._DECENSOR_CACHE.update(key=None, words={})
         server.OUTBOX = self.orig_outbox
         server.DONE = self.orig_done

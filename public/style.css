@@ -492,14 +492,16 @@ footer > * { pointer-events: auto; }
   grid-template-areas: "plus text chip mic stop send";
   align-items: end;
   gap: 5px 6px;
-  padding: 6px;
+  padding: 6px 12px;
   background: #2b2b33;
   border: 1px solid #3e3e49;
-  border-radius: 22px;
-  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease;
+  border-radius: 9999px;
+  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, border-radius .18s ease;
 }
 /* 入力中は上の段にテキスト、下の段にボタン（真ん中の空き列がボタンを右へ押す） */
 .foot-input.is-expanded {
+  border-radius: 22px;
+  grid-template-columns: auto minmax(8px, 1fr) auto auto auto auto;
   grid-template-areas:
     "text text text text text text"
     "plus .    chip mic  stop send";
@@ -543,6 +545,7 @@ footer > * { pointer-events: auto; }
   fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round;
 }
 .composer-chip .chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot-input.is-expanded .composer-chip { min-width: fit-content; max-width: 260px; }
 /* マイク（音声入力はこれから。今は押すと準備中と出すだけ） */
 #micBtn {
   grid-area: mic;
@@ -554,16 +557,16 @@ footer > * { pointer-events: auto; }
   height: var(--composer-h);
   padding: 0;
   border: none;
-  border-radius: 50%;
-  background: #33333d;
+  background: transparent;
   color: #c4c5d2;
   flex-shrink: 0;
-  transition: background .15s ease, color .15s ease, transform .12s ease;
+  cursor: pointer;
+  transition: color .15s ease, transform .12s ease;
 }
-#micBtn .composer-icon { width: 20px; height: 20px; }
-#micBtn:hover { background: #3f3f4c; color: #fff; }
-#micBtn:active { transform: scale(.94); }
-#micBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
+#micBtn .composer-icon { width: 30px; height: 30px; stroke-width: 2; transform: translateX(4px); }
+#micBtn:hover { background: transparent; color: #fff; }
+#micBtn:active { transform: scale(.92); }
+#micBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; border-radius: 8px; }
 /* 送信に使うモデル（担当の会話があるチャンネルだけ） */
 .foot-bar { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #aaa; }
 .foot-bar label.ide-model { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; margin: 0; }
@@ -725,8 +728,12 @@ footer textarea:focus { outline: none; }
   }
   .foot-input {
     gap: 4px 5px;
-    padding: 5px;
+    padding: 5px 9px;
+    border-radius: 9999px;
+  }
+  .foot-input.is-expanded {
     border-radius: 20px;
+    grid-template-columns: auto minmax(4px, 1fr) auto auto auto auto;
   }
   #attachBtn {
     min-width: var(--composer-h);
@@ -741,8 +748,10 @@ footer textarea:focus { outline: none; }
     display: inline-flex;
     height: calc(var(--composer-h) - 6px);
     padding: 0 10px 0 8px;
-    font-size: 11px;
-    max-width: 42vw;
+    font-size: 12px;
+    min-width: 0;
+    max-width: min(52vw, 200px);
+    flex-shrink: 0;
   }
   .foot-input.is-expanded #messageInput { min-height: 58px; }
   /* 下フリック送信のヒント。小さい矢印をバッジにして見えるように */

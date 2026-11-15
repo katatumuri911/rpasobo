@@ -31,6 +31,11 @@ class TestParallelChoices(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp(prefix="test_rp_chat_")
         self.orig_data_dir = server.DATA
         self.orig_sess_dir = server.SESS_DIR
+        self.orig_choices_dir = server.CHOICES_DIR
+        self.orig_images_dir = server.IMAGES_DIR
+        self.orig_states_dir = server.STATES_DIR
+        self.orig_ctx = server.CTX
+        self.orig_trash = server.TRASH
         self.orig_outbox = wait_input.OUTBOX
         self.orig_s_outbox = server.OUTBOX
         self.orig_s_done = server.DONE
@@ -50,6 +55,12 @@ class TestParallelChoices(unittest.TestCase):
         os.makedirs(server.SESS_DIR, exist_ok=True)
         server.CHOICES_DIR = os.path.join(server.DATA, "choices")
         os.makedirs(server.CHOICES_DIR, exist_ok=True)
+        server.IMAGES_DIR = os.path.join(server.DATA, "images")
+        os.makedirs(server.IMAGES_DIR, exist_ok=True)
+        server.STATES_DIR = os.path.join(server.DATA, "states")
+        os.makedirs(server.STATES_DIR, exist_ok=True)
+        server.CTX = os.path.join(server.DATA, "ctx")
+        os.makedirs(server.CTX, exist_ok=True)
         server.TRASH = os.path.join(server.DATA, "trash")
         os.makedirs(server.TRASH, exist_ok=True)
         server.AGENTS_LOG = os.path.join(server.DATA, "agents_md.json")
@@ -81,6 +92,11 @@ class TestParallelChoices(unittest.TestCase):
         server.DATA = self.orig_data_dir
         server.SENT = self.orig_sent
         server.SESS_DIR = self.orig_sess_dir
+        server.CHOICES_DIR = self.orig_choices_dir
+        server.IMAGES_DIR = self.orig_images_dir
+        server.STATES_DIR = self.orig_states_dir
+        server.CTX = self.orig_ctx
+        server.TRASH = self.orig_trash
         server.DONE = self.orig_s_done
         server.AGENTS_LOG = self.orig_agents_log
         server.NEW_IDE_DIR = self.orig_new_ide_dir

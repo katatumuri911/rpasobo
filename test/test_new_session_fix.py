@@ -219,6 +219,8 @@ class TestNewSessionFix(unittest.TestCase):
         self.assertEqual(img.get("speed_lora_strength"), 0.8)
         self.assertEqual(img.get("base_positive"), "masterpiece, best quality, ultra-detailed, anime style, glossy skin, motion lines, large breasts, cleavage, ")
         self.assertEqual(img.get("base_negative"), "worst quality, low quality, bad anatomy, bad proportions, missing limbs, extra limbs, bad hands, mutated hands, missing fingers, text, watermark, signature, multiple girls,")
+        self.assertEqual(st.get("time_last_turn"), 0)
+        self.assertEqual(st.get("time_silent_until_turn"), 0)
 
     def test_2_create_session_time_inference_and_notice_cleanup(self):
         """シナリオ文面から elapsed_time が自動推論され、rotation_notice 等が残らないこと"""

@@ -27,7 +27,7 @@ class TestSpeedupV31(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_sp31_")
         self.orig_dirs = {}
-        for name in ("DATA", "SESS_DIR", "STATES_DIR", "RAG_DIR", "SENT", "CTX", "OUTBOX", "DONE"):
+        for name in ("DATA", "SESS_DIR", "STATES_DIR", "IMAGES_DIR", "CHOICES_DIR", "RAG_DIR", "SENT", "CTX", "TRASH", "OUTBOX", "DONE"):
             self.orig_dirs[name] = getattr(server, name, None)
             path = os.path.join(self.tmp, name.lower())
             os.makedirs(path, exist_ok=True)
@@ -58,7 +58,7 @@ class TestSpeedupV31(unittest.TestCase):
         os.environ.pop("RPCHAT_CORE_ANCHOR", None)
 
     def test_T1_consolidation_time_rule(self):
-        """T1: 睡眠プロセスのプロンプトに禁止レベルの時間進行ルールが含まれる (F1)"""
+        """T1: 睡眠プロセスでは時間帯を変更せず確定済みとするルールが含まれる"""
         s = server.create_session({
             "title": "テスト",
             "ide_session": "ide-1",
@@ -70,8 +70,8 @@ class TestSpeedupV31(unittest.TestCase):
 
         ctx = server.build_consolidation_context(s, m)
         texts = "\n".join(sec.get("text", "") for sec in ctx.get("sections", []))
-        self.assertIn("【禁止】戦闘中、セックス中では、時間帯を進めてはならない", texts)
-        self.assertIn("day は日付が変わった時だけ +1", texts)
+        self.assertIn("作中時間は既に確定している。時間帯・日付は変更しない", texts)
+        self.assertIn("elapsed_time は出力不要", texts)
 
     def test_T2_memories_merge_rule_and_event(self):
         """T2: モデルが rule を返したターンでもキーワード抽出の event が併存登録される (F2)"""

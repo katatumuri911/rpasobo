@@ -121,14 +121,18 @@ class TestBoostPriorityIntegration(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp(prefix="test_boost_prio_")
         self.orig_data = ms.DATA
         self.orig_rag = ms.RAG_DIR
+        self.orig_trash = ms.TRASH
         ms.DATA = self.test_dir
         ms.RAG_DIR = os.path.join(self.test_dir, "rag")
+        ms.TRASH = os.path.join(self.test_dir, "trash")
         os.makedirs(ms.RAG_DIR, exist_ok=True)
+        os.makedirs(ms.TRASH, exist_ok=True)
         ms._memory_cache.clear()
 
     def tearDown(self):
         ms.DATA = self.orig_data
         ms.RAG_DIR = self.orig_rag
+        ms.TRASH = self.orig_trash
         ms._memory_cache.clear()
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
@@ -279,13 +283,17 @@ class TestBoostPriorityServerAPI(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp(prefix="test_boost_api_")
         self.orig_data = server.DATA
         self.orig_sess = server.SESS_DIR
+        self.orig_trash = server.TRASH
         self.orig_ms_data = ms.DATA
         self.orig_ms_rag = ms.RAG_DIR
+        self.orig_ms_trash = ms.TRASH
 
         server.DATA = ms.DATA = os.path.join(self.test_dir, "data")
         server.SESS_DIR = os.path.join(server.DATA, "sessions")
+        server.TRASH = ms.TRASH = os.path.join(server.DATA, "trash")
         ms.RAG_DIR = os.path.join(server.DATA, "rag")
         os.makedirs(server.SESS_DIR, exist_ok=True)
+        os.makedirs(server.TRASH, exist_ok=True)
         os.makedirs(ms.RAG_DIR, exist_ok=True)
 
         server.session_cache.clear()
@@ -301,8 +309,10 @@ class TestBoostPriorityServerAPI(unittest.TestCase):
         self.httpd.server_close()
         server.DATA = self.orig_data
         server.SESS_DIR = self.orig_sess
+        server.TRASH = self.orig_trash
         ms.DATA = self.orig_ms_data
         ms.RAG_DIR = self.orig_ms_rag
+        ms.TRASH = self.orig_ms_trash
         server.session_cache.clear()
         ms._memory_cache.clear()
         shutil.rmtree(self.test_dir, ignore_errors=True)

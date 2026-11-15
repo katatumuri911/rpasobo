@@ -1187,9 +1187,10 @@ class TestRotationPipeline(unittest.TestCase):
         texts = "\n".join(sec.get("text", "") for sec in ctx["sections"])
         self.assertIn("放課後に告白した", texts)   # 既存memoを引き継いで書き直す
         self.assertIn("1日目・夕方", texts)       # 直前の作中時間を提示
-        self.assertIn("elapsed_time", texts)      # 作中時間の確定タスク
+        self.assertIn("作中時間は既に確定している。時間帯・日付は変更しない", texts)
+        self.assertIn("elapsed_time は出力不要", texts)
     # -------------------------------------------------------------
-    # T34: 睡眠プロセスの応答が memo / 作中時間 / state に反映され、回転が再開する
+    # T34: 睡眠プロセスの応答が memo / state に反映され、作中時間は維持され、回転が再開する
     # -------------------------------------------------------------
     def test_T34_consolidation_reply_applies_time_and_resumes_rotation(self):
         s = self._create_dummy_session(user_turns=30)
@@ -1220,8 +1221,8 @@ class TestRotationPipeline(unittest.TestCase):
 
         s2 = server.load(sid)
         self.assertEqual(s2["setting"]["memo"], "新あらすじ（1日目夜の告白）")
-        self.assertEqual(s2["setting"]["elapsed_time"], {"day": 2, "period": "早朝"})
-        self.assertEqual(s2["setting"]["turns_in_period"], 0)
+        self.assertEqual(s2["setting"]["elapsed_time"], {"day": 1, "period": "夜"})
+        self.assertEqual(s2["setting"]["turns_in_period"], 7)
         self.assertFalse(any(m.get("consolidation_status") for m in s2["messages"]))
         self.assertTrue(server.rotation_idle(s2))          # cutover 可能に戻る
 

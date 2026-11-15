@@ -48,7 +48,8 @@ TEST_TITLE_EXACT = {
     "Google Test Session", "Google Choices Session",
     "RAGテスト", "RAGエラーテスト", "サブタスクテスト", "タイムアウトテスト",
     "空本文テスト", "3回空テスト", "選択肢ステータステスト", "bad再ポークテスト",
-    "成功リセットテスト", "perfログテスト", "spillテスト", "compactテスト", "時間テスト"
+    "成功リセットテスト", "perfログテスト", "spillテスト", "compactテスト", "時間テスト",
+    "test", "setting_test", "test_time_progression", "Txテスト", "slot_test"
 }
 
 TEST_TITLE_PATTERNS = [
@@ -72,6 +73,8 @@ def is_test_session(sid, data):
     title = (setting.get("title") or data.get("title") or "").strip()
     char = setting.get("character") or data.get("character") or {}
     char_name = (char.get("name") if isinstance(char, dict) else "") or ""
+    scenario = (setting.get("scenario") or data.get("scenario") or "").strip()
+    instructions = (setting.get("instructions") or data.get("instructions") or "").strip()
     msgs = data.get("messages", [])
     if not isinstance(msgs, list):
         msgs = []
@@ -90,6 +93,19 @@ def is_test_session(sid, data):
         first_txt = msgs[0].get("text", "") if isinstance(msgs[0], dict) else ""
         if first_txt in ("初期化", "テスト", "こんにちは！") and title in TEST_TITLE_EXACT:
             return True, f"dummy_msg_pattern({first_txt})"
+
+    # 4. 「新しいチャンネル」かつキャラ設定なしのテスト残骸
+    if title == "新しいチャンネル" and not char_name and not scenario and not instructions:
+        if mcount == 0:
+            return True, "new_channel_empty_dummy"
+        dummy_texts = {"u1", "u2", "まだ戦う", "昼ご飯にしよう", "テスト", "test", "初期化"}
+        first_txt = msgs[0].get("text", "") if isinstance(msgs[0], dict) else ""
+        last_txt = msgs[-1].get("text", "") if isinstance(msgs[-1], dict) else ""
+        first_id = msgs[0].get("id", "") if isinstance(msgs[0], dict) else ""
+        if first_txt in dummy_texts or last_txt in dummy_texts or first_id in ("u1", "u30", "u40"):
+            return True, f"new_channel_dummy_text({first_txt or first_id})"
+        if all(isinstance(m, dict) and (m.get("id", "").startswith("u") or m.get("id", "").startswith("a")) for m in msgs):
+            return True, "new_channel_sequential_dummy_ids"
 
     return False, "real_session"
 

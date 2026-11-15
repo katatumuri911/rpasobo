@@ -107,23 +107,23 @@ class TestServerSentTransactionAndStop(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="test_lapi_srv_")
-        self.orig_dirs = {
-            "DATA": server.DATA,
-            "SESS_DIR": server.SESS_DIR,
-        }
-        server.DATA = self.tmp
-        server.SESS_DIR = os.path.join(self.tmp, "sessions")
-        os.makedirs(server.SESS_DIR, exist_ok=True)
-        os.makedirs(os.path.join(self.tmp, "sent"), exist_ok=True)
-        self.orig_ms_dirs = (ms.DATA, ms.RAG_DIR)
+        self.orig_dirs = {}
+        for name in ("DATA", "SESS_DIR", "STATES_DIR", "IMAGES_DIR", "CHOICES_DIR", "RAG_DIR", "SENT", "CTX", "TRASH", "OUTBOX", "DONE"):
+            self.orig_dirs[name] = getattr(server, name, None)
+            path = os.path.join(self.tmp, name.lower())
+            os.makedirs(path, exist_ok=True)
+            setattr(server, name, path)
+        self.orig_ms_dirs = (ms.DATA, ms.RAG_DIR, ms.TRASH)
         ms.DATA = self.tmp
         ms.RAG_DIR = os.path.join(self.tmp, "rag")
+        ms.TRASH = server.TRASH
         os.makedirs(ms.RAG_DIR, exist_ok=True)
 
     def tearDown(self):
         for k, v in self.orig_dirs.items():
-            setattr(server, k, v)
-        ms.DATA, ms.RAG_DIR = self.orig_ms_dirs
+            if v is not None:
+                setattr(server, k, v)
+        ms.DATA, ms.RAG_DIR, ms.TRASH = self.orig_ms_dirs
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_inflight_and_prev_sent_saved_in_build_context(self):
@@ -309,6 +309,17 @@ class TestStopApiBehavior(unittest.TestCase):
 
 class TestWaitInputInstructions(unittest.TestCase):
     """5. wait_input.py のツール使用指示文テスト"""
+
+    def setUp(self):
+        import wait_input
+        self.tmp = tempfile.mkdtemp(prefix="test_wait_ctx_")
+        self.orig_ctx = wait_input.CTX_DIR
+        wait_input.CTX_DIR = self.tmp
+
+    def tearDown(self):
+        import wait_input
+        wait_input.CTX_DIR = self.orig_ctx
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_wait_input_inline_instruction(self):
         """通常インライン時（must_spill=False, files=[]）の厳格なツール禁止指示"""

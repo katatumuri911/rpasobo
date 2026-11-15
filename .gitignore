@@ -11,11 +11,38 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
 .venv/
 venv/
+env/
+
+# AI agents & task temporary files
+.agents/
+.task*.txt
+
+# Logs & temp files
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Testing, coverage, and type check caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js
+node_modules/
 
 # Editor and operating system files
 .DS_Store
 Thumbs.db
+desktop.ini
+*.swp
+*~
 .vscode/
 .idea/
