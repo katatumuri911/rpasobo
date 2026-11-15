@@ -35,6 +35,71 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
+# Media & Heavy Files (Images, Videos, Audio)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.tif
+*.ico
+*.psd
+*.ai
+*.raw
+*.svg
+# 既存のアプリアイコン等は除外対象から外して追跡を維持
+!public/icon*.png
+
+*.mp4
+*.webm
+*.mkv
+*.avi
+*.mov
+*.wmv
+*.flv
+*.m4v
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.m4a
+*.aac
+*.wma
+
+# Archives & Large Binary Files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.iso
+*.bin
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Machine Learning Models & Heavy Datasets
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.gguf
+*.tflite
+*.h5
+*.parquet
+*.arrow
+*.sqlite
+*.sqlite3
+*.db
+*.pdf
+
 # Node.js
 node_modules/
 

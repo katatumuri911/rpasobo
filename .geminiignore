@@ -19,3 +19,76 @@ venv/
 
 # ログファイル
 *.log
+
+# メディア・画像・動画・音声ファイル（AIの勝手な読み込み・トークン消費防止）
+# 画像ファイル
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tiff
+*.tif
+*.ico
+*.psd
+*.ai
+*.raw
+*.svg
+
+# 動画ファイル
+*.mp4
+*.webm
+*.mkv
+*.avi
+*.mov
+*.wmv
+*.flv
+*.m4v
+
+# 音声ファイル
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.m4a
+*.aac
+*.wma
+
+# アーカイブ・圧縮ファイル
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.iso
+
+# 巨大バイナリ・機械学習モデル・重いデータファイル
+*.bin
+*.exe
+*.dll
+*.so
+*.dylib
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.gguf
+*.tflite
+*.h5
+*.parquet
+*.arrow
+*.sqlite
+*.sqlite3
+*.db
+*.pdf
+
+# 依存パッケージ・一時キャッシュ
+node_modules/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
