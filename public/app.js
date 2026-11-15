@@ -386,7 +386,7 @@ function closeTopmostLayer() {
     return true;
   }
   if (document.body && document.body.classList && document.body.classList.contains("side-open")) {
-    document.body.classList.remove("side-open");
+    setDrawerOpen(false, { reason: "closeTopmost" });
     return true;
   }
   return false;
@@ -762,7 +762,7 @@ async function switchTo(id) {
   if ($("elapsedModal")) $("elapsedModal").classList.add("hidden");
   await poll();
   renderSessions();
-  document.body.classList.remove("side-open");
+  setDrawerOpen(false, { reason: "switch" });
   updateFabState();
   autoResizeInput();
   updateHeaderAndSideStatus();
@@ -1303,7 +1303,7 @@ function initPushNotifications() {
       if (event.data && event.data.type === "NAVIGATE_TO") {
         const { sessionId, messageId } = event.data;
         if (typeof closeLightbox === "function") closeLightbox();
-        document.body.classList.remove("side-open");
+        setDrawerOpen(false, { reason: "pushNavigate" });
         if ($("promptModal") && !$("promptModal").classList.contains("hidden")) {
           $("promptModal").classList.add("hidden");
         }
@@ -8679,12 +8679,11 @@ if ($("ragMemSave")) $("ragMemSave").onclick = saveRagMem;
 $("editSave").onclick = saveEdit;
 $("editCancel").onclick = () => { editTarget = null; $("editModal").classList.add("hidden"); updateFabState(); };
 $("sideToggle").onclick = () => {
-  document.body.classList.toggle("side-open");
-  updateFabState();
+  const currentlyOpen = Boolean(document.body && document.body.classList && document.body.classList.contains("side-open"));
+  setDrawerOpen(!currentlyOpen, { reason: "sideToggle" });
 };
 $("sideBackdrop").onclick = () => {
-  document.body.classList.remove("side-open");
-  updateFabState();
+  setDrawerOpen(false, { reason: "backdrop" });
 };
 $("rpToggle").onclick = () => {
   rpMode = !rpMode;
@@ -8709,8 +8708,7 @@ if ($("mobileFab")) {
   $("mobileFab").onclick = () => {
     // 開いている最前面のレイヤーを1つ閉じる。何も無ければドロワーを開く
     if (closeTopmostLayer()) { updateFabState(); return; }
-    if (document.body && document.body.classList) document.body.classList.add("side-open");
-    updateFabState();
+    setDrawerOpen(true, { reason: "fab" });
   };
 }
 // タップが速すぎても青い反応が見えるように、押下時に一瞬だけ青いクラスを付ける。
@@ -8877,8 +8875,7 @@ if ($("revealSettings")) $("revealSettings").onclick = () => { hideReveal(); if 
 if ($("revealModel"))    $("revealModel").onclick    = () => { hideReveal(); openAiToolModal(); syncActionControlsVisibility(); };
 if ($("openAiToolBtn"))  $("openAiToolBtn").onclick  = () => openAiToolModal();
 if ($("sideAiToolBtn"))  $("sideAiToolBtn").onclick  = () => {
-  if (document.body && document.body.classList) document.body.classList.remove("side-open");
-  updateFabState();
+  setDrawerOpen(false, { reason: "openAiTool" });
   openAiToolModal();
 };
 if ($("aiToolModalClose")) $("aiToolModalClose").onclick = closeAiToolModal;
@@ -8985,14 +8982,13 @@ if ($("sideRpToggle")) {
 }
 if ($("sideRagToggle")) {
   $("sideRagToggle").onclick = () => {
-    if (document.body && document.body.classList) document.body.classList.remove("side-open");
-    updateFabState();
+    setDrawerOpen(false, { reason: "openRag" });
     openRag();
   };
 }
 if ($("sideSettingsToggle")) {
   $("sideSettingsToggle").onclick = () => {
-    if (document.body && document.body.classList) document.body.classList.remove("side-open");
+    setDrawerOpen(false, { reason: "openSettings" });
     if ($("settingsPanel")) {
       const isHidden = $("settingsPanel").classList.toggle("hidden");
       if (!isHidden) { loadOptions(); loadIdeSessions(); updatePushStatus(); }
@@ -9027,6 +9023,7 @@ function onLayoutChange() {
   closeFavModelSheet();
     if ($("elapsedModal")) $("elapsedModal").classList.add("hidden");
   }
+  syncDrawerDesktopAccessibility();
   syncFootBarPlacement();
   syncViewportVars();
   updateFabState();
@@ -9418,7 +9415,657 @@ $("promptRegen").onclick = async () => {
   wakePoll();
 };
 
+/* ============================================================
+ * ドロワー開閉の単一窓口
+ * 実コードの真実源（body.side-open）とテスト互換クラス（.open）を同期
+ * ============================================================ */
+const DRAWER_OPEN_CLASS = 'open';
+const OVERLAY_OPEN_CLASS = 'open';
+const BODY_DRAWER_OPEN_CLASS = 'side-open';
+
+/** DOM だけを更新する純粋関数（テストから直接呼べる） */
+function applyDrawerState({ drawerEl, overlayEl, toggleEl, open }) {
+  const doc = drawerEl && drawerEl.ownerDocument ? drawerEl.ownerDocument : (typeof document !== 'undefined' ? document : null);
+  const win = doc && doc.defaultView ? doc.defaultView : (typeof window !== 'undefined' ? window : null);
+  const isMobile = (win && typeof win.isMobileLayout === 'function')
+    ? win.isMobileLayout()
+    : (typeof isMobileLayout === 'function' ? isMobileLayout() : true);
+
+  const isOpenNow = Boolean(open);
+
+  if (!isMobile) {
+    if (doc && doc.body && doc.body.classList) doc.body.classList.remove(BODY_DRAWER_OPEN_CLASS);
+    if (drawerEl) {
+      drawerEl.classList.remove(DRAWER_OPEN_CLASS);
+      drawerEl.removeAttribute('aria-hidden');
+      if ('inert' in drawerEl) drawerEl.inert = false;
+      drawerEl.removeAttribute('inert');
+    }
+    if (overlayEl) overlayEl.classList.remove(OVERLAY_OPEN_CLASS);
+    if (toggleEl) toggleEl.removeAttribute('aria-expanded');
+    return;
+  }
+
+  if (doc && doc.body && doc.body.classList) {
+    doc.body.classList.toggle(BODY_DRAWER_OPEN_CLASS, isOpenNow);
+  }
+  if (drawerEl) {
+    drawerEl.classList.toggle(DRAWER_OPEN_CLASS, isOpenNow);
+    if (isOpenNow) {
+      drawerEl.removeAttribute('aria-hidden');          // P-15
+    } else {
+      drawerEl.setAttribute('aria-hidden', 'true');
+    }
+    if ('inert' in drawerEl) drawerEl.inert = !isOpenNow;
+    if (isOpenNow) drawerEl.removeAttribute('inert');
+    else drawerEl.setAttribute('inert', '');
+  }
+  if (overlayEl) overlayEl.classList.toggle(OVERLAY_OPEN_CLASS, isOpenNow);
+  if (toggleEl) toggleEl.setAttribute('aria-expanded', String(isOpenNow));
+}
+
+/**
+ * アプリ固有の副作用つきアダプタ（P-07 / P-19）
+ * @param {(meta?:object)=>void} [onBeforeChange] スワイプ以外の変更前に呼ぶ（保留中 settle の確定）
+ */
+function createDrawerAdapter({ drawerEl, overlayEl, toggleEl, onBeforeChange }) {
+  function isOpen() {
+    const doc = drawerEl && drawerEl.ownerDocument ? drawerEl.ownerDocument : (typeof document !== 'undefined' ? document : null);
+    if (doc && doc.body && doc.body.classList && doc.body.classList.contains(BODY_DRAWER_OPEN_CLASS)) return true;
+    return Boolean(drawerEl && drawerEl.classList && drawerEl.classList.contains(DRAWER_OPEN_CLASS));
+  }
+
+  function setOpen(open, meta) {
+    const info = meta || { reason: 'toggle' };
+    if (typeof onBeforeChange === 'function') onBeforeChange(info);   // P-19
+    applyDrawerState({ drawerEl: drawerEl, overlayEl: overlayEl, toggleEl: toggleEl, open: open });
+
+    if (typeof closeMoreMenu === 'function') closeMoreMenu();
+    if (typeof hideReveal === 'function') hideReveal();
+    if (typeof updateFabState === 'function') updateFabState();
+
+    if (info.manageFocus !== false && info.reason !== 'swipe') {
+      const isMobile = typeof isMobileLayout === 'function' ? isMobileLayout() : true;
+      if (isMobile) {
+        if (open) {
+          drawerEl.setAttribute('tabindex', '-1');
+          if (typeof drawerEl.focus === 'function') drawerEl.focus({ preventScroll: true }); // F-21
+        } else if (toggleEl && typeof toggleEl.focus === 'function') {
+          toggleEl.focus({ preventScroll: true });
+        }
+      }
+    }
+  }
+  return { isOpen: isOpen, setOpen: setOpen };
+}
+
+/* ============================================================
+ * サイドドロワー フリック／スワイプ開閉コントローラ
+ *
+ * 不変条件:
+ * I-1: PENDING / DRAGGING_X 以外の状態では touchmove が一切のDOM更新を行わない
+ * I-2: activeTouchId の指だけがジェスチャを駆動し、2本目以降の指では状態遷移しない
+ * I-3: ロックフレーム（PENDING → DRAGGING_X）の移動量は 0（dragOriginX = curX）
+ * I-4: フリック成立時は位置スナップより速度方向（vx > 0）が常に優先される
+ * I-5: settle 完了後・abort 後・flush 後・destroy 後はインライン style と
+ *      is-dragging / is-peeking クラスが一切残らない
+ * I-6: 除外対象（入力欄・横スクロール要素・選択中・モーダル・デスクトップ）では
+ *      指を離すまで IGNORED が維持される
+ * I-7: タイムスタンプは getNow(e) 単調時刻ソースに統一する
+ *
+ * 判定マトリクス:
+ * 閉 | vx >= +0.45 かつ |dxWindow| >= 18 -> 開
+ * 閉 | フリック不成立 | progress >= 0.35 -> 開 / 未満 -> 閉
+ * 開 | vx <= -0.45 かつ |dxWindow| >= 18 -> 閉
+ * 開 | vx >= +0.45 かつ |dxWindow| >= 18 -> 開のまま
+ * 開 | フリック不成立 | progress > 0.65 -> 開のまま / 以下 -> 閉
+ * 閉 | 開始直後に左方向（dx <= 0） -> IGNORED（ラッチ）
+ * -  | touchcancel -> progress >= 0.5 -> 開
+ * -  | 静止（now - lastMove > 90ms） -> vx = 0 として開度判定
+ * ============================================================ */
+const DRAWER_SWIPE_CONFIG = {
+  EDGE_ZONE_PX: 40,              // iOS戻るジェスチャと競合する場合は 24–32 に調整
+  DEADZONE_PX: 10,
+  DIR_RATIO_EDGE: 1.5,
+  DIR_RATIO_BODY: 2.2,
+  VELOCITY_WINDOW_MS: 100,
+  STATIONARY_TIMEOUT_MS: 90,
+  FLICK_VELOCITY_PX_MS: 0.45,
+  FLICK_MIN_DELTA_PX: 18,
+  SNAP_OPEN_RATIO: 0.35,
+  SNAP_CLOSE_RATIO: 0.65,
+  CLICK_SUPPRESS_MS: 350,
+  DEFAULT_DRAWER_WIDTH: 280,
+  SAMPLE_KEEP_MS: 150,           // F-12
+  SAMPLE_MAX: 8,                 // F-12
+  MIN_PHYSICAL_DT_MS: 16,        // F-11
+  MOBILE_MEDIA_QUERY: '(max-width: 768px)'
+};
+
+/* 実コードのクラス・IDに合わせた除外セレクタ */
+const DRAWER_SWIPE_EXCLUDE_SELECTOR = [
+  'textarea', 'input', 'select', 'option',
+  '[contenteditable="true"]', '[contenteditable=""]',
+  '[data-no-drawer-swipe]',
+  '#prompt-toolbar', '.prompt-toolbar',
+  '.choices-container', '.choice-slot', '.choices',
+  '.choices-box', '.choices-panel', '.choices-toggle-btn',
+  '.choices-switch', '.choices-reroll-btn', '.choice-item-btn',
+  '.more-menu', '.more-sheet', '.more-backdrop',
+  '.msg-actions', '.user-msg-actions', '.user-msg-action-pop',
+  '.toast-container', '.toast', '#toast',
+  '#mobileFab', '#mobileTurnCluster', '#mobileActionToggle', '#mobileReveal',
+  'pre', 'code', 'table'
+].join(', ');
+
+const DRAWER_SWIPE_BOUND = new WeakMap();
+
+/**
+ * @param {Object} o
+ * @param {HTMLElement} o.drawerEl
+ * @param {HTMLElement} o.overlayEl
+ * @param {HTMLElement} [o.chatAreaEl]
+ * @param {(open:boolean, meta?:object)=>void} o.setOpen
+ * @param {()=>boolean} o.isOpen
+ * @param {()=>void} [o.onDragStart]
+ * @param {()=>boolean} [o.isMobileViewport]      // F-01 テスト注入
+ * @param {(e?:Event)=>number} [o.now]            // F-04 テスト注入
+ * @param {()=>number} [o.getDrawerWidth]
+ * @param {(el:HTMLElement)=>number} [o.getTransitionDurationMs]  // P-10
+ * @param {boolean} [o.force]                     // P-21 既存バインドを破棄して再バインド
+ * @param {object} [o.config]
+ */
+function initDrawerSwipe(o) {
+  if (!o || !o.drawerEl || !o.overlayEl) return null;
+  if (typeof o.isOpen !== 'function' || typeof o.setOpen !== 'function') return null;
+
+  const drawerEl = o.drawerEl;
+  const overlayEl = o.overlayEl;
+  const chatAreaEl = o.chatAreaEl || null;
+  const onDragStart = typeof o.onDragStart === 'function' ? o.onDragStart : null;
+  const manageFocus = o.manageFocus !== false;
+  const cfg = Object.assign({}, DRAWER_SWIPE_CONFIG, o.config || {});
+
+  if (DRAWER_SWIPE_BOUND.has(drawerEl)) {                 // P-21
+    if (!o.force) return DRAWER_SWIPE_BOUND.get(drawerEl);
+    const prev = DRAWER_SWIPE_BOUND.get(drawerEl);
+    if (prev && typeof prev.destroy === 'function') prev.destroy();
+  }
+
+  const gesture = {
+    state: 'IDLE', activeTouchId: null, startedOpen: false, startedFromEdge: false,
+    touchStartX: 0, touchStartY: 0, dragOriginX: 0,
+    drawerWidth: cfg.DEFAULT_DRAWER_WIDTH, currentProgress: 0,
+    samples: [], suppressClickUntil: 0, lastMetrics: null            // P-08
+  };
+
+  let finalizeToken = 0, finalizeTimer = null, onTransitionEnd = null, destroyed = false;
+
+  /* ---------- ユーティリティ ---------- */
+  function getNow(e) {                                               // F-04 / I-7
+    if (typeof o.now === 'function') return o.now(e);
+    if (e && typeof e._testTimeStamp === 'number') return e._testTimeStamp;
+    return (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now() : Date.now();
+  }
+  function isMobileViewport() {                                      // F-01
+    if (typeof o.isMobileViewport === 'function') return Boolean(o.isMobileViewport());
+    if (typeof window.matchMedia === 'function') return window.matchMedia(cfg.MOBILE_MEDIA_QUERY).matches;
+    return window.innerWidth <= 768;
+  }
+  function isElementRendered(el) {                                   // F-08 / P-02
+    if (!el || !el.classList) return false;
+    if (el.classList.contains('hidden')) return false;
+    if (el.getAttribute('aria-hidden') === 'true') return false;
+    if (el.hasAttribute('inert')) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    return !(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0');
+  }
+  function hasActiveModal() {
+    const sels = [
+      '.modal.active', '.modal.open', '.modal:not(.hidden)',
+      '[role="dialog"]:not(.hidden)', '[aria-modal="true"]',
+      '#settingsPanel:not(.hidden)', '#lightbox:not(.hidden)',
+      '.more-sheet', '.fav-sheet-backdrop'
+    ];
+    for (let s = 0; s < sels.length; s++) {
+      const list = document.querySelectorAll(sels[s]);
+      for (let i = 0; i < list.length; i++) {
+        const el = list[i];
+        if (el === drawerEl || el === overlayEl) continue;
+        if (isElementRendered(el)) return true;
+      }
+    }
+    return false;
+  }
+  function hasActiveTextSelection() {
+    if (typeof window.getSelection !== 'function') return false;
+    const sel = window.getSelection();
+    return Boolean(sel && !sel.isCollapsed && String(sel.toString()).trim().length > 0);
+  }
+  function isExcludedTarget(target) {
+    const elTarget = target && target.nodeType === 3 ? target.parentElement : target;
+    if (!elTarget || typeof elTarget.closest !== 'function') return true;
+    if (elTarget.closest(DRAWER_SWIPE_EXCLUDE_SELECTOR)) return true;
+    let el = elTarget;
+    while (el && el !== drawerEl && el !== document.body && el !== document.documentElement) {
+      const style = window.getComputedStyle(el);
+      if (style && (style.overflowX === 'auto' || style.overflowX === 'scroll') &&
+          el.scrollWidth > el.clientWidth + 2) return true;
+      el = el.parentElement;
+    }
+    return false;
+  }
+  function measureDrawerWidth() {                                    // F-23
+    if (typeof o.getDrawerWidth === 'function') {
+      const w = o.getDrawerWidth();
+      if (Number.isFinite(w) && w > 0) return w;
+    }
+    const rect = drawerEl.getBoundingClientRect ? drawerEl.getBoundingClientRect() : null;
+    if (rect && rect.width > 0) return rect.width;
+    if (drawerEl.offsetWidth > 0) return drawerEl.offsetWidth;
+    const computed = parseFloat(window.getComputedStyle(drawerEl).width);
+    if (Number.isFinite(computed) && computed > 0) return computed;
+    return cfg.DEFAULT_DRAWER_WIDTH;
+  }
+  function getTransitionMs() {                                       // P-10
+    if (typeof o.getTransitionDurationMs === 'function') {
+      const ms = o.getTransitionDurationMs(drawerEl);
+      if (Number.isFinite(ms) && ms >= 0) return ms;
+    }
+    return (parseFloat(window.getComputedStyle(drawerEl).transitionDuration) || 0) * 1000;
+  }
+  function findTrackedTouch(list) {
+    if (!list || gesture.activeTouchId === null) return null;
+    for (let i = 0; i < list.length; i++) if (list[i].identifier === gesture.activeTouchId) return list[i];
+    return null;
+  }
+  function touchIdOf(t) { return (t && typeof t.identifier === 'number') ? t.identifier : 0; }
+  function pushSample(x, t) {                                        // F-11 / F-12
+    const list = gesture.samples;
+    const last = list[list.length - 1];
+    if (last && last.t === t) { last.x = x; return; }
+    list.push({ x: x, t: t });
+    while (list.length > cfg.SAMPLE_MAX) list.shift();
+    while (list.length > 1 && t - list[0].t > cfg.SAMPLE_KEEP_MS) list.shift();
+  }
+
+  /* ---------- settle / finalize / flush（F-02 / F-22 / P-19） ---------- */
+  function cancelFinalize() {
+    finalizeToken++;
+    if (finalizeTimer !== null) { clearTimeout(finalizeTimer); finalizeTimer = null; }
+    if (onTransitionEnd) { drawerEl.removeEventListener('transitionend', onTransitionEnd); onTransitionEnd = null; }
+  }
+  function finalizeVisual() {                                        // I-5
+    drawerEl.style.transform = '';
+    overlayEl.style.opacity = '';
+    overlayEl.classList.remove('is-peeking');
+  }
+  /** 保留中の settle を即時確定（別経路の開閉・destroy から呼ぶ / P-19） */
+  function flush() {
+    cancelFinalize();
+    finalizeVisual();
+  }
+  function settle(shouldOpen) {
+    cancelFinalize();
+    const token = finalizeToken;
+    const tx = shouldOpen ? 0 : -gesture.drawerWidth;
+
+    void drawerEl.offsetWidth;                      // ドラッグ最終フレームを確定
+    drawerEl.classList.remove('is-dragging');       // transition 復帰
+    overlayEl.classList.remove('is-dragging', 'is-peeking');
+    drawerEl.style.transform = 'translate3d(' + tx + 'px, 0, 0)';
+    overlayEl.style.opacity = shouldOpen ? '1' : '0';
+
+    o.setOpen(Boolean(shouldOpen), { reason: 'swipe', manageFocus: manageFocus });
+
+    const durMs = getTransitionMs();
+
+    function done() {
+      if (token !== finalizeToken) return;          // 新しいドラッグが始まっていたら触らない
+      cancelFinalize();
+      finalizeVisual();
+    }
+    if (durMs <= 50) { done(); return; }            // テスト / reduced-motion 経路
+
+    onTransitionEnd = function (ev) {
+      if (ev.target === drawerEl && ev.propertyName === 'transform') done();
+    };
+    drawerEl.addEventListener('transitionend', onTransitionEnd, { once: true });
+    finalizeTimer = setTimeout(done, durMs + 120);  // transitionend 不発時の保険
+  }
+
+  /* ---------- 状態 ---------- */
+  function clearGestureFlags() {
+    gesture.state = 'IDLE'; gesture.activeTouchId = null; gesture.samples = [];
+  }
+  function markIgnored(e) {                                          // F-06
+    const t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0]) || null;
+    gesture.state = 'IGNORED';
+    gesture.activeTouchId = t ? touchIdOf(t) : gesture.activeTouchId;
+    gesture.samples = [];
+  }
+  function recoverFromStaleDrag(e) {                                 // F-05
+    if (gesture.state !== 'DRAGGING_X') return false;
+    if (findTrackedTouch(e.touches)) return true;                    // 2本目 → 継続（I-2）
+    flush();
+    clearGestureFlags();
+    return false;
+  }
+  function abortSwipeGesture() {
+    if (gesture.state === 'DRAGGING_X') { settle(gesture.startedOpen); clearGestureFlags(); return; }
+    if (gesture.state !== 'IDLE') clearGestureFlags();
+  }
+
+  /* ---------- イベント ---------- */
+  function onTouchStart(e) {
+    if (recoverFromStaleDrag(e)) return;
+
+    if (!isMobileViewport()) { markIgnored(e); return; }
+
+    if (!e.touches || e.touches.length !== 1) {                      // P-09
+      if (gesture.state === 'PENDING') gesture.state = 'IGNORED';     // 追跡IDは維持
+      else markIgnored(e);
+      return;
+    }
+
+    const rawTarget = (e.changedTouches && e.changedTouches[0] && e.changedTouches[0].target) || e.target;
+    const target = rawTarget && rawTarget.nodeType === 3 ? rawTarget.parentElement : rawTarget;
+    if (!target) return;
+
+    if (hasActiveModal() || hasActiveTextSelection() || isExcludedTarget(target)) {
+      markIgnored(e); return;
+    }
+
+    const touch = (e.changedTouches && e.changedTouches[0]) || e.touches[0];
+    if (!touch) return;
+
+    const currentlyOpen = Boolean(o.isOpen());
+    const startX = touch.clientX, startY = touch.clientY;
+    const inEdgeZone = startX <= cfg.EDGE_ZONE_PX;
+
+    if (!currentlyOpen) {
+      const inChatArea = chatAreaEl ? chatAreaEl.contains(target) : true;
+      const onButtonOutsideEdge = !inEdgeZone &&
+        Boolean(target.closest && target.closest('button, a, [role="button"]'));
+      if (onButtonOutsideEdge || (!inEdgeZone && !inChatArea)) { markIgnored(e); return; }
+    } else {
+      const inDrawerOrOverlay = drawerEl.contains(target) ||
+        overlayEl.contains(target) || target === overlayEl;
+      if (!inDrawerOrOverlay) { markIgnored(e); return; }
+    }
+
+    gesture.state = 'PENDING';
+    gesture.activeTouchId = touchIdOf(touch);
+    gesture.startedOpen = currentlyOpen;
+    gesture.startedFromEdge = inEdgeZone;
+    gesture.touchStartX = startX;
+    gesture.touchStartY = startY;
+    gesture.dragOriginX = startX;
+    gesture.drawerWidth = measureDrawerWidth();
+    gesture.currentProgress = currentlyOpen ? 1 : 0;
+    gesture.samples = [];
+    gesture.lastMetrics = null;                                      // P-08
+    pushSample(startX, getNow(e));
+  }
+
+  function onTouchMove(e) {
+    if (gesture.state !== 'PENDING' && gesture.state !== 'DRAGGING_X') return;   // I-1
+    const touch = findTrackedTouch(e.touches);
+    if (!touch) return;                                              // I-2
+
+    const curX = touch.clientX, curY = touch.clientY, now = getNow(e);
+
+    if (gesture.state === 'PENDING') {
+      if (hasActiveTextSelection()) { gesture.state = 'IGNORED'; gesture.samples = []; return; }
+
+      const dx = curX - gesture.touchStartX, dy = curY - gesture.touchStartY;
+      const absDx = Math.abs(dx), absDy = Math.abs(dy);
+
+      if (Math.hypot(dx, dy) < cfg.DEADZONE_PX) return;
+      if (!gesture.startedOpen && dx <= 0) { gesture.state = 'IGNORED'; gesture.samples = []; return; }
+
+      const requiredRatio = (gesture.startedFromEdge || gesture.startedOpen)
+        ? cfg.DIR_RATIO_EDGE : cfg.DIR_RATIO_BODY;
+      if (absDy >= absDx || absDx < absDy * requiredRatio) {
+        gesture.state = 'SCROLLING_Y'; gesture.samples = []; return;
+      }
+
+      cancelFinalize();                                              // F-22
+      gesture.state = 'DRAGGING_X';
+      gesture.dragOriginX = curX;                                    // I-3
+      gesture.samples = [];
+      drawerEl.classList.add('is-dragging');
+      overlayEl.classList.add('is-dragging');
+      if (!gesture.startedOpen) overlayEl.classList.add('is-peeking');
+      if (onDragStart) { try { onDragStart(); } catch (err) { /* noop */ } }
+    }
+
+    if (e.cancelable) e.preventDefault();
+
+    const dragDx = curX - gesture.dragOriginX;
+    const w = gesture.drawerWidth || cfg.DEFAULT_DRAWER_WIDTH;
+    const translateX = gesture.startedOpen
+      ? Math.max(-w, Math.min(0, dragDx))
+      : Math.max(-w, Math.min(0, -w + dragDx));
+    const progress = Math.max(0, Math.min(1, 1 - Math.abs(translateX) / w));
+
+    gesture.currentProgress = progress;
+    drawerEl.style.transform = 'translate3d(' + translateX + 'px, 0, 0)';
+    overlayEl.style.opacity = String(progress);
+    pushSample(curX, now);
+  }
+
+  function onTouchEndOrCancel(e) {
+    if (gesture.activeTouchId === null) return;
+    const ended = findTrackedTouch(e.changedTouches);
+    if (!ended) return;                                              // I-2
+    if (gesture.state !== 'DRAGGING_X') { clearGestureFlags(); return; }
+
+    const now = getNow(e), endX = ended.clientX;
+    const last = gesture.samples[gesture.samples.length - 1];
+    const isCanceled = e.type === 'touchcancel';
+    const isStationary = !last || (now - last.t > cfg.STATIONARY_TIMEOUT_MS);
+
+    let vx = 0, dxWindow = 0, path = 'ratio';
+    if (!isCanceled && !isStationary && gesture.samples.length >= 2) {   // F-11
+      let anchor = gesture.samples[0];
+      for (let i = 0; i < gesture.samples.length; i++) {
+        if (now - gesture.samples[i].t <= cfg.VELOCITY_WINDOW_MS) { anchor = gesture.samples[i]; break; }
+      }
+      const dt = now - anchor.t;
+      dxWindow = endX - anchor.x;
+      if (dt >= cfg.MIN_PHYSICAL_DT_MS) {
+        vx = dxWindow / dt;
+        if (Math.abs(vx) >= cfg.FLICK_VELOCITY_PX_MS &&
+            Math.abs(dxWindow) >= cfg.FLICK_MIN_DELTA_PX) path = 'flick';
+      }
+    }
+
+    let shouldOpen;
+    if (isCanceled) { shouldOpen = gesture.currentProgress >= 0.5; path = 'cancel'; }
+    else if (path === 'flick') shouldOpen = vx > 0;                  // I-4
+    else if (!gesture.startedOpen) shouldOpen = gesture.currentProgress >= cfg.SNAP_OPEN_RATIO;
+    else shouldOpen = gesture.currentProgress > cfg.SNAP_CLOSE_RATIO;
+
+    gesture.lastMetrics = { vx: vx, dxWindow: dxWindow, path: path, progress: gesture.currentProgress };
+    gesture.suppressClickUntil = now + cfg.CLICK_SUPPRESS_MS;        // F-17
+
+    settle(shouldOpen);
+
+    if (!gesture.startedOpen && shouldOpen) {
+      const active = document.activeElement;
+      if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') &&
+          typeof active.blur === 'function') active.blur();
+    }
+    clearGestureFlags();
+  }
+
+  function onClickCapture(e) {                                       // F-17 / F-20
+    const now = getNow(e);
+    if (gesture.suppressClickUntil > 0 && now < gesture.suppressClickUntil) {
+      e.preventDefault(); e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    } else if (gesture.suppressClickUntil > 0) {
+      gesture.suppressClickUntil = 0;
+    }
+  }
+  function onContextMenu(e) {
+    if (gesture.state === 'DRAGGING_X') e.preventDefault();
+    else if (gesture.state === 'PENDING') abortSwipeGesture();
+  }
+  function onResize() {                                              // F-24
+    if (gesture.state === 'DRAGGING_X' || gesture.state === 'PENDING') { abortSwipeGesture(); return; }
+    if (!isMobileViewport()) flush();
+  }
+  function onVisibilityChange() { if (document.hidden && gesture.state !== 'IDLE') abortSwipeGesture(); }
+  function onWindowBlur() { if (gesture.state !== 'IDLE') abortSwipeGesture(); }
+
+  document.addEventListener('touchstart', onTouchStart, { passive: true });
+  document.addEventListener('touchmove', onTouchMove, { passive: false });
+  document.addEventListener('touchend', onTouchEndOrCancel, { passive: true });
+  document.addEventListener('touchcancel', onTouchEndOrCancel, { passive: true });
+  window.addEventListener('click', onClickCapture, true);
+  window.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('blur', onWindowBlur);
+  window.addEventListener('resize', onResize);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  const controller = {
+    abort: abortSwipeGesture,
+    flush: flush,                                                    // P-19
+    destroy: function () {                                           // F-07 / P-11 / P-20
+      if (destroyed) return;
+      destroyed = true;
+      flush();
+      document.removeEventListener('touchstart', onTouchStart, { passive: true });
+      document.removeEventListener('touchmove', onTouchMove, { passive: false });
+      document.removeEventListener('touchend', onTouchEndOrCancel, { passive: true });
+      document.removeEventListener('touchcancel', onTouchEndOrCancel, { passive: true });
+      window.removeEventListener('click', onClickCapture, true);
+      window.removeEventListener('contextmenu', onContextMenu);
+      window.removeEventListener('blur', onWindowBlur);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      clearGestureFlags();
+      DRAWER_SWIPE_BOUND.delete(drawerEl);
+    },
+    getState: function () { return gesture.state; },
+    getDebugState: function () {
+      return {
+        state: gesture.state, activeTouchId: gesture.activeTouchId,
+        startedOpen: gesture.startedOpen, startedFromEdge: gesture.startedFromEdge,
+        progress: gesture.currentProgress, dragOriginX: gesture.dragOriginX,
+        drawerWidth: gesture.drawerWidth,
+        vx: gesture.lastMetrics ? gesture.lastMetrics.vx : 0,
+        dxWindow: gesture.lastMetrics ? gesture.lastMetrics.dxWindow : 0,
+        path: gesture.lastMetrics ? gesture.lastMetrics.path : null
+      };
+    }
+  };
+
+  DRAWER_SWIPE_BOUND.set(drawerEl, controller);
+  return controller;
+}
+
+let drawerAdapter = null;
+let drawerSwipeController = null;
+
+function ensureDrawerAdapter() {
+  if (drawerAdapter) return drawerAdapter;
+  const drawerEl = $('sidebar');
+  const overlayEl = $('sideBackdrop');
+  if (!drawerEl || !overlayEl) return null;
+  drawerAdapter = createDrawerAdapter({
+    drawerEl: drawerEl,
+    overlayEl: overlayEl,
+    toggleEl: $('sideToggle'),
+    onBeforeChange: function (meta) {
+      if ((!meta || meta.reason !== 'swipe') && drawerSwipeController) drawerSwipeController.flush();
+    }
+  });
+  return drawerAdapter;
+}
+
+function setDrawerOpen(open, meta) {
+  const adapter = ensureDrawerAdapter();
+  if (adapter) { adapter.setOpen(open, meta); return; }
+  if (document.body && document.body.classList) document.body.classList.toggle('side-open', Boolean(open));
+  if (typeof updateFabState === 'function') updateFabState();
+}
+
+function syncDrawerDesktopAccessibility() {
+  const drawerEl = $('sidebar');
+  if (!drawerEl) return;
+  const overlayEl = $('sideBackdrop');
+  const toggleEl = $('sideToggle');
+  if (!isMobileLayout()) {
+    if (document.body && document.body.classList) document.body.classList.remove('side-open');
+    drawerEl.classList.remove('open', 'is-dragging');
+    drawerEl.style.transform = '';
+    drawerEl.removeAttribute('aria-hidden');
+    if ('inert' in drawerEl) drawerEl.inert = false;
+    drawerEl.removeAttribute('inert');
+    if (overlayEl) {
+      overlayEl.classList.remove('open', 'is-dragging', 'is-peeking');
+      overlayEl.style.opacity = '';
+    }
+    if (toggleEl) toggleEl.removeAttribute('aria-expanded');
+  } else {
+    const isOpen = Boolean(document.body && document.body.classList && document.body.classList.contains('side-open'));
+    applyDrawerState({ drawerEl: drawerEl, overlayEl: overlayEl, toggleEl: toggleEl, open: isOpen });
+  }
+}
+
+/**
+ * スワイプ機能のみを初期化する。
+ * 【重要】既存の #sideToggle / #sideBackdrop / #mobileFab のタップ開閉ハンドラは
+ *          この関数の「外」で登録すること（?drawerSwipe=off でもタップ開閉を生かすため）。
+ */
+function initAppDrawerSwipe() {
+  const params = String(window.location.search || '');
+  if (document.body && document.body.dataset && document.body.dataset.drawerSwipe === 'off') return null;
+  if (document.body && typeof document.body.getAttribute === 'function' && document.body.getAttribute('data-drawer-swipe') === 'off') return null;
+  if (/(?:\?|&)drawerSwipe=off(?:&|$)/.test(params)) return null;
+
+  const drawerEl = document.getElementById('sidebar');
+  const overlayEl = document.getElementById('sideBackdrop');
+  if (!drawerEl || !overlayEl) return null;
+
+  const adapter = ensureDrawerAdapter();
+  drawerSwipeController = initDrawerSwipe({
+    drawerEl: drawerEl,
+    overlayEl: overlayEl,
+    chatAreaEl: document.getElementById('app'),
+    isOpen: adapter.isOpen,
+    setOpen: adapter.setOpen,
+    onDragStart: function () {
+      if (typeof closeMoreMenu === 'function') closeMoreMenu();
+      if (typeof hideReveal === 'function') hideReveal();
+    }
+  });
+
+  syncDrawerDesktopAccessibility();
+  return { controller: drawerSwipeController, setOpen: adapter.setOpen, isOpen: adapter.isOpen };
+}
+
+/* テスト用フック（副作用なし・app.js 末尾で公開） */
+if (typeof window !== 'undefined') {
+  window.__appTestHooks = Object.assign(window.__appTestHooks || {}, {
+    initDrawerSwipe: initDrawerSwipe,
+    initAppDrawerSwipe: initAppDrawerSwipe,
+    applyDrawerState: applyDrawerState,
+    DRAWER_SWIPE_CONFIG: DRAWER_SWIPE_CONFIG,
+    setDrawerOpen: setDrawerOpen,
+    syncDrawerDesktopAccessibility: syncDrawerDesktopAccessibility,
+    ensureDrawerAdapter: ensureDrawerAdapter
+  });
+}
+
 (async () => {
+  initAppDrawerSwipe();
+  syncDrawerDesktopAccessibility();
   initPromptQuickTags();
   if (typeof PromptToolbar !== "undefined") {
     PromptToolbar.observe({
