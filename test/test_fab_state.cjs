@@ -114,7 +114,6 @@ console.log("[3] FABを覆う / 自前の閉じ導線があるレイヤー（非
 for (const [name, setup] of [
   ["⋯シート", () => { moreSheets = [new El("sheet")]; }],
   ["lightbox", () => lightbox.classList.remove("hidden")],
-  ["入力中", () => { typingOn = true; }],
   ["デスクトップ", () => { mobileOn = false; }],
   ["モーダル", () => { modals = [new El("m")]; }],
   ["モーダル2枚", () => { modals = [new El("ide"), new El("fork")]; }],
@@ -125,10 +124,12 @@ for (const [name, setup] of [
 
 console.log("[4] 残留しない（条件が消えたら復帰）");
 reset();
+// 入力中（キーボード表示中）でも FAB は隠さない（フッターのすぐ上に浮く）
 typingOn = true; updateFabState();
-t("入力中は非表示", hidden());
+t("入力中も表示", !hidden());
+t("入力中も ☰", fab.textContent === "☰", fab.textContent);
 typingOn = false; updateFabState();
-t("入力を離すと復帰", !hidden());
+t("入力を離しても表示のまま", !hidden());
 reset();
 moreSheets = [new El("sheet")]; updateFabState();
 t("⋯シートで非表示", hidden());

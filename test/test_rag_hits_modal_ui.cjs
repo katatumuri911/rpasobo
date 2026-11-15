@@ -27,6 +27,7 @@ class StubEl {
     this.scrollTop = 0;
     this.tabIndex = -1;
     this._innerHTML = "";
+    this.dataset = {};
 
     const self = this;
     this.classList = {

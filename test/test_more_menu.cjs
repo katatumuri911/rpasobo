@@ -49,6 +49,29 @@ class El {
   get offsetWidth() { return this._w; }
   get offsetHeight() { return this._h; }
   get isConnected() { return true; }
+  closest(sel) {
+    let cur = this;
+    while (cur) {
+      if (typeof sel === "string") {
+        const parts = sel.split(/\s*,\s*/);
+        for (const p of parts) {
+          if (p.startsWith(".")) {
+            const classes = p.split(".").filter(Boolean);
+            if (classes.length > 0 && cur.classList && classes.every((c) => cur.classList.contains(c))) {
+              return cur;
+            }
+          } else if (cur.tagName && cur.tagName.toLowerCase() === p.toLowerCase()) {
+            return cur;
+          }
+        }
+      }
+      cur = cur.parentNode;
+    }
+    return null;
+  }
+  focus() { this._focused = true; }
+  select() { this._selected = true; }
+  setSelectionRange(s, e) { this._range = [s, e]; }
 }
 
 const docL = {};
@@ -62,6 +85,7 @@ const documentStub = {
   querySelectorAll: () => [],
   addEventListener: (t, f) => { (docL[t] = docL[t] || []).push(f); },
   removeEventListener: (t, f) => { const a = docL[t] || []; const i = a.indexOf(f); if (i >= 0) a.splice(i, 1); },
+  execCommand: () => false,
 };
 const fireDoc = (t, e) => (docL[t] || []).slice().forEach((f) => f(e));
 const docCount = (t) => (docL[t] || []).length;
@@ -71,6 +95,7 @@ const sandbox = {
   console,
   document: documentStub,
   navigator: { clipboard: { writeText: () => {} } },
+  isSecureContext: true,
   alert: () => {},
   confirm: () => true,
   innerWidth: 1200,
@@ -179,6 +204,13 @@ console.log("\n[2] PC 幅ではポップオーバー、狭い幅ではシート"
   ok(menusInBody().length === 1 && menusInBody()[0].classList.contains("more-sheet"), "狭い幅: シートが出る");
   ok(backdropsInBody().length === 1, "狭い幅: 背景が出る");
 
+  // PC 幅でも { sheet: true } を指定するとシートが出る
+  reset();
+  sandbox.innerWidth = 1200;
+  T.toggle(btn, asst, true, st, { sheet: true });
+  ok(menusInBody().length === 1 && menusInBody()[0].classList.contains("more-sheet"), "opts.sheet=true: PC幅でもシートが出る");
+  ok(backdropsInBody().length === 1, "opts.sheet=true: 背景が出る");
+
   // 下端では上にフリップ
   reset();
   sandbox.innerWidth = 1200;
@@ -208,9 +240,21 @@ console.log("\n[3] 開閉");
   ok(btn.attrs["aria-expanded"] === "false", "閉じたら aria-expanded=false");
 
   reset();
+  btn._focused = false;
   T.toggle(btn, asst, true, st);
   fireDoc("keydown", { key: "Escape", stopPropagation: () => {} });
   ok(menusInBody().length === 0, "Esc で閉じる");
+  ok(btn._focused === true, "Esc で開いたボタンにフォーカスが戻る");
+
+  // pinWrap の検証
+  reset();
+  const wrap = new El("div");
+  wrap.className = "msg-wrap user";
+  wrap.appendChild(btn);
+  T.toggle(btn, asst, true, st);
+  ok(wrap.classList.contains("actions-pinned"), "開いたとき actions-pinned が付く");
+  T.close();
+  ok(!wrap.classList.contains("actions-pinned"), "閉じたら actions-pinned が外れる");
 
   reset();
   T.toggle(btn, asst, true, st);
@@ -264,7 +308,7 @@ console.log("\n[4] スクロールでは閉じない（位置を追いかける�
 }
 
 console.log("\n[5] メニュー項目のクリックで操作が走り、閉じる");
-{
+(async () => {
   const user = { id: "u1", role: "user", text: "hi" };
   const asst = mkMsg();
   const st = mkState([user, asst]);
@@ -276,10 +320,31 @@ console.log("\n[5] メニュー項目のクリックで操作が走り、閉じ�
   T.build(asst, true, st).children.find((c) => c.textContent === "📝 本文を編集").onclick();
   ok(calls.some((c) => c[0] === "openEdit"), "「本文を編集」で openEdit を呼ぶ", calls.map((c) => c[0]));
 
+  // コピー成功
   calls.length = 0;
+  sandbox.isSecureContext = true;
+  let copied = null;
+  sandbox.navigator.clipboard = {
+    writeText: async (t) => { copied = t; },
+  };
   T.build(asst, true, st).children.find((c) => c.textContent === "📋 コピー").onclick();
-  ok(calls.length === 0, "「コピー」は外部関数を呼ばない（clipboard のみ）");
-}
+  await new Promise((r) => setTimeout(r, 0));
+  ok(copied === asst.text, "「コピー」で本文がクリップボードに入る", copied);
+  ok(calls.some((c) => c[0] === "toast" && c[1] === "コピーしました"), "「コピー」成功でトーストが出る", calls);
 
-console.log(`\n===== PASS ${pass} / FAIL ${fail} =====`);
-process.exit(fail === 0 ? 0 : 1);
+  // コピー失敗
+  calls.length = 0;
+  sandbox.navigator.clipboard = {
+    writeText: async () => { throw new Error("clipboard denied"); },
+  };
+  sandbox.document.execCommand = () => false;
+  T.build(asst, true, st).children.find((c) => c.textContent === "📋 コピー").onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  ok(calls.some((c) => c[0] === "toast" && c[1] === "コピーできませんでした"), "「コピー」失敗でエラーのトーストが出る", calls);
+
+  console.log(`\n===== PASS ${pass} / FAIL ${fail} =====`);
+  process.exit(fail === 0 ? 0 : 1);
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

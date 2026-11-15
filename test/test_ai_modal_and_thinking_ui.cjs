@@ -239,12 +239,12 @@ sandbox.googleConfigured = true;
 T.render.call(T, sandbox.state.setting);
 
 assert("aiSummaryText is rendered for Google",
-  elements.aiSummaryText.textContent.includes("Google: gemini-3.8-flash") &&
+  elements.aiSummaryText.textContent.includes("AI Studio: gemini-3.8-flash") &&
   elements.aiSummaryText.textContent.includes("💨最小")
 );
 
 assert("sideAiSummaryText is rendered for Sidebar",
-  elements.sideAiSummaryText.textContent.includes("Google: gemini-3.8-flash")
+  elements.sideAiSummaryText.textContent.includes("AI Studio: gemini-3.8-flash")
 );
 
 T.render.call(T, { ai_provider: "antigravity" });

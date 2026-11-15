@@ -119,20 +119,24 @@ header h1#title { cursor: pointer; }
     align-items: center;
     justify-content: center;
     position: fixed;
-    right: 19px;
-    /* フッターと接近させる。--footer-h にはセーフエリア分の padding が既に含まれるので env() は足さない。
-       + 数値px で上に、- 数値px でフッターに重なる */
-    bottom: calc(var(--footer-h, 56px) + 2px);
+    right: 24px;
+    /* 入力欄からは離す。--footer-h にはセーフエリア分の padding が既に含まれるので env() は足さない。
+       + 数値px で上に、- 数値px でフッターに重なる。
+       8px にして「ツール」クラスタと同じ行の下端に揃える */
+    bottom: calc(var(--footer-h, 56px) + 8px);
     width: 44px;
     height: 44px;
     border-radius: 50%;
-    background: rgba(38, 40, 56, 0.82);
+    /* 見た目は「ツール」クラスタ（↓ ツール ↑）に合わせる:
+       背景 rgba(38,40,56,.62) / 枠 rgba(255,255,255,.18) / opacity .72 */
+    background: rgba(38, 40, 56, 0.62);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     color: #f0f0f5;
     font-size: 20px;
     line-height: 1;
-    border: 1px solid rgba(255, 255, 255, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    opacity: .72;
     box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
     z-index: 65;
     cursor: pointer;
@@ -156,7 +160,7 @@ header h1#title { cursor: pointer; }
   }
 }
 
-#app { flex: 1; min-width: 0; max-width: 900px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; }
+#app { flex: 1; min-width: 0; max-width: 900px; margin: 0 auto; height: 100%; display: flex; flex-direction: column; position: relative; }
 header {
   display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-shrink: 0;
   padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top));
@@ -299,8 +303,8 @@ footer { flex-shrink: 0; }
 .modal-textarea.mono { font: 12px Consolas, monospace; flex: 1; min-height: 50vh; }
 .summary-card { align-self: center; max-width: 90%; font-size: 12px; color: #9aa3c0; background: #22252f; border: 1px solid #333849; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
 
-#chatLog { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-.msg-wrap { display: flex; flex-direction: column; max-width: 88%; }
+#chatLog { flex: 1; overflow-y: auto; padding: 14px; padding-bottom: calc(var(--footer-h, 84px) + 10px); display: flex; flex-direction: column; gap: 12px; }
+.msg-wrap { position: relative; display: flex; flex-direction: column; max-width: 88%; }
 .msg-wrap.user { align-self: flex-end; align-items: flex-end; }
 .msg-wrap.assistant { align-self: flex-start; align-items: flex-start; }
 .msg { padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
@@ -365,8 +369,103 @@ footer { flex-shrink: 0; }
 .thumbs img { width: 38px; height: 38px; object-fit: cover; border-radius: 4px; cursor: pointer; opacity: .55; border: 1px solid transparent; }
 .thumbs img.active { opacity: 1; border-color: #6889f5; }
 
-footer { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; padding-bottom: max(10px, env(safe-area-inset-bottom)); background: #26262c; border-top: 1px solid #38383f; }
-.foot-input { display: flex; gap: 8px; align-items: flex-end; }
+/* フッターは「入れ物」だけ。レイアウトの列から外して入力カードを会話面の上に浮かせる
+   （グレーの帯を敷かず、背景は背後の会話面がそのまま見える） */
+footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 14px max(10px, env(safe-area-inset-bottom));
+  background: transparent;
+  border-top: none;
+  pointer-events: none;             /* カード以外の隙間は背後の会話を触れる */
+}
+footer > * { pointer-events: auto; }
+/* 入力欄はカード型。ふだんは 1 行（＋・テキスト・お気に入り・マイク・送信）で、
+   入力中（.is-expanded）はテキストが上段へ広がり、ボタンが下段に回る。 */
+.foot-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "plus text chip mic stop send";
+  align-items: end;
+  gap: 5px 6px;
+  padding: 6px;
+  background: #2b2b33;
+  border: 1px solid #3e3e49;
+  border-radius: 22px;
+  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+/* 入力中は上の段にテキスト、下の段にボタン（真ん中の空き列がボタンを右へ押す） */
+.foot-input.is-expanded {
+  grid-template-areas:
+    "text text text text text text"
+    "plus .    chip mic  stop send";
+}
+.foot-input:focus-within {
+  background: #30303a;
+  border-color: #56567380;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .38);
+}
+/* ＋（添付）・マイクで共通の線画アイコン */
+.composer-icon {
+  width: 22px; height: 22px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+/* お気に入りモデル（ドロワーを開くボタン。中身はバックエンドで後から） */
+.composer-chip {
+  grid-area: chip;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 220px;
+  height: calc(var(--composer-h) - 8px);
+  padding: 0 12px 0 10px;
+  border: 1px solid #474754;
+  border-radius: 999px;
+  background: #33333d;
+  color: #d5d5e2;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  overflow: hidden;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.composer-chip:hover { background: #3f3f4c; border-color: #5c5c72; color: #fff; }
+.composer-chip:active { transform: scale(.97); }
+.composer-chip:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
+.composer-chip .chip-star {
+  width: 13px; height: 13px; flex-shrink: 0;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round;
+}
+.composer-chip .chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* マイク（音声入力はこれから。今は押すと準備中と出すだけ） */
+#micBtn {
+  grid-area: mic;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--composer-h);
+  min-width: var(--composer-h);
+  height: var(--composer-h);
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #33333d;
+  color: #c4c5d2;
+  flex-shrink: 0;
+  transition: background .15s ease, color .15s ease, transform .12s ease;
+}
+#micBtn .composer-icon { width: 20px; height: 20px; }
+#micBtn:hover { background: #3f3f4c; color: #fff; }
+#micBtn:active { transform: scale(.94); }
+#micBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
 /* 送信に使うモデル（担当の会話があるチャンネルだけ） */
 .foot-bar { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #aaa; }
 .foot-bar label.ide-model { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; margin: 0; }
@@ -409,16 +508,29 @@ footer .foot-bar button { background: #44444c; color: #e6e6e6; padding: 3px 10px
 .form label.inline { display: inline; }
 button.mini { padding: 1px 8px; font-size: 11px; margin-left: 6px; }
 footer textarea {
-  flex: 1; resize: none; background: #2c2c32; color: #e6e6e6; border: 1px solid #44444c;
-  border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 14px; line-height: 1.4;
-  height: var(--composer-h); min-height: var(--composer-h); max-height: 120px; box-sizing: border-box; overflow-y: hidden;
-  transition: border-color 0.15s ease;
+  grid-area: text;
+  width: 100%;
+  min-width: 0;
+  resize: none; background: transparent; color: #e6e6e6; border: none;
+  border-radius: 12px; padding: 11px 6px; font: inherit; font-size: 14px; line-height: 1.5;
+  height: var(--composer-h); min-height: var(--composer-h); max-height: 160px; box-sizing: border-box; overflow-y: hidden;
 }
-footer textarea:focus { border-color: #6889f5; outline: none; }
+footer textarea::placeholder { color: #7d7d8c; }
+footer textarea:focus { outline: none; }
+/* 入力中はテキストが上段いっぱいに広がる（ボタンは下段へ） */
+.foot-input.is-expanded #messageInput { min-height: 64px; }
+/* PC（幅 769px 以上）は入力欄のカードだけを見せる。
+   上のモデル行（セレクトの四角い枠）は出さない（モデルの変更は 設定 →「AI・モデル・認証設定」）。
+   PC は入力する文字（プレースホルダも）を 1.3 倍ほど大きくする。 */
+@media (min-width: 769px) {
+  footer > .foot-bar { display: none !important; }
+  footer textarea { font-size: 18px; padding: 8px; }
+}
 /* 送信ボタン（右下）。最近のチャットUIと同じ、丸くて大きめの上矢印。
    文字（送信/送信中…）は読み上げ用に残して .send-text で見えなくしている。 */
 #sendBtn {
   position: relative;
+  grid-area: send;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -457,6 +569,7 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
 /* 応答待ちの間に出る停止ボタン。送信と同じ大きさの丸に ■ だけを置く */
 #stopBtn {
   display: inline-flex;
+  grid-area: stop;
   align-items: center;
   justify-content: center;
   width: var(--composer-h);
@@ -479,56 +592,67 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
 #stopBtn:disabled { opacity: .65; cursor: default; box-shadow: none; }
 /* 添付（送る前の一覧と、発言に付いたもの） */
 #attachBtn {
+  grid-area: plus;
   position: relative;
-  background: #2c2c32;
-  color: #ccc;
-  border: 1px solid #44444c;
-  padding: 0 10px;
-  border-radius: 8px;
-  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--composer-h);
+  min-width: var(--composer-h);
   height: var(--composer-h);
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #3a3a44;
+  color: #d8d8e2;
+  font-size: 0;              /* 文字は読み上げ用（aria-label/title）だけに使う */
+  flex-shrink: 0;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   z-index: 15;
-  transition: background .15s ease, border-color .15s ease, color .15s ease;
+  transition: background .15s ease, color .15s ease, transform .12s ease;
 }
-#attachBtn:hover { background: #485477; border-color: #5c7cfa; color: #fff; }   /* 他のボタンと同じ青ホバー */
+#attachBtn:hover { background: #474756; color: #fff; }
+#attachBtn:active { transform: scale(.94); }
+#attachBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
 .attach-flick-hint { display: none; }
 @media (max-width: 768px) {
   footer {
     --composer-h: 40px;
-    padding: 3px 5px;
-    padding-bottom: max(3px, env(safe-area-inset-bottom));
+    padding: 0 6px max(4px, env(safe-area-inset-bottom));
     gap: 4px;
   }
   .foot-input {
-    gap: 6px;
+    gap: 4px 5px;
+    padding: 5px;
+    border-radius: 20px;
   }
   #attachBtn {
     min-width: var(--composer-h);
     height: var(--composer-h);
     padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;        /* 17px だと絵文字が小さく潰れて見えたので大きく */
     line-height: 1;
-    flex-shrink: 0;
-    position: relative;
-    touch-action: none;
-    user-select: none;
-    -webkit-user-select: none;
-    z-index: 15;
   }
+  #attachBtn .composer-icon { width: 20px; height: 20px; }
+  /* スマホはお気に入りボタンを常には出さない。入力中（広がったとき）だけ出す */
+  .composer-chip { display: none; }
+  .foot-input.is-expanded .composer-chip {
+    display: inline-flex;
+    height: calc(var(--composer-h) - 6px);
+    padding: 0 10px 0 8px;
+    font-size: 11px;
+    max-width: 42vw;
+  }
+  .foot-input.is-expanded #messageInput { min-height: 58px; }
   /* 下フリック送信のヒント。小さい矢印をバッジにして見えるように */
   .attach-flick-hint {
     display: flex;
     align-items: center;
     justify-content: center;
     position: absolute;
-    top: 1px;
-    right: 1px;
+    top: -3px;
+    right: -3px;
     width: 14px;
     height: 14px;
     font-size: 10px;
@@ -564,8 +688,8 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
     align-items: center;
     justify-content: center;
     position: absolute;
-    top: 1px;
-    right: 1px;
+    top: -3px;
+    right: -3px;
     width: 14px;
     height: 14px;
     font-size: 10px;
@@ -581,13 +705,989 @@ footer textarea:focus { border-color: #6889f5; outline: none; }
   }
 }
 .attach-list { display: flex; gap: 6px; flex-wrap: wrap; }
+/* ---- お気に入りモデルシート（#favModelSheet） ----
+   入力欄のモデルチップから開く。中身は
+   「現在の組み合わせカード」＋「お気に入り一覧」＋「保存」。
+   ＞ から個別のピッカー、🗑 から削除確認を重ねて開く。 */
+.modal-content.compact.fav-model-sheet {
+  width: min(520px, calc(100vw - 24px));
+  height: auto;
+  max-height: min(86dvh, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 18px 14px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 18px;
+  background: #1c1c22;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .6);
+  color: #e8eaf1;
+}
+
+@media (max-width: 768px) {
+  #favModelSheet .modal-content.compact.fav-model-sheet {
+    width: 100vw;
+    max-width: 100vw;
+    height: auto;
+    max-height: 86dvh;
+    border-radius: 20px 20px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+  }
+}
+
+.modal-content.compact.fav-model-sheet:focus {
+  outline: none;
+}
+.fav-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.fav-sheet-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.fav-sheet-heading h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #f5f6fa;
+}
+.fav-sheet-sub {
+  font-size: 11px;
+  color: #8b8f9e;
+  white-space: nowrap;
+}
+
+.fav-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .04);
+  color: #b8bcc9;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.fav-icon-btn:hover {
+  background: rgba(255, 255, 255, .1);
+  border-color: rgba(255, 255, 255, .16);
+  color: #fff;
+}
+.fav-icon-btn:focus-visible {
+  outline: 2px solid #5c7cfa;
+  outline-offset: 2px;
+}
+
+.fav-model-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 1px 2px 2px;
+}
+
+/* ---- 現在の組み合わせカード ---- */
+.fav-current {
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #24242c, #1f1f26);
+}
+.fav-current-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 2px 6px;
+}
+.fav-current-head h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  color: #8b8f9e;
+}
+.fav-cur-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: background .14s ease;
+}
+.fav-cur-row + .fav-cur-row {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+}
+.fav-cur-row:hover,
+.fav-cur-row:focus-visible {
+  background: rgba(255, 255, 255, .06);
+  outline: none;
+}
+.fav-cur-row.is-static {
+  cursor: default;
+}
+.fav-cur-row.is-static:hover {
+  background: transparent;
+}
+.fav-label {
+  flex: none;
+  width: 80px;
+  font-size: 11px;
+  color: #8b8f9e;
+  white-space: nowrap;
+}
+.fav-cur-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+}
+.fav-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f2f3f7;
+}
+.fav-provider-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: rgba(88, 124, 255, .16);
+  color: #a7b6ff;
+  font-size: 10px;
+  font-weight: 700;
+}
+.fav-provider-badge.is-google {
+  background: rgba(80, 140, 255, .16);
+  color: #9ec3ff;
+}
+.fav-provider-badge.is-vertex {
+  background: rgba(52, 199, 148, .16);
+  color: #8ce3bd;
+}
+.fav-provider-badge.is-ag {
+  background: rgba(171, 124, 255, .18);
+  color: #c9aaff;
+}
+.fav-think-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, .09);
+  background: rgba(255, 255, 255, .05);
+  color: #c3c7d4;
+  font-size: 10px;
+  font-weight: 600;
+}
+.fav-chevron {
+  flex: none;
+  color: #74798a;
+  font-size: 16px;
+  line-height: 1;
+  transition: color .15s ease, transform .15s ease;
+}
+.fav-cur-row:hover .fav-chevron {
+  color: #aab2c8;
+  transform: translateX(1px);
+}
+.fav-note {
+  margin: 10px 2px 0;
+  color: #8b8f9e;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/* ---- お気に入り一覧 ---- */
+.fav-list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 14px 2px 0;
+}
+.fav-list-head h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  color: #8b8f9e;
+}
+.fav-list-head .muted {
+  font-size: 10px;
+  color: #6f7383;
+}
+.fav-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: visible;
+  min-height: 0;
+  padding: 0;
+}
+
+.fav-model-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 10px 11px 12px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 14px;
+  background: #22222a;
+  cursor: pointer;
+  user-select: none;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.fav-model-row:hover {
+  background: #282833;
+  border-color: rgba(255, 255, 255, .14);
+}
+.fav-model-row:focus-visible {
+  outline: 2px solid #5c7cfa;
+  outline-offset: 2px;
+}
+.fav-model-row.is-active {
+  border-color: rgba(92, 124, 250, .75);
+  background: linear-gradient(180deg, rgba(72, 102, 240, .2), rgba(72, 102, 240, .1));
+  box-shadow: 0 0 0 1px rgba(92, 124, 250, .3), 0 10px 26px -16px rgba(60, 90, 220, .9);
+}
+
+.fav-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+}
+.fav-row-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.fav-row-star {
+  flex: none;
+  font-size: 12px;
+  line-height: 1;
+  color: #6f7383;
+}
+.fav-model-row.is-active .fav-row-star {
+  color: #ffc94d;
+  text-shadow: 0 0 10px rgba(255, 201, 77, .45);
+}
+.fav-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+  color: #f5f6fa;
+}
+.fav-badge {
+  flex: none;
+  margin-left: auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(92, 124, 250, .9);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+.fav-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #9296a5;
+}
+.fav-row-meta b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #dfe2ec;
+  font-weight: 600;
+}
+.fav-meta-label {
+  flex: none;
+  width: 54px;
+  font-size: 10px;
+  color: #7d8191;
+}
+.fav-row-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.fav-row-edit,
+.fav-row-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #8b8f9e;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.fav-row-edit {
+  font-size: 17px;
+}
+.fav-row-edit:hover {
+  background: rgba(255, 255, 255, .08);
+  color: #dfe2ec;
+}
+.fav-row-delete {
+  font-size: 12px;
+}
+.fav-row-delete svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.fav-row-delete:hover {
+  background: rgba(240, 80, 95, .14);
+  border-color: rgba(240, 80, 95, .4);
+  color: #ff8b96;
+}
+
+.fav-model-empty {
+  padding: 20px 14px;
+  text-align: center;
+  border: 1px dashed rgba(255, 255, 255, .12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .02);
+}
+.fav-empty-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e8eaf1;
+}
+.fav-model-empty .hint {
+  margin: 0;
+  font-size: 11px;
+  color: #8b8f9e;
+}
+.fav-empty-btn {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .06);
+  color: #dfe2ec;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.fav-empty-btn:hover {
+  background: rgba(255, 255, 255, .12);
+}
+
+.fav-undo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid rgba(92, 124, 250, .35);
+  border-radius: 12px;
+  background: rgba(59, 91, 219, .14);
+  font-size: 12px;
+  color: #dfe2ec;
+}
+.link-btn {
+  background: transparent;
+  border: none;
+  color: #8ea2ff;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.link-btn:hover {
+  color: #adbcff;
+  text-decoration: underline;
+}
+
+/* ---- 保存ボタンとフッター ---- */
+.fav-save-area {
+  margin: 10px 0 2px;
+}
+.fav-save-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid rgba(92, 124, 250, .45);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #4a6bf5, #3b5bdb);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 12px 26px -16px rgba(70, 105, 240, .95);
+  transition: filter .15s ease, transform .1s ease;
+}
+.fav-save-btn:hover {
+  filter: brightness(1.08);
+}
+.fav-save-btn:active {
+  transform: scale(.99);
+}
+.fav-save-icon {
+  font-size: 12px;
+  opacity: .9;
+}
+
+.fav-sheet-foot {
+  display: flex;
+  justify-content: stretch;
+}
+.fav-foot-btn {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .04);
+  color: #b8bcc9;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.fav-foot-btn:hover {
+  background: rgba(255, 255, 255, .08);
+  color: #e8eaf1;
+}
+
+/* ---- 重ねて開くモーダル（名前・ピッカー・削除確認） ---- */
+.modal.fav-submodal {
+  z-index: 70;
+  background: rgba(6, 6, 10, .68);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+/* ピッカーの上に名前の入力欄を重ねるときがある */
+#favNameModal.fav-submodal {
+  z-index: 80;
+}
+#favNameModal .modal-content,
+#favPickerModal .modal-content,
+#favDeleteModal .modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: auto;
+  max-height: min(86dvh, 720px);
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 18px;
+  background: #1c1c22;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .65);
+  color: #e8eaf1;
+}
+#favNameModal .modal-content { width: min(440px, calc(100vw - 32px)); }
+#favPickerModal .modal-content { width: min(480px, calc(100vw - 24px)); }
+#favDeleteModal .modal-content { width: min(420px, calc(100vw - 24px)); }
+
+@media (max-width: 768px) {
+  #favNameModal .modal-content,
+  #favPickerModal .modal-content,
+  #favDeleteModal .modal-content {
+    width: 100vw;
+    max-width: 100vw;
+    max-height: 88dvh;
+    border-radius: 20px 20px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    padding-bottom: max(18px, env(safe-area-inset-bottom));
+  }
+}
+
+.fav-sub-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fav-sub-heading {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.fav-sub-heading h2 {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 700;
+  color: #f5f6fa;
+}
+.fav-sub-kicker {
+  display: block;
+  width: 100%;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  color: #8b8f9e;
+}
+.fav-back {
+  font-size: 19px;
+  padding-bottom: 3px;
+}
+.fav-sub-close {
+  margin-left: auto;
+}
+
+/* 名前 */
+.fav-name-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 12px;
+  background: #141419;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.fav-name-field:focus-within {
+  border-color: rgba(92, 124, 250, .75);
+  box-shadow: 0 0 0 3px rgba(92, 124, 250, .16);
+}
+.fav-name-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #f2f3f7;
+  font-size: 15px;
+  font-weight: 600;
+  outline: none;
+}
+.fav-name-count {
+  flex: none;
+  font-size: 11px;
+  color: #7d8191;
+  font-variant-numeric: tabular-nums;
+}
+.fav-chip-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.fav-chip-preview-label {
+  flex: none;
+  font-size: 11px;
+  color: #8b8f9e;
+}
+.fav-chip-preview {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 201, 77, .35);
+  border-radius: 999px;
+  background: rgba(255, 201, 77, .12);
+  color: #ffdc8a;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.fav-chip-star {
+  color: #ffc94d;
+}
+.fav-name-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+}
+.fav-primary-btn {
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #4a6bf5, #3b5bdb);
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 12px 26px -16px rgba(70, 105, 240, .95);
+  transition: filter .15s ease;
+}
+.fav-primary-btn:hover {
+  filter: brightness(1.08);
+}
+.fav-primary-btn:disabled {
+  opacity: .55;
+  cursor: default;
+  filter: none;
+}
+.fav-ghost-btn {
+  width: 100%;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .04);
+  color: #c9ccd8;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.fav-ghost-btn:hover {
+  background: rgba(255, 255, 255, .09);
+  color: #f2f3f7;
+}
+
+/* ピッカー */
+.fav-picker-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #8b8f9e;
+}
+.fav-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 12px;
+  background: #22222a;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+.fav-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1px;
+  margin: 0 -1px;
+}
+.fav-pick-item:hover {
+  background: #282833;
+  border-color: rgba(255, 255, 255, .14);
+}
+.fav-pick-item:focus-visible {
+  outline: 2px solid #5c7cfa;
+  outline-offset: 2px;
+}
+.fav-pick-item.is-selected {
+  border-color: rgba(92, 124, 250, .75);
+  background: rgba(72, 102, 240, .18);
+}
+.fav-pick-item.is-disabled {
+  opacity: .45;
+  cursor: default;
+}
+.fav-pick-item.is-disabled:hover {
+  background: #22222a;
+  border-color: rgba(255, 255, 255, .07);
+}
+.fav-pick-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.fav-pick-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f2f3f7;
+}
+.fav-pick-hint {
+  font-size: 10.5px;
+  color: #84889a;
+}
+.fav-pick-note {
+  font-size: 10px;
+  color: #ff9aa4;
+}
+.fav-pick-badge {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid rgba(92, 124, 250, .4);
+  border-radius: 999px;
+  color: #9fb0ff;
+  font-size: 9.5px;
+  font-weight: 700;
+}
+.fav-pick-radio {
+  flex: none;
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, .22);
+  border-radius: 50%;
+}
+.fav-pick-item.is-selected .fav-pick-radio {
+  border-color: #6d8bff;
+}
+.fav-pick-item.is-selected .fav-pick-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: #6d8bff;
+}
+.fav-pick-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed rgba(255, 255, 255, .12);
+  border-radius: 12px;
+  font-size: 11.5px;
+  color: #8b8f9e;
+  text-align: center;
+}
+
+.fav-picker-think {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, .07);
+}
+.fav-picker-think.hidden {
+  display: none;
+}
+.fav-think-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #c3c7d4;
+}
+.fav-think-head .muted {
+  font-size: 10px;
+  color: #7d8191;
+}
+.fav-think-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.fav-think-chip {
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .04);
+  color: #c3c7d4;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.fav-think-chip:hover {
+  background: rgba(255, 255, 255, .1);
+  color: #f2f3f7;
+}
+.fav-think-chip.is-active {
+  border-color: rgba(122, 150, 255, .9);
+  background: rgba(72, 102, 240, .85);
+  color: #fff;
+}
+.fav-provider-jump {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px dashed rgba(255, 255, 255, .16);
+  border-radius: 12px;
+  background: transparent;
+  color: #9aa2b6;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.fav-provider-jump:hover {
+  border-color: rgba(92, 124, 250, .6);
+  background: rgba(72, 102, 240, .08);
+  color: #c3ccff;
+}
+.fav-provider-jump.hidden {
+  display: none;
+}
+
+/* 削除確認 */
+.fav-delete-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 18px 16px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 16px;
+  background: #202027;
+  text-align: center;
+}
+.fav-delete-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 auto;
+  border-radius: 50%;
+  background: rgba(240, 80, 95, .14);
+  color: #ff8b96;
+  font-size: 18px;
+}
+.fav-delete-name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #f5f6fa;
+}
+.fav-delete-desc {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #9296a5;
+}
+.fav-delete-warn {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #ffc27a;
+  text-align: left;
+}
+.fav-delete-warn.hidden {
+  display: none;
+}
+.fav-delete-model {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .05);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #dfe2ec;
+}
+.fav-delete-model-star {
+  color: #8ea2ff;
+}
+.fav-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.fav-delete-actions .fav-ghost-btn {
+  width: auto;
+  padding: 10px 18px;
+}
+.fav-danger-btn {
+  padding: 10px 20px;
+  border: 0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f2606e, #d93b4d);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter .15s ease;
+}
+.fav-danger-btn:hover {
+  filter: brightness(1.07);
+}
+.fav-danger-btn:disabled {
+  opacity: .55;
+  cursor: default;
+  filter: none;
+}
+
+/* チップの星だけ塗る。位置・サイズ・グリッドは変更しない */
+.composer-chip.is-favorite .chip-star {
+  fill: currentColor;
+  color: #8ea2ff;
+}
+
+@media (max-width: 380px) {
+  .fav-label {
+    width: 70px;
+  }
+  .fav-current {
+    padding: 10px;
+  }
+  .fav-model-name {
+    font-size: 12.5px;
+  }
+  .fav-row-meta {
+    font-size: 11px;
+  }
+}
+
 .attach-list.hidden { display: none; }
 .attach-chip { position: relative; display: flex; align-items: center; gap: 6px; background: #2c2c32; border: 1px solid #44444c; border-radius: 8px; padding: 3px 26px 3px 3px; font-size: 12px; color: #ccc; max-width: 220px; }
 .attach-chip img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; }
 .attach-chip .a-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px; }
 .attach-chip.busy { opacity: .55; }
 .attach-chip .a-del { position: absolute; top: 2px; right: 2px; background: none; color: #aaa; padding: 0 6px; font-size: 14px; }
-footer.drag { outline: 2px dashed #6889f5; outline-offset: -4px; }
+footer.drag { outline: none; }
+footer.drag .foot-input { outline: 2px dashed #6889f5; outline-offset: 2px; }
 .msg-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; justify-content: flex-end; max-width: 100%; }
 .msg-wrap.assistant .msg-files { justify-content: flex-start; }
 .msg-files img { max-width: min(260px, 100%); max-height: 260px; border-radius: 8px; cursor: zoom-in; display: block; border: 1px solid #38383f; }
@@ -1058,6 +2158,118 @@ button.rag-mem-danger:hover { background: #6b2b2b; }
 .rag-progress-box { background: #232738; border: 1px solid #465485; border-radius: 6px; padding: 10px; margin-bottom: 10px; font-size: 12px; color: #ccd; }
 .rag-progress-bar-wrap { height: 6px; background: #141724; border-radius: 3px; overflow: hidden; margin-top: 6px; }
 .rag-progress-bar { height: 100%; width: 0%; background: #6889f5; transition: width 0.3s ease; }
+
+/* 記憶ビュー本体をFlexカラム化し、上部ツールバー・検索バーを固定して一覧のみスクロール */
+#ragMemView:not(.hidden) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.rag-mem-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.rag-search-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.rag-search-icon {
+  position: absolute;
+  left: 9px;
+  font-size: 12px;
+  color: #888;
+  pointer-events: none;
+  line-height: 1;
+}
+#ragMemSearchInput {
+  width: 100%;
+  height: 32px;
+  padding: 0 30px 0 28px;
+  background: #1a1a1e;
+  color: #e6e6e6;
+  border: 1px solid #383842;
+  border-radius: 6px;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+#ragMemSearchInput:focus {
+  border-color: #6889f5;
+  outline: none;
+}
+/* 検索中（クエリあり）の視覚的強調 */
+#ragMemSearchInput.has-query {
+  border-color: #4c6ef5;
+  background: #1d1f2a;
+}
+button.rag-search-clear {
+  position: absolute;
+  right: 3px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+/* グローバル button:hover { background: #485477 } の競合を防止 */
+button.rag-search-clear:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+button.rag-search-clear:active {
+  background: rgba(255, 255, 255, 0.16);
+}
+.rag-search-count {
+  font-size: 12px;
+  color: #8a8a94;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* キーワードハイライト */
+.rag-search-highlight {
+  background: rgba(255, 235, 59, 0.25);
+  color: #ffe082;
+  border-bottom: 1px solid #ffe082;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* 0件表示スタイル */
+.rag-empty-state {
+  padding: 24px 16px;
+  text-align: center;
+  color: #9aa0b0;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.rag-empty-state-msg {
+  line-height: 1.5;
+}
+.rag-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
 .rag-filter-tabs { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
 .rag-filter-btn { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: #222228; color: #aaa; border: 1px solid #383842; cursor: pointer; transition: all 0.15s ease; }
 .rag-filter-btn:hover { background: #2e2e38; color: #e0e0e0; }
@@ -1299,6 +2511,23 @@ button.rag-entry-pin.is-pinned {
   .rag-entries {
     max-height: none;
     flex: 1;
+  }
+  #ragMemSearchInput {
+    height: 34px;
+    font-size: 16px; /* iOS Safari 自動ズーム防止 */
+  }
+  button.rag-search-clear {
+    width: 30px;
+    height: 30px;
+  }
+  /* スマホでは縦幅節約のため再生成ヒントを畳む */
+  #ragMemRegenHint {
+    display: none;
+  }
+  /* キーボード展開中（入力中）はツールバーを畳んでカード表示領域を最大化 */
+  body.kb-open #ragModal:has(#ragMemSearchInput:focus) .rag-mem-toolbar,
+  body.kb-open #ragModal.rag-search-focused .rag-mem-toolbar {
+    display: none;
   }
   .modal-actions {
     flex-shrink: 0;
@@ -2042,6 +3271,147 @@ button.rag-entry-pin.is-pinned {
   color: #fff;
 }
 
+/* --- ユーザー発言カードのホバー操作（編集 / コピー / ⋯） --- */
+.msg-hover-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  order: 2;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity .14s ease, transform .14s ease;
+}
+.msg-hover-actions .msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  box-sizing: border-box;          /* border 1px を含めて 26px に揃える */
+  color: #ccc;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .15);
+  border-radius: 50%;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.msg-hover-actions .msg-action-btn svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: currentColor;
+}
+.msg-hover-actions .msg-action-btn:hover,
+.msg-hover-actions .btn-more[aria-expanded="true"] {
+  background: rgba(255, 255, 255, .12);
+  border-color: rgba(255, 255, 255, .28);
+  color: #fff;
+}
+.msg-hover-actions .msg-action-btn:focus-visible {
+  outline: 2px solid #8ea2ff;
+  outline-offset: 2px;
+}
+
+/* 表示条件: マウスホバー / キーボードフォーカス / ⋯ を開いている間 */
+@media (hover: hover) and (pointer: fine) {
+  .msg-wrap.user:hover .msg-hover-actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+.msg-wrap.user.kbd-focus .msg-hover-actions,
+.msg-wrap.user.actions-pinned .msg-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-hover-actions { transition: none; transform: none; }
+}
+
+/* 背景表示（RP）でも読めるよう、少し濃い下地を敷く */
+#chatLog.rp .msg-hover-actions .msg-action-btn,
+#chatLog.rp .msg-hover-actions .btn-more {
+  background: rgba(16, 16, 24, .62);
+  border-color: rgba(255, 255, 255, .28);
+  color: #fff;
+}
+#chatLog.rp .msg-hover-actions .msg-action-btn:hover,
+#chatLog.rp .msg-hover-actions .btn-more:hover,
+#chatLog.rp .msg-hover-actions .btn-more[aria-expanded="true"] {
+  background: rgba(59, 91, 219, .85);
+  border-color: #5c7cfa;
+}
+
+/* タッチ端末: ボタンは常に隠す（長押しでシート）。予約行ごと畳む */
+@media (hover: none), (pointer: coarse) {
+  .msg-wrap.user .msg-hover-actions { display: none; }
+  .msg-wrap.user .choices-container.hover-only-bar { display: none; }
+}
+
+/* タッチ入力がある端末（タッチ対応ノートPC等のハイブリッドを含む）では、
+   指の長押しをテキスト選択・iOS のコールアウトより優先させる。
+   user-select は継承前提にできないので、本文・添付・リンク・画像まで明示する。
+   ※ マウス操作でもユーザー発言のテキスト選択はできなくなるが、
+      コピーはホバーのコピーボタン / ⋯ の「📋 コピー」で行える。 */
+@media (any-pointer: coarse) {
+  .msg-wrap.user,
+  .msg-wrap.user * {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/* タッチ端末用の読み上げ / キーボード導線（普段は見えない） */
+.msg-more-a11y { display: none; }
+@media (hover: none), (pointer: coarse) {
+  .msg-more-a11y {
+    display: block;              /* ← base の display:none を上書きする */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  .msg-more-a11y:focus {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 6px 0 0;
+    padding: 4px 10px;
+    overflow: visible;
+    clip: auto;
+    clip-path: none;
+    color: #ccc;
+    background: rgba(255, 255, 255, .06);
+    border: 1px solid rgba(255, 255, 255, .15);
+    border-radius: 14px;
+    font: inherit;
+    font-size: .78rem;
+  }
+}
+
+/* 送信中（■ 停止 が見えている間）は、その発言の操作ボタンを出さない。
+   ■ 停止 はステータス行なので残す。 */
+.msg-wrap.user.is-busy .msg-hover-actions,
+.msg-wrap.user.is-busy .msg-more-a11y {
+  display: none;
+}
+
 /* 通知設定 UI */
 .push-box-content {
   display: flex;
@@ -2159,13 +3529,14 @@ button.rag-entry-pin.is-pinned {
 
   /* チップのぶん本文を下げる／浮いている操作ボタンのぶん下に余白を空ける
      （既存の #chatLog ルールより後ろに置くこと）
-     「ツール」の上端は footer-h+約32px。44px で 12px の隙間を空ける */
+     「ツール」クラスタは footer-h+8px に浮き、上端は footer-h+40px。
+     85px 空けると、浮きボタン行と発言下の 🔁🎨💬▾⋯ 行のあいだが約45pxになる */
   #chatLog {
     padding-top: max(56px, calc(env(safe-area-inset-top) + 50px));
-    padding-bottom: 44px;
+    padding-bottom: calc(var(--footer-h, 90px) + 62px);
   }
 
-  /* ドロワー最下段（親指ゾーン）。右は FAB(44px/right:19px) のぶん空ける */
+  /* ドロワー最下段（親指ゾーン）。右は FAB(44px/right:24px) のぶん空ける */
   #sideBottomSection {
     display: flex; flex-direction: column; gap: 8px;
     padding: 8px 38px 8px 12px;
@@ -2259,7 +3630,8 @@ button.rag-entry-pin.is-pinned {
     position: fixed;
     left: 0;
     right: 0;
-    bottom: calc(var(--footer-h, 56px) + 2px);
+    /* 入力欄とのあいだは 8px（キーボードを閉じても指が届く距離） */
+    bottom: calc(var(--footer-h, 56px) + 8px);
     z-index: 62;                          /* スクリム(z63)の下 */
     pointer-events: none;                 /* 隙間がチャット面タップを奪わないように */
   }
@@ -2312,7 +3684,7 @@ button.rag-entry-pin.is-pinned {
     display: flex;
     position: fixed;
     left: calc(50% - 37px);    /* width 74px の中央。transformは押下アニメ用に空ける */
-    bottom: calc(var(--footer-h, 56px) + 2px);
+    bottom: calc(var(--footer-h, 56px) + 8px);    /* #mobileTurnCluster と同じ高さ（入力欄のすぐ上） */
     width: 74px;
     height: 30px;
     padding: 0 6px;
@@ -2396,9 +3768,9 @@ button.rag-entry-pin.is-pinned {
     gap: var(--reveal-gap);
     width: min(268px, calc(100vw - 12px));   /* 84px × 3 + 8px × 2 */
     position: fixed; left: 50%; transform: translateX(-50%);
-    /* 「ツール」クラスタ（bottom: footer-h+2 / 44px）の真上に出す。
+    /* 「ツール」クラスタ（bottom: footer-h+8 / 44px）の真上に出す。
        両方同時に見えるので押して閉じられる */
-    bottom: calc(var(--footer-h, 56px) + 54px); z-index: 64;
+    bottom: calc(var(--footer-h, 56px) + 62px); z-index: 64;
     pointer-events: none;               /* gap がチャット面タップを奪わないように */
   }
   /* アイコンだけでは何のボタンか分からないので、大きめのタイルにアイコン＋文字を重ねる。

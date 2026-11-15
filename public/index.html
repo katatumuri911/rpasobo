@@ -6,7 +6,7 @@
 <title>RP Image Chat {{PORT}}</title>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="apple-touch-icon" href="icon-maskable-512.png">
-<link rel="stylesheet" href="style.css?v=125">
+<link rel="stylesheet" href="style.css?v=138">
 </head>
 <body>
 <aside id="sidebar">
@@ -61,7 +61,7 @@
       <div class="box">
         <div class="box-title">AI・生成エンジン</div>
         <div id="aiSummaryRow" class="ai-summary-row">
-          <span id="aiSummaryText">Google Gemini 3.8 Flash (思考: 低)</span>
+          <span id="aiSummaryText">AI Studio: Gemini 3.8 Flash (思考: 低)</span>
           <button id="openAiToolBtn" type="button" class="sub">⚡ AI・モデル・認証設定を開く</button>
         </div>
       </div>
@@ -283,7 +283,7 @@
         </div>
         <div class="foot-thinking-sub-row">
           <span class="foot-thinking-eff muted" id="footThinkingEff">実効: -</span>
-          <label class="foot-choices-thinking-label" title="補助タスク（選択肢・画像推敲・記憶抽出）の思考の深さ">補助:
+          <label class="foot-choices-thinking-label" title="選択肢などの思考（画像推敲・記憶抽出も）">選択肢など:
             <select id="footChoicesThinkingSelect">
               <option value="low">⚡低 (推奨)</option>
               <option value="minimal">💨最小</option>
@@ -298,9 +298,26 @@
     </div>
     <div id="attachList" class="attach-list hidden"></div>
     <div class="foot-input">
-      <button id="attachBtn" type="button" title="画像やファイルを添付（下フリックで送信・貼り付けやドロップも可）" aria-label="添付（下フリックで送信）">📁<span class="attach-flick-hint" aria-hidden="true">↓</span></button>
+      <button id="attachBtn" type="button" title="画像やファイルを添付（下フリックで送信・貼り付けやドロップも可）" aria-label="添付（下フリックで送信）">
+        <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 5.4v13.2M5.4 12h13.2"></path>
+        </svg>
+        <span class="attach-flick-hint" aria-hidden="true">↓</span>
+      </button>
       <input id="attachInput" type="file" multiple hidden>
-      <textarea id="messageInput" rows="1" placeholder="ユーザーのセリフや行動を入力"></textarea>
+      <button id="favModelBtn" type="button" class="composer-chip" title="お気に入りモデルを選ぶ" aria-label="お気に入りモデルを選ぶ" aria-haspopup="dialog">
+        <svg class="chip-star" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="m12 4.6 2.3 4.7 5.2.8-3.8 3.6.9 5.1-4.6-2.4-4.6 2.4.9-5.1-3.8-3.6 5.2-.8z"></path>
+        </svg>
+        <span id="favModelLabel" class="chip-label">お気に入り</span>
+      </button>
+      <textarea id="messageInput" rows="1" placeholder="セリフや行動を入力"></textarea>
+      <button id="micBtn" type="button" class="composer-circle" title="音声入力（準備中）" aria-label="音声入力（準備中）">
+        <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 3.6a3.1 3.1 0 0 1 3.1 3.1v4.8a3.1 3.1 0 0 1-6.2 0V6.7A3.1 3.1 0 0 1 12 3.6Z"></path>
+          <path d="M6.4 11.2v.5a5.6 5.6 0 0 0 11.2 0v-.5M12 17.3v3.1"></path>
+        </svg>
+      </button>
       <button id="stopBtn" type="button" class="hidden" aria-label="送信を停止" title="応答待ちを中止して、入力を入力欄に戻す">■</button>
       <button id="sendBtn" type="button" aria-label="送信" title="送信">
         <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -449,6 +466,15 @@
             🔄 は会話ログを再分析して記憶を追加します。既存の記憶は消しません（同じ内容は自動で除外）。<br>
             🗑 は自動記憶を削除して作り直します。手動記憶は残り、達成済みの手動記憶は有効に戻ります（削除前に data/trash へバックアップ）。
           </p>
+          <!-- 記憶の検索バー（type="search" はブラウザ標準の×ボタンと干渉するため type="text" を使用） -->
+          <div class="rag-mem-search-bar">
+            <div class="rag-search-input-wrap">
+              <span class="rag-search-icon" aria-hidden="true">🔍</span>
+              <input id="ragMemSearchInput" type="text" placeholder="記憶を検索... (空白でAND)" aria-label="記憶をキーワード検索" autocomplete="off" spellcheck="false">
+              <button id="ragMemSearchClear" type="button" class="rag-search-clear hidden" title="検索をクリア (Esc)" aria-label="検索をクリア">✕</button>
+            </div>
+            <span id="ragMemSearchCount" class="rag-search-count" aria-live="polite"></span>
+          </div>
           <div id="ragMemFilterTabs" class="rag-filter-tabs">
             <button class="rag-filter-btn active" data-cat="all">全て</button>
             <button class="rag-filter-btn" data-cat="calling">呼称</button>
@@ -552,7 +578,7 @@
       <label style="margin:0; font-weight:600;">AIプロバイダ
         <select id="aiProvider">
           <option value="antigravity">Antigravity（IDE連携）</option>
-          <option value="google">Google Gemini（AI Studio）</option>
+          <option value="google">Google AI Studio</option>
           <option value="vertex">Google Cloud（Vertex AI）</option>
         </select>
       </label>
@@ -733,18 +759,18 @@
       </div>
     </div>
 
-    <!-- 補助タスクカード（3プロバイダ共通・単一 choicesIdeModel 要素） -->
+    <!-- 選択肢（8択）のモデルと、選択肢などの思考（3プロバイダ共通・単一 choicesIdeModel 要素） -->
     <div class="ai-card" id="choicesIdeCard" style="margin-top:8px;">
       <div class="ai-card-title">
-        <span>補助タスク（選択肢8択・画像推敲・記憶抽出）</span>
+        <span>選択肢（8択）のモデルと思考</span>
       </div>
-      <label style="margin:0;">選択肢のモデル
+      <label style="margin:0;">選択肢（8択）のモデル
         <select id="choicesIdeModel"><option value="">メインのモデルと同じ</option></select>
       </label>
       <div id="auxThinkingSection">
         <div class="sub-label" style="margin-top:6px; display:flex; justify-content:space-between; align-items:center;">
-          <span>補助タスク思考の深さ</span>
-          <span id="choicesThinkingBadge" class="effective-badge">実効: -</span>
+          <span>選択肢などの思考（画像推敲・記憶抽出も）</span>
+          <span id="choicesThinkingBadge" class="effective-badge">選択肢の実効: -</span>
         </div>
         <div class="thinking-pills" id="choicesThinkingPills">
           <div class="pills-row">
@@ -800,6 +826,114 @@
     </div>
   </div>
 </div>
+  <!-- お気に入りモデルシート（コンポーザーのモデルチップから開く） -->
+  <div id="favModelSheet" class="modal hidden">
+    <div class="modal-content compact fav-model-sheet" role="dialog" aria-modal="true" aria-labelledby="favModelSheetTitle" tabindex="-1">
+      <div class="fav-sheet-head">
+        <div class="fav-sheet-heading">
+          <h2 id="favModelSheetTitle">モデル</h2>
+          <span class="fav-sheet-sub">このチャンネル</span>
+        </div>
+        <button id="favModelSheetClose" type="button" class="fav-icon-btn" aria-label="閉じる">✕</button>
+      </div>
+      <div class="fav-model-body">
+        <div id="favModelCurrent" class="fav-current" aria-label="現在の組み合わせ"></div>
+        <div id="favSaveArea" class="fav-save-area"></div>
+        <div class="fav-list-head">
+          <h3>お気に入り</h3>
+          <span id="favCount" class="muted"></span>
+        </div>
+        <div id="favModelList" class="fav-model-list" role="listbox" aria-labelledby="favModelSheetTitle"></div>
+        <div id="favModelEmpty" class="fav-model-empty hidden">
+          <p class="fav-empty-title">お気に入りがまだありません</p>
+          <p class="hint">よく使うモデルと思考レベルの組み合わせを保存すると、ここから1タップで切り替えられます。</p>
+          <button id="favEmptyOpenSettings" type="button" class="fav-empty-btn">モデルを設定する</button>
+        </div>
+      </div>
+      <div id="favUndoBar" class="fav-undo-bar hidden" role="status" aria-live="polite">
+        <span id="favUndoText"></span>
+        <button id="favUndoBtn" type="button" class="link-btn">元に戻す</button>
+      </div>
+      <div class="fav-sheet-foot">
+        <button id="favOpenAiModalBtn" type="button" class="fav-foot-btn">⚙️ AI・モデル・認証の詳細</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- お気に入り名（保存・名前の変更） -->
+  <div id="favNameModal" class="modal fav-submodal hidden">
+    <div class="modal-content fav-name-modal" role="dialog" aria-modal="true" aria-labelledby="favNameModalTitle">
+      <div class="fav-sub-head">
+        <div class="fav-sub-heading">
+          <h2 id="favNameModalTitle">お気に入り名</h2>
+        </div>
+        <button type="button" class="fav-icon-btn fav-sub-close" data-fav-subclose aria-label="閉じる">✕</button>
+      </div>
+      <div class="fav-name-field">
+        <input id="favNameInput" type="text" autocomplete="off" spellcheck="false" placeholder="お気に入り名">
+        <span class="fav-name-count"><span id="favNameCount">0</span>/12</span>
+      </div>
+      <p class="fav-note">全角12文字まで。12文字を超えた分は入力時にカットします。</p>
+      <div class="fav-chip-preview-row">
+        <span class="fav-chip-preview-label">チップ表示</span>
+        <span class="fav-chip-preview"><span class="fav-chip-star" aria-hidden="true">★</span><span id="favNamePreview">お気に入り</span></span>
+      </div>
+      <div class="fav-name-actions">
+        <button type="button" id="favNameSave" class="fav-primary-btn">この名前で保存</button>
+        <button type="button" id="favNameCancel" class="fav-ghost-btn">キャンセル</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- モデル・プロバイダーの選択（＞ から開く） -->
+  <div id="favPickerModal" class="modal fav-submodal hidden">
+    <div class="modal-content fav-picker-modal" role="dialog" aria-modal="true" aria-labelledby="favPickerTitle">
+      <div class="fav-sub-head">
+        <button type="button" id="favPickerBack" class="fav-icon-btn fav-back" aria-label="戻る">‹</button>
+        <div class="fav-sub-heading">
+          <h2 id="favPickerTitle">モデル</h2>
+          <span id="favPickerSub" class="fav-sheet-sub"></span>
+        </div>
+      </div>
+      <p id="favPickerNote" class="fav-picker-note"></p>
+      <div id="favPickerList" class="fav-picker-list" role="radiogroup"></div>
+      <div id="favPickerThink" class="fav-picker-think hidden">
+        <div class="fav-think-head">
+          <span id="favPickerThinkTitle">思考の深さ</span>
+          <span id="favPickerEff" class="muted"></span>
+        </div>
+        <div id="favPickerThinkChips" class="fav-think-chips"></div>
+      </div>
+      <button type="button" id="favPickerChoicesRow" class="fav-provider-jump hidden">選択肢などのモデルを変える…</button>
+      <button type="button" id="favPickerProviderRow" class="fav-provider-jump hidden">プロバイダーを変える…（本文と選択肢がまとめて入れ替わります）</button>
+      <button type="button" id="favPickerRename" class="fav-provider-jump hidden"></button>
+    </div>
+  </div>
+
+  <!-- お気に入りの削除確認 -->
+  <div id="favDeleteModal" class="modal fav-submodal hidden">
+    <div class="modal-content fav-delete-modal" role="dialog" aria-modal="true" aria-labelledby="favDeleteTitle">
+      <div class="fav-sub-head">
+        <div class="fav-sub-heading">
+          <span class="fav-sub-kicker">削除の確認</span>
+          <h2 id="favDeleteTitle">お気に入りを削除</h2>
+        </div>
+        <button type="button" class="fav-icon-btn fav-sub-close" data-fav-subclose aria-label="閉じる">✕</button>
+      </div>
+      <div class="fav-delete-card">
+        <div class="fav-delete-icon" aria-hidden="true">🗑</div>
+        <p id="favDeleteName" class="fav-delete-name"></p>
+        <p class="fav-delete-desc">このお気に入りを一覧から削除します。このチャンネルの現在の設定は変わりません。</p>
+        <p id="favDeleteWarn" class="fav-delete-warn hidden"></p>
+        <div id="favDeleteModel" class="fav-delete-model"></div>
+        <div class="fav-delete-actions">
+          <button type="button" id="favDeleteCancel" class="fav-ghost-btn">キャンセル</button>
+          <button type="button" id="favDeleteConfirm" class="fav-danger-btn">削除</button>
+        </div>
+      </div>
+      <p class="fav-note">削除した直後は、シートの「元に戻す」から5秒間だけ戻せます。</p>
+    </div>
+  </div>
 <div id="modelSheet" class="modal hidden">
   <div class="modal-content compact">
     <h2>モデル</h2>
@@ -811,6 +945,6 @@
   </div>
 </div>
 <script src="prompt_toolbar.js"></script>
-<script src="app.js?v=104"></script>
+<script src="app.js?v=118"></script>
 </body>
 </html>

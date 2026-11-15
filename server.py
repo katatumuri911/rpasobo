@@ -8,7 +8,7 @@ RP Image Chat - server (multi-session)
   - 応答に付いた画像プロンプトを ComfyUI に投げ、完成画像をセッションに反映
 標準ライブラリのみ。  python server.py
 """
-import json, os, threading, time, uuid, random, shutil, urllib.request, mimetypes, sys, copy, socket, sqlite3, datetime, hashlib, re, base64, binascii, collections, concurrent.futures, inspect
+import json, os, threading, time, uuid, random, shutil, urllib.request, mimetypes, sys, copy, socket, sqlite3, datetime, hashlib, re, base64, binascii, collections, concurrent.futures, inspect, unicodedata
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 import qr  # スマホで開くアドレスの QR コード
@@ -893,6 +893,100 @@ def write_json(path, obj):
 
 def app_settings():
     return dict(DEFAULT_APP, **read_json(APP_SETTINGS, {}))
+
+
+MODEL_FAVORITES_VERSION = 1
+FAV_PROVIDERS = ("google", "vertex", "antigravity")
+
+
+def model_favorites_path():
+    # DATA はテストが差し替えるので、定数ではなく毎回組み立てる
+    return os.path.join(DATA, "model_favorites.json")
+
+
+def load_model_favorites():
+    d = read_json(model_favorites_path(), {})
+    raw = d.get("favorites") if isinstance(d, dict) else []
+    out = []
+    for i, f in enumerate(raw if isinstance(raw, list) else []):
+        if not isinstance(f, dict):
+            continue
+        f = dict(f)
+        try:
+            f["order"] = int(f.get("order", i))
+        except (TypeError, ValueError):
+            f["order"] = i
+        out.append(f)
+    out.sort(key=lambda x: (x.get("order", 0), str(x.get("id", ""))))
+    return out
+
+
+def save_model_favorites(favs):
+    os.makedirs(DATA, exist_ok=True)
+    for i, f in enumerate(favs):
+        f["order"] = i
+    write_json(model_favorites_path(), {
+        "version": MODEL_FAVORITES_VERSION,
+        "favorites": favs,
+    })
+
+
+def _fav_name(v):
+    name = unicodedata.normalize("NFC", str(v or "")).strip()
+    if not name:
+        raise ValueError("お気に入り名を入れてください")
+    if len(name) > 12:
+        raise ValueError("お気に入り名は全角12文字までです")
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError("お気に入り名に使えない文字があります")
+    return name
+
+
+def _fav_model(v, provider, label, required=True):
+    model = str(v or "").strip()
+    if required and provider != "antigravity" and not model:
+        raise ValueError(f"{label}のモデルを選んでください")
+    if model and not google_ai.MODEL_ID_RE.fullmatch(model):
+        raise ValueError(f"{label}のモデルIDが不正です")
+    return model
+
+
+def _norm_fav(f):
+    if not isinstance(f, dict):
+        raise ValueError("お気に入りデータが不正です")
+    provider = str(f.get("provider") or "").strip().lower()
+    if provider not in FAV_PROVIDERS:
+        raise ValueError("プロバイダーが不正です")
+
+    if provider == "antigravity":
+        thinking = ""
+        choices_thinking = ""
+    else:
+        thinking = str(f.get("thinking") or "auto").strip().lower()
+        if thinking not in google_ai.VALID_THINKING_LEVELS:
+            raise ValueError("本文の思考レベルが不正です")
+        choices_raw = f.get("choices_thinking") or f.get("choicesThinking") or "low"
+        choices_thinking = str(choices_raw).strip().lower()
+        if choices_thinking not in google_ai.VALID_CHOICES_THINKING_LEVELS:
+            raise ValueError("選択肢などの思考レベルが不正です")
+
+    return {
+        "name": _fav_name(f.get("name")),
+        "provider": provider,
+        "main": _fav_model(f.get("main"), provider, "本文", required=True),
+        "choices": _fav_model(f.get("choices"), provider, "選択肢", required=False),
+        "thinking": thinking,
+        "choices_thinking": choices_thinking,
+    }
+
+
+def _fav_same(a, b):
+    keys = ("provider", "main", "choices", "thinking")
+    if not all((a.get(k) or "") == (b.get(k) or "") for k in keys):
+        return False
+    ct_a = a.get("choices_thinking") or a.get("choicesThinking") or ""
+    ct_b = b.get("choices_thinking") or b.get("choicesThinking") or ""
+    return ct_a == ct_b
 
 
 # ---------------------------------------------------------------- push
@@ -2668,6 +2762,8 @@ def output_text(st, is_diff=False, transport="ag"):
             "status（状態・痕跡）, promise（約束・予定）, char_fact（キャラの秘密）, user_fact（ユーザーの好み・秘密）, "
             "relationship（関係性の変化）, event（日常や重要出来事）。"
             "※必ずキャラ名またはユーザー名を主語にした三人称完全自立文で1エピソード1文で記述すること（❌主語抜け曖昧文は禁止）。",
+            "  - relationship は関係が実際に変わった確定事実のみ（付き合った・別れた・仲直りした等）。"
+            "「〜みたい」「〜のふり」の比喩や「大好き」等のその場の感情、既に確定した関係の繰り返しは relationship にしない。",
             "- 任意キー（変化・該当がない通常ターンはキー自体を省略すること）:",
             (f"  - memo: {MEMO_REMIND_TURNS}ターンごとの定期更新指示時、または大きな場面転換時のみ"
              "「これまでの主な出来事＋現在の状況」の全文を出力（それ以外は省略）。"
@@ -4169,16 +4265,18 @@ def build_memory_extract_context(s, m):
             "label": "長期記憶の要約・抽出タスク（指示）",
             "text": (
                 "【タスク: 長期記憶の要約・抽出】\n"
-                f"直前のあなた（{ch_name}）と{user}の会話から、「今後の会話で忘れてはならない重要な情報」があれば抽出し、JSONで出力してください。\n"
+                f"直前のあなた（{ch_name}）と{user}の会話から、今後忘れてはならない重要情報をJSONで抽出してください。\n"
                 '日常の挨拶や単なる相槌、特に記録すべき新事実がない場合は "memories": [] を返してください。\n\n'
                 "■ 抽出カテゴリ:\n"
                 "- rule: 催眠・暗示・刷り込み、世界観ルール、禁忌、二人の取り決め\n"
                 "- promise: 交わした約束、今後の予定・誓約\n"
-                "- item: 譲渡・受領した重要アイテム、持続的装着具（※脱着で変わる一時的な衣服・下着は除外）\n"
+                "- item: 譲渡・受領した重要アイテム、持続的装着具（一時的な衣服・下着は除外）\n"
                 "- status: 体に残る痕跡（キスマーク・傷等）、装着具の持続状態\n"
                 "- calling: 互いの呼び方・口調・敬語の協定\n"
                 "- char_fact / user_fact: 新たに判明したキャラやユーザーの秘密・体質・好み・過去\n"
-                "- relationship / event: 二人の関係性の変化、重要な出来事\n\n"
+                "- relationship: 関係が実際に変わった確定事実のみ（付き合う・別れる等）。"
+                "「〜みたい」「〜のふり」の比喩や「大好き」等の感情は不可\n"
+                "- event: 日常・重要な出来事\n\n"
                 "■ 記述ルール:\n"
                 f"- 主語を省略せず、1文単体で文脈がわかる三人称完全文で記述（例: 「{ch_name}は{user}と日曜日に水族館へ行く約束をした」）\n"
                 "- rule は恒久的な決まりだけ（「〜のに」「〜てしまう」等の情景描写・反応は不可）\n"
@@ -7311,6 +7409,8 @@ def process_outbox():
                     elif not isinstance(raw_mems, (list, tuple)):
                         raw_mems = []
                     mems = [m for m in raw_mems if isinstance(m, (dict, str))]
+                    # relationship は要約文だけ許可（地の文・セリフのコピーは捨てる）
+                    mems = memory_store.drop_narrated_relationship(mems, target_mem_asst.get("text", ""))
                     raw_res = rep.get("resolved_ids")
                     if isinstance(raw_res, (str, int)):
                         res_ids = [str(raw_res).strip()]
@@ -7906,6 +8006,8 @@ def process_outbox():
                             seen_pairs.add(pair)
 
                 # 4. 1回だけキューイング（I/O 1回・MAX_NEW を守る）
+                # relationship は要約文だけ許可（地の文・セリフのコピーは捨てる）
+                combined = memory_store.drop_narrated_relationship(combined, msg.get("text", ""))
                 if combined or resolved:
                     queued_memories.append(("explicit", sid, ch_name, combined, resolved, turn_idx, msg["id"], el_snapshot))
                 elif (not is_api_provider(s.get("setting") or {})
@@ -9501,6 +9603,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json({"folders": folder_options()})
             if p == "/api/file-presets":
                 return self.send_json({"presets": [x for x in read_json(PRESETS, []) if isinstance(x, dict)]})
+            if p == "/api/model-favorites":
+                with lock:
+                    return self.send_json({"ok": True, "favorites": load_model_favorites()})
             if p == "/api/prompt-preview":
                 s = load(q.get("sid", [""])[0])
                 block, missing = settings_block(s["setting"])
@@ -10190,6 +10295,76 @@ class H(BaseHTTPRequestHandler):
                 write_json(os.path.join(TRASH, f"filepreset_{gone[0]['id']}_{int(time.time())}.json"), gone[0])
                 write_json(PRESETS, [x for x in presets if x.get("id") != d.get("id")])
                 return self.send_json({"ok": True})
+            if p == "/api/model-favorites":
+                action = str(d.get("action") or "").strip().lower()
+                try:
+                    with lock:
+                        favs = load_model_favorites()
+
+                        if action == "create":
+                            f = _norm_fav(d.get("favorite") or {})
+                            if any(x.get("name", "").casefold() == f["name"].casefold() for x in favs):
+                                return self.send_json({"error": "同じ名前のお気に入りがあります"}, 409)
+                            if any(_fav_same(x, f) for x in favs):
+                                return self.send_json({"error": "同じ組み合わせのお気に入りがあります"}, 409)
+                            f["id"] = "fav_" + new_id()
+                            f["order"] = len(favs)
+                            favs.append(f)
+                            save_model_favorites(favs)
+                            return self.send_json({"ok": True, "favorites": favs, "favorite": f})
+
+                        if action == "update":
+                            fid = str(d.get("id") or "").strip()
+                            idx = next((i for i, x in enumerate(favs) if x.get("id") == fid), -1)
+                            if idx < 0:
+                                return self.send_json({"error": "お気に入りが見つかりません"}, 404)
+                            old = favs[idx]
+                            f = _norm_fav(d.get("favorite") or {})
+                            if any(x.get("id") != fid and x.get("name", "").casefold() == f["name"].casefold() for x in favs):
+                                return self.send_json({"error": "同じ名前のお気に入りがあります"}, 409)
+                            if any(x.get("id") != fid and _fav_same(x, f) for x in favs):
+                                return self.send_json({"error": "同じ組み合わせのお気に入りがあります"}, 409)
+                            f["id"] = fid
+                            f["order"] = old.get("order", idx)
+                            favs[idx] = f
+                            save_model_favorites(favs)
+                            return self.send_json({"ok": True, "favorites": favs, "favorite": f})
+
+                        if action == "delete":
+                            fid = str(d.get("id") or "").strip()
+                            idx = next((i for i, x in enumerate(favs) if x.get("id") == fid), -1)
+                            if idx < 0:
+                                return self.send_json({"error": "お気に入りが見つかりません"}, 404)
+                            deleted = favs.pop(idx)
+                            save_model_favorites(favs)
+                            return self.send_json({
+                                "ok": True, "favorites": favs,
+                                "deleted": deleted, "index": idx,
+                            })
+
+                        if action == "restore":
+                            raw = d.get("favorite") or {}
+                            f = _norm_fav(raw)
+                            fid = str(raw.get("id") or "").strip()
+                            if any(x.get("name", "").casefold() == f["name"].casefold() for x in favs):
+                                return self.send_json({"error": "同名のお気に入りが追加されています"}, 409)
+                            if any(_fav_same(x, f) for x in favs):
+                                return self.send_json({"error": "同じ組み合わせのお気に入りがあります"}, 409)
+                            f["id"] = fid if fid and not any(x.get("id") == fid for x in favs) else "fav_" + new_id()
+                            raw_idx = d.get("index")
+                            try:
+                                idx_val = int(raw_idx) if raw_idx is not None else len(favs)
+                            except (TypeError, ValueError):
+                                idx_val = len(favs)
+                            idx = max(0, min(idx_val, len(favs)))
+                            f["order"] = idx
+                            favs.insert(idx, f)
+                            save_model_favorites(favs)
+                            return self.send_json({"ok": True, "favorites": favs, "favorite": f})
+
+                        return self.send_json({"error": "action が不正です"}, 400)
+                except ValueError as e:
+                    return self.send_json({"error": str(e)}, 400)
             if p == "/api/char-presets":
                 name = (d.get("name") or "").strip() if isinstance(d.get("name"), str) else ""
                 tags = ", ".join(split_tags(d.get("tags") if isinstance(d.get("tags"), str) else ""))
@@ -11029,9 +11204,14 @@ class H(BaseHTTPRequestHandler):
                 provider = str(d.get("provider") or "antigravity").strip().lower()
                 if provider not in ("antigravity", "google", "vertex"):
                     return self.send_json({"error": "provider は antigravity / google / vertex のいずれかを指定してください"}, 400)
+                strict = bool(d.get("strict"))
                 req_model = str(d.get("model") or "").strip()
                 if req_model and not google_ai.MODEL_ID_RE.fullmatch(req_model):
                     return self.send_json({"error": "モデルIDの形式が不正です"}, 400)
+
+                req_choices = str(d.get("choices_model") or "").strip()
+                if req_choices and not google_ai.MODEL_ID_RE.fullmatch(req_choices):
+                    return self.send_json({"error": "選択肢モデルIDの形式が不正です"}, 400)
 
                 if provider == "google":
                     key, _ = google_ai.load_key()
@@ -11055,14 +11235,34 @@ class H(BaseHTTPRequestHandler):
                     ):
                         return self.send_json({"error": "応答待ち中はAIプロバイダを切り替えられません。停止してから切り替えてください。"}, 409)
 
+                    if strict:
+                        if rotation_state(s).get("phase"):
+                            return self.send_json({
+                                "error": "世代交代の準備中はモデルを切り替えられません",
+                                "code": "busy_rotation",
+                            }, 409)
+                        if any(
+                            m.get("memory_status") in ("pending", "processing")
+                            or m.get("consolidation_status") in ("pending", "processing")
+                            for m in s.get("messages", [])
+                        ):
+                            return self.send_json({
+                                "error": "記憶整理中はモデルを切り替えられません",
+                                "code": "busy_background",
+                            }, 409)
+
                     st["ai_provider"] = provider
                     if provider in ("google", "vertex"):
                         if provider == "google":
                             model = req_model or st.get("google_model") or google_ai.default_model()
                             st["google_model"] = model
+                            if "choices_model" in d:
+                                st["google_choices_model"] = req_choices
                         else:
                             model = req_model or st.get("vertex_model") or google_ai.default_vertex_model()
                             st["vertex_model"] = model
+                            if "choices_model" in d:
+                                st["vertex_choices_model"] = req_choices
                         if "fetch" in d:
                             st["google_fetch"] = bool(d.get("fetch"))
                         if "safety_off" in d:
@@ -11078,6 +11278,8 @@ class H(BaseHTTPRequestHandler):
                     else:
                         if "model" in d:
                             st["ide_model"] = req_model
+                        if "choices_model" in d:
+                            st["choices_ide_model"] = req_choices
                         model = st.get("ide_model") or ""
                         s.pop("rotation", None)
                         s.pop("rotation_reserve", None)
@@ -11118,6 +11320,12 @@ class H(BaseHTTPRequestHandler):
                         st.get("google_model") if provider == "google" else st.get("ide_model")),
                     "choices_model": st.get("vertex_choices_model") if provider == "vertex" else (
                         st.get("google_choices_model") if provider == "google" else st.get("choices_ide_model")),
+                    "google_model": st.get("google_model", ""),
+                    "google_choices_model": st.get("google_choices_model", ""),
+                    "vertex_model": st.get("vertex_model", ""),
+                    "vertex_choices_model": st.get("vertex_choices_model", ""),
+                    "ide_model": st.get("ide_model", ""),
+                    "choices_ide_model": st.get("choices_ide_model", ""),
                     "fetch": st.get("google_fetch", True),
                     "safety_off": st.get("google_safety_off", True),
                     "max_output_tokens": st.get("google_max_output_tokens", 8192),
@@ -11412,7 +11620,7 @@ class H(BaseHTTPRequestHandler):
                 # 固定キャラ（AI が応答で足す）と担当IDE（専用の操作で変える）はフォームから上書きさせない
                 keep = {k: s["setting"].get(k, v) for k, v in NO_IDE.items()}
                 for _pk in (
-                    "ai_provider", "google_model", "google_fetch", "google_safety_off",
+                    "ai_provider", "google_model", "google_choices_model", "google_fetch", "google_safety_off",
                     "google_max_output_tokens", "vertex_model", "vertex_choices_model",
                     "thinking_level", "choices_thinking_level",
                 ):

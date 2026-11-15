@@ -39,7 +39,18 @@ let navHoldBottom = false;
 // そのままでは「返信が届いたら本文を上端にそろえる」判定（下端付近か）が外れるので、
 // 見える高さが変わったら最下段を読み続けている間は最下段へ戻す。
 let pinnedBottom = true;
-let lastAutoScrolledAsstId = "";            // スマホで本文表示時に上端合わせした最新AI応答のID
+// 送信した自分の発言や、届いた返信のカードを「上端合わせ」で見せているときのスクロール位置。
+// そのままの位置でいるなら、次の返信が届いた瞬間にその返信の上端へ寄せる（読んでいる途中なら動かさない）。
+let topAlignHold = null;
+// カードを画面上端に置くための一時的な下余白（カードが短いときだけ足す）。
+// 新しい内容が下に増えたとき・セッションを切り替えたとき・次に送信したときに片付ける。
+let topAlignSpacerPx = 0;
+let topAlignBasePad = 0;
+// 上端合わせのあと、ユーザー自身がログをスクロールしたか。
+// 端末のレイアウト変化やプログラム側のスクロールで scrollTop がずれても
+// 「読んでいる途中で勝手に動かさない」判定が崩れないように、位置ではなく操作で判定する。
+let userScrolledSinceAlign = false;
+let lastAutoScrolledAsstId = "";            // 上端合わせで見せた最新AI応答のID
 const _initParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 let sid = (_initParams && _initParams.get("sid")) || getStorage("sid") || "";
 let state = null;
@@ -112,8 +123,9 @@ const SHORT_STATUS = {
 };
 
 // 入力欄のプレースホルダ。PC は Enter 送信（Shift+Enter で改行）、スマホは Enter 改行。
-const PLACEHOLDER_DESKTOP = "ユーザーのセリフや行動を入力";
-const PLACEHOLDER_MOBILE = "ユーザーのセリフや行動を入力";
+// スマホはカードが 1 行に収まるよう短い文言（折り返すと入力欄の高さが無駄になる）
+const PLACEHOLDER_DESKTOP = "セリフや行動を入力";
+const PLACEHOLDER_MOBILE = "セリフや行動を入力";
 function syncInputPlaceholder() {
   const ta = $("messageInput");
   if (ta) ta.placeholder = isMobileLayout() ? PLACEHOLDER_MOBILE : PLACEHOLDER_DESKTOP;
@@ -322,7 +334,8 @@ function autoResizeInput() {
 
 // FAB の表示と役割を「今開いているレイヤー」から毎回1箇所で導出する。
 // ここだけが fab-hidden / is-close を書き換える（散在する add/remove は禁止）。
-// - visible: モバイル かつ 入力中でなく、何らかのオーバーレイ（モーダル/⋯シート/lightbox）に覆われていない
+// - visible: モバイル かつ 何らかのオーバーレイ（モーダル/⋯シート/lightbox）に覆われていない。
+//   入力中（キーボード表示中）も隠さない（フッターのすぐ上に浮くので入力欄を塞がない）
 // - closeMode: FAB が上に乗るレイヤー（設定/ドロワー）が開いている
 function updateFabState() {
   const fab = $("mobileFab");
@@ -333,10 +346,10 @@ function updateFabState() {
   const hasOpenModal = typeof document.querySelectorAll === "function" && document.querySelectorAll(".modal:not(.hidden)").length > 0;
   const isSideOpen = !!(document.body && document.body.classList && document.body.classList.contains("side-open"));
   const isSettingsOpen = !!($("settingsPanel") && !$("settingsPanel").classList.contains("hidden"));
-  const typing = isFooterFocused();
 
-  // モーダル・シート・lightbox は自前の閉じる導線があるので、FAB は完全に消す
-  const visible = mobile && !typing && !moreSheet && !lightbox && !hasOpenModal;
+  // モーダル・シート・lightbox は自前の閉じる導線があるので、FAB は完全に消す。
+  // 入力中は消さない（☰ を押せばそのままドロワーを開ける）
+  const visible = mobile && !moreSheet && !lightbox && !hasOpenModal;
   const closeMode = isSettingsOpen || isSideOpen;
   if (fab) {
     fab.classList.toggle("fab-hidden", !visible);   // 未知クラス（RP色など）は保持
@@ -420,6 +433,12 @@ function syncFootBarPlacement() {
 }
 
 async function api(path, body, method = null) {
+  if (body && typeof body === "object" && (body.method || (body.headers && typeof body.body === "string"))) {
+    const opt = { ...body };
+    if (!opt.method) opt.method = "POST";
+    const r = await fetch(path, opt);
+    return r.json();
+  }
   const m = method || (body ? "POST" : "GET");
   const opt = { method: m };
   if (body) {
@@ -458,6 +477,47 @@ function closeLightbox() {
   const img = $("lightboxImg");
   if (img) img.src = "";
   updateFabState();
+}
+
+// 入力欄をタップして入力待機になっている間に本文カード（や画像・背景）をタップしたときは、
+// いきなり拡大表示せず、まず入力キャンセル（キーボードを閉じる）だけを行う。
+// click が来る時点では入力欄のフォーカスは既に外れているので、押した瞬間の状態を覚えておく。
+let inputActiveOnPress = false;
+function isInputWaiting() {
+  if (typeof document === "undefined") return false;
+  if (document.body && document.body.classList && document.body.classList.contains("typing-input")) return true;
+  const footer = document.querySelector("footer");
+  return !!(footer && document.activeElement && footer.contains(document.activeElement));
+}
+function markInputActiveOnPress() { inputActiveOnPress = isInputWaiting(); }
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("pointerdown", markInputActiveOnPress, true);
+  window.addEventListener("mousedown", markInputActiveOnPress, true);   // pointerdown 非対応環境向け
+  window.addEventListener("touchstart", markInputActiveOnPress, { capture: true, passive: true });
+  // 拡大表示の導線を通らないタップでも記録が残り続けないよう、クリックの最後で必ず解除する
+  // （document の bubble 段なので、カード側の click ハンドラより後に実行される）
+  document.addEventListener("click", () => { inputActiveOnPress = false; }, false);
+}
+// 押した瞬間に入力待機だったときは、入力キャンセルだけして true を返す（拡大表示はしない）。
+// 2回目（入力キャンセル後）のタップでは false を返すので、そのまま拡大表示できる。
+function cancelInputOnFirstTap() {
+  const wasWaiting = inputActiveOnPress || isInputWaiting();
+  inputActiveOnPress = false;
+  if (!wasWaiting) return false;
+  const ae = typeof document !== "undefined" ? document.activeElement : null;
+  if (ae && typeof ae.blur === "function") {
+    try { ae.blur(); } catch (e) {}
+  }
+  setTypingInput(false);
+  setComposerExpanded(false);
+  autoResizeInput();
+  updateFabState();
+  return true;
+}
+// タップで拡大表示する導線はこれを通す（入力中はキャンセルだけになる）
+function openLightboxByTap(src) {
+  if (cancelInputOnFirstTap()) return;
+  openLightbox(src);
 }
 
 if (typeof window !== "undefined") {
@@ -672,6 +732,7 @@ async function switchTo(id) {
   lastRev = -1;
   navHoldBottom = false;
   pinnedBottom = true;
+  clearTopAlignHold();
   lastAutoScrolledAsstId = "";
   state = null;
   rpBgFile = undefined;
@@ -689,6 +750,7 @@ async function switchTo(id) {
   log.innerHTML = "";
   hideReveal();                                   // 前のチャンネルの操作を残さない（★19）
   if ($("modelSheet")) $("modelSheet").classList.add("hidden");
+  closeFavModelSheet();
   if ($("elapsedModal")) $("elapsedModal").classList.add("hidden");
   await poll();
   renderSessions();
@@ -696,6 +758,7 @@ async function switchTo(id) {
   updateFabState();
   autoResizeInput();
   updateHeaderAndSideStatus();
+  if (typeof syncComposerModelChip === "function") syncComposerModelChip();
 }
 
 // ---------------------------------------------------------------- settings form
@@ -1079,6 +1142,84 @@ function scrollAssistantToTop(el) {
   // 移動先が最下段そのものなら、自動追従は解除したままにする。
   if (log.scrollHeight - log.scrollTop - log.clientHeight <= 2) navHoldBottom = false;
   updateRpBg();   // 背景表示も、移動先の返信に合わせて即座に切り替える
+}
+// 送信直後の一時的な下余白。#chatLog の元の padding-bottom を保ったまま上乗せする
+function applyTopAlignSpacer(px) {
+  if (!log) return;
+  px = Math.max(0, Math.round(px || 0));
+  if (!px) {
+    if (topAlignSpacerPx) { log.style.removeProperty("padding-bottom"); topAlignSpacerPx = 0; }
+    return;
+  }
+  if (px === topAlignSpacerPx) return;
+  if (!topAlignSpacerPx) {
+    try { topAlignBasePad = parseFloat(getComputedStyle(log).paddingBottom) || 0; } catch { topAlignBasePad = 0; }
+  }
+  topAlignSpacerPx = px;
+  log.style.paddingBottom = (topAlignBasePad + px) + "px";
+}
+function clearTopAlignHold() {
+  topAlignHold = null;
+  applyTopAlignSpacer(0);
+}
+// カード（発言）の上端を画面上端（スマホではチップ直下）へピタッと寄せる。
+// 下に十分な余白がないときは、その分の一時的な下余白を足して上端に置けるようにする。
+// el はバブルでも msg-wrap でもよい。
+function alignCardToTop(el) {
+  if (!el || !log) return;
+  const logRect = log.getBoundingClientRect();
+  let padTop = 0;
+  try { padTop = parseFloat(getComputedStyle(log).paddingTop) || 0; } catch {}
+  const topOffset = (padTop > 0 ? padTop : 6) + 6;
+  const r = el.getBoundingClientRect();
+  // カードの下端より下にあるもの（応答待ち・進捗・余白）の高さ。一時的な下余白は除いて数える
+  const below = Math.max(0, log.scrollHeight - (log.scrollTop + (r.bottom - logRect.top)) - topAlignSpacerPx);
+  // 上端まで持っていくのに足りない分だけ、一時的な下余白を足す（+2 は丸めの保険）
+  applyTopAlignSpacer((log.clientHeight - topOffset) - (r.height + below) + 2);
+  scrollAssistantToTop(el);
+  // 余白があると「下端ぴったり」でも navHoldBottom が外れず、その後の返信が上端合わせされなくなる。
+  // 位置の保持は topAlignHold で見ているので、ここでは自動追従の抑止を解く。
+  navHoldBottom = false;
+  const wrapEl = el.closest ? el.closest(".msg-wrap") : null;
+  topAlignHold = { scrollTop: log.scrollTop, mid: (wrapEl && wrapEl.id) || el.id || "" };
+  userScrolledSinceAlign = false;
+}
+// 返信が届いた直後は、キーボードや URL バーの伸縮でレイアウトが動いて位置がずれることがある。
+// 少し遅れてもう一度合わせ直す（その間にユーザーが自分でスクロールしたら何もしない）。
+function alignCardToTopRetry(el) {
+  if (!el) return;
+  alignCardToTop(el);   // 呼び出し側の判断（下端付近 / 読んでいない）で、まずは即座に合わせる
+  const retry = () => {
+    // 呼び出し側ではなく「合わせた後に」ユーザーがスクロールしたときだけ見送る
+    if (userScrolledSinceAlign || !el.isConnected) return;
+    alignCardToTop(el);
+  };
+  const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+  raf(retry);
+  setTimeout(retry, 90);
+  setTimeout(retry, 280);
+}
+// 送信した自分の発言を、すぐ読める位置（画面上端）へ移す。
+// チャット全体が画面に収まるほど短いときだけ、余白を足さず一番下まで。
+// 返り値: 上端合わせにしたら true（最下段なら false）
+function revealSentUserMessage() {
+  if (!log) return false;
+  const wraps = log.querySelectorAll(".msg-wrap.user");
+  const wrap = wraps.length ? wraps[wraps.length - 1] : null;
+  const toBottom = () => {
+    navHoldBottom = false;
+    pinnedBottom = true;
+    clearTopAlignHold();
+    log.scrollTop = Math.max(0, log.scrollHeight - log.clientHeight);
+    updateRpBg();
+    return false;
+  };
+  const wr = wrap ? wrap.getBoundingClientRect() : null;
+  if (!wr || !wr.height) return toBottom();
+  // チャット全体が画面に収まる（短い）ときは、余白を足さず一番下まで
+  if (log.scrollHeight - topAlignSpacerPx <= log.clientHeight) return toBottom();
+  alignCardToTop(wrap);
+  return true;
 }
 function jumpToPrevAssistantReply() { jumpToAssistantReply(-1); }
 function jumpToNextAssistantReply() { jumpToAssistantReply(1); }
@@ -1807,7 +1948,7 @@ function renderModels() {
 
   const optsMain = [
     `<optgroup label="Antigravity（IDE連携）">${agOpts.join("")}</optgroup>`,
-    `<optgroup label="Google Gemini API">${googleOpts.join("")}</optgroup>`,
+    `<optgroup label="Google AI Studio">${googleOpts.join("")}</optgroup>`,
     `<optgroup label="Vertex AI（Google Cloud）">${vertexOpts.join("")}</optgroup>`
   ];
 
@@ -1873,7 +2014,1107 @@ function renderModels() {
   updateModelSheetLeft();
   updateFootModelSubInfo();
   updateAgModelSubInfo();
+  syncComposerModelChip();
   ThinkingUI.render(state?.setting);
+  if (typeof renderFavSaveControls === "function") renderFavSaveControls();
+}
+
+// ---------------------------------------------------------------- お気に入りモデル管理
+let modelFavorites = [];
+let favSaveEditing = false;
+let lastDeletedFav = null; // { favorite, index }
+let favUndoTimer = null;
+let favApplying = false;
+
+const FAV_PROVIDER_LABELS = {
+  google: "AI Studio",
+  vertex: "Vertex",
+  antigravity: "AG",
+};
+
+const FAV_PROVIDER_FULL = {
+  google: "Google AI Studio",
+  vertex: "Vertex AI",
+  antigravity: "Antigravity",
+};
+
+function normFavConfig(raw = {}) {
+  const provider = String(raw.provider || "antigravity").trim().toLowerCase();
+  const isAg = provider === "antigravity";
+  return {
+    provider,
+    main: String(raw.main || "").trim(),
+    choices: String(raw.choices || "").trim(),
+    thinking: isAg ? "" : String(raw.thinking || "auto").trim().toLowerCase(),
+    choicesThinking: isAg ? "" : String(raw.choicesThinking ?? raw.choices_thinking ?? "low").trim().toLowerCase(),
+  };
+}
+
+function resolveCurrentMainModel(provider, st) {
+  if (provider === "google") {
+    const sel = $("googleModel") || $("googleModelSelect");
+    return String(st.google_model || sel?.value || sel?.options?.[0]?.value || "").trim();
+  }
+  if (provider === "vertex") {
+    const sel = $("vertexModel") || $("vertexModelSelect");
+    return String(st.vertex_model || sel?.value || sel?.options?.[0]?.value || "").trim();
+  }
+  return String(st.ide_model || $("agModel")?.value || $("ideModel")?.value || "").trim();
+}
+
+function currentModelConfig() {
+  const st = state?.setting || {};
+  const provider = st.ai_provider || "antigravity";
+  if (provider === "google") {
+    return normFavConfig({
+      provider,
+      main: resolveCurrentMainModel("google", st),
+      choices: st.google_choices_model || "",
+      thinking: st.thinking_level || "auto",
+      choicesThinking: st.choices_thinking_level || "low",
+    });
+  }
+  if (provider === "vertex") {
+    return normFavConfig({
+      provider,
+      main: resolveCurrentMainModel("vertex", st),
+      choices: st.vertex_choices_model || "",
+      thinking: st.thinking_level || "auto",
+      choicesThinking: st.choices_thinking_level || "low",
+    });
+  }
+  return normFavConfig({
+    provider: "antigravity",
+    main: resolveCurrentMainModel("antigravity", st),
+    choices: st.choices_ide_model || "",
+  });
+}
+
+function sameFavConfig(a, b) {
+  const x = normFavConfig(a);
+  const y = normFavConfig(b);
+  return x.provider === y.provider
+    && x.main === y.main
+    && x.choices === y.choices
+    && x.thinking === y.thinking
+    && x.choicesThinking === y.choicesThinking;
+}
+
+function activeFavorite() {
+  const cur = currentModelConfig();
+  return modelFavorites.find((f) => sameFavConfig(f, cur)) || null;
+}
+
+// 選べるモデルの一覧（プロバイダーごとに持っている形が違うので、ここで吸収する）
+function modelPoolFor(provider) {
+  if (provider === "google") return (typeof googleModels !== "undefined" && googleModels) || [];
+  if (provider === "vertex") return (typeof vertexModels !== "undefined" && vertexModels) || [];
+  if (typeof ideModels !== "undefined" && ideModels) {
+    if (Array.isArray(ideModels)) return ideModels;
+    if (Array.isArray(ideModels.models)) return ideModels.models;
+  }
+  return (typeof models !== "undefined" && Array.isArray(models)) ? models : [];
+}
+
+function shortModelLabel(provider, modelId) {
+  if (!modelId) return provider === "antigravity" ? "会話と同じ" : "モデル未設定";
+  const pool = modelPoolFor(provider);
+  const m = pool.find((x) => x && (x.id === modelId || x.model === modelId));
+  if (m) {
+    const lbl = String(m.shortLabel || m.label || m.name || m.id || m.model || "");
+    if (lbl) {
+      // Antigravity の「(High)」はモデルの区別そのものなので残す
+      const clean = (provider === "antigravity"
+        ? lbl.replace(/・既定/g, "")
+        : lbl.replace(/（[^）]*）/g, "").replace(/・既定/g, "")).trim();
+      if (clean) return clean;
+    }
+  }
+  return String(modelId).replace(/^models\//, "");
+}
+
+function choicesThinkingLabel(level) {
+  if (level === "same") return "本文と同じ";
+  return (typeof ThinkingUI !== "undefined" && (ThinkingUI.CHOICES_LEVEL_LABELS?.[level] || ThinkingUI.LEVEL_LABELS?.[level]))
+    || level;
+}
+
+// カードや行では絵文字を外して「思考 中」のように短く出す
+function plainThinkingLabel(level) {
+  if (level === "same") return "本文と同じ";
+  const raw = (typeof ThinkingUI !== "undefined" && ThinkingUI.LEVEL_LABELS?.[level]) || level || "";
+  return String(raw).replace(/^[^\p{L}\p{N}]+/u, "").trim();
+}
+
+function agChoicesStatus(st) {
+  if (!st) return "";
+  if (st.suggest_choices === false) return "選択肢の生成OFF";
+  if (st.choices_ide_manual_off) return "手動OFF";
+  if (st.choices_ide_auto) return "作成中";
+  const ide = st.choices_ide_session || "";
+  if (ide && ide !== st.ide_session) return st.choices_ide_title || `会話 ${ide.slice(0, 8)}`;
+  return "未割当（本文の会話で生成）";
+}
+
+function syncComposerModelChip() {
+  const btn = $("favModelBtn");
+  const labelEl = $("favModelLabel") || $("favModelBtnLabel");
+  if (!btn || !labelEl) return;
+
+  const cur = currentModelConfig();
+  const fav = activeFavorite();
+  const modelText = shortModelLabel(cur.provider, cur.main);
+
+  labelEl.textContent = fav ? fav.name : modelText;
+  btn.classList.toggle("is-favorite", !!fav);
+  btn.classList.toggle("is-custom", !fav);
+
+  const parts = [
+    fav ? `お気に入り: ${fav.name}` : "カスタム（未保存）",
+    `${FAV_PROVIDER_LABELS[cur.provider] || cur.provider}: ${modelText}`,
+  ];
+  if (cur.choices) {
+    parts.push(`選択肢: ${shortModelLabel(cur.provider, cur.choices)}`);
+  }
+  if (cur.provider !== "antigravity") {
+    const thLv = (typeof ThinkingUI !== "undefined" && ThinkingUI.LEVEL_LABELS?.[cur.thinking]) || cur.thinking;
+    parts.push(`本文の思考 ${thLv}`);
+    parts.push(`選択肢などの思考 ${choicesThinkingLabel(cur.choicesThinking)}`);
+  }
+  const desc = parts.join(" / ");
+  btn.title = `${desc}（タップでお気に入りモデルを開く）`;
+  btn.setAttribute("aria-label", `使用中のモデル: ${labelEl.textContent}。タップでお気に入りモデルを開く`);
+}
+
+async function loadModelFavorites() {
+  try {
+    const r = await api("/api/model-favorites");
+    if (Array.isArray(r?.favorites)) modelFavorites = r.favorites;
+  } catch (e) {
+    console.warn("loadModelFavorites failed:", e);
+  }
+  syncComposerModelChip();
+  if (typeof ThinkingUI !== "undefined" && typeof ThinkingUI.render === "function") ThinkingUI.render();
+  const sheet = $("favModelSheet");
+  if (sheet && !sheet.classList.contains("hidden")) {
+    renderFavModelSheet();
+  }
+  if (typeof renderFavSaveControls === "function") renderFavSaveControls();
+}
+
+async function postModelFavorites(body) {
+  const r = await api("/api/model-favorites", body);
+  if (!r || r.error) throw new Error(r?.error || "保存に失敗しました");
+  if (Array.isArray(r.favorites)) modelFavorites = r.favorites;
+  syncComposerModelChip();
+  if (typeof ThinkingUI !== "undefined" && typeof ThinkingUI.render === "function") ThinkingUI.render();
+  renderFavModelSheet();
+  renderFavSaveControls();
+  return r;
+}
+
+// ---- 表示用の小道具 -------------------------------------------------------
+function favProviderHint(provider) {
+  if (provider === "google") return googleConfigured ? "APIキー設定済み" : "APIキーが必要";
+  if (provider === "vertex") return vertexConfigured ? "認証済み" : "認証が必要";
+  return "IDE連携の会話を使う";
+}
+
+// バッジの色をプロバイダーごとに変える（Google=青 / Vertex=緑 / AG=紫）
+function favProviderBadgeClass(provider) {
+  if (provider === "google") return " is-google";
+  if (provider === "vertex") return " is-vertex";
+  return " is-ag";
+}
+
+// モデルIDから、選ぶときの目安になる短い説明を作る
+function favModelHint(modelId) {
+  const low = String(modelId || "").toLowerCase();
+  if (!low) return "";
+  if (low.includes("hydrogen")) return "重い・高品質";
+  if (low.includes("lite")) return "軽量・高速";
+  if (low.includes("pro")) return "重い・高品質";
+  if (low.includes("flash")) return "高速・安い";
+  if (low.includes("gemma")) return "軽量";
+  return "";
+}
+
+function favModelRows(provider) {
+  if (provider === "google" || provider === "vertex") {
+    return modelPoolFor(provider).map((m) => {
+      const usable = provider !== "vertex" || (typeof vertexModelAvailable === "function" ? vertexModelAvailable(m) : true);
+      return {
+        id: m.id, label: m.label || m.id, hint: favModelHint(m.id),
+        disabled: !usable, note: usable ? "" : "このリージョンでは使えません",
+      };
+    });
+  }
+  // Antigravity の label は「Gemini 3.8 Flash (High)」のように思考の深さ込みで届くので、そのまま出す
+  return modelPoolFor(provider).map((r) => ({
+    id: r.model || r.id, label: r.label || r.model || r.id, hint: "", disabled: false, note: "",
+  }));
+}
+
+function defaultModelForProvider(provider) {
+  if (provider === "google" || provider === "vertex") {
+    const pool = modelPoolFor(provider);
+    const okRow = pool.find((m) => provider !== "vertex" || (typeof vertexModelAvailable === "function" ? vertexModelAvailable(m) : true));
+    return (okRow || pool[0] || {}).id || "";
+  }
+  return ""; // Antigravity は「会話の最後の入力と同じ」でよい
+}
+
+function favThinkChipLabel(level) {
+  const map = { auto: "自動", minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "最大", same: "本文と同じ" };
+  return map[level] || level;
+}
+
+// ThinkingUI.resolve の eff（LOW/MEDIUM/auto(...)/budget:4096）を日本語の短い表示にする
+function favEffLabel(resolved) {
+  if (!resolved) return "";
+  if (resolved.isNone) return "思考非対応";
+  const raw = String(resolved.eff || "");
+  if (raw.startsWith("auto")) return "自動";
+  if (raw.startsWith("budget:")) return `思考量 ${raw.slice(7)}`;
+  const map = { MINIMAL: "最小", LOW: "低", MEDIUM: "中", HIGH: "高", XHIGH: "最大" };
+  return map[raw.toUpperCase()] || raw;
+}
+
+// ---- 現在の組み合わせカード ----------------------------------------------
+function renderFavCurrent(cur) {
+  const box = $("favModelCurrent");
+  if (!box) return;
+
+  const isAg = cur.provider === "antigravity";
+  const full = FAV_PROVIDER_FULL[cur.provider] || cur.provider;
+  const main = shortModelLabel(cur.provider, cur.main);
+  const choices = cur.choices ? shortModelLabel(cur.provider, cur.choices) : "本文と同じ";
+
+  const thinkMain = isAg ? "" : `<span class="fav-think-pill">思考 ${esc(plainThinkingLabel(cur.thinking))}</span>`;
+  const thinkChoices = isAg ? "" : `<span class="fav-think-pill">思考 ${esc(plainThinkingLabel(cur.choicesThinking))}</span>`;
+
+  box.innerHTML = `
+    <div class="fav-current-head"><h3>現在の組み合わせ</h3></div>
+    <button type="button" class="fav-cur-row" data-fav-current="provider">
+      <span class="fav-label">プロバイダー</span>
+      <span class="fav-cur-value">
+        <span class="fav-model-name">${esc(full)}</span>
+      </span>
+      <span class="fav-chevron" aria-hidden="true">›</span>
+    </button>
+    <button type="button" class="fav-cur-row" data-fav-current="main">
+      <span class="fav-label">本文</span>
+      <span class="fav-cur-value">
+        <span class="fav-model-name">${esc(main)}</span>${thinkMain}
+      </span>
+      <span class="fav-chevron" aria-hidden="true">›</span>
+    </button>
+    <button type="button" class="fav-cur-row" data-fav-current="choices">
+      <span class="fav-label">選択肢（8択）</span>
+      <span class="fav-cur-value">
+        <span class="fav-model-name">${esc(choices)}</span>${thinkChoices}
+      </span>
+      <span class="fav-chevron" aria-hidden="true">›</span>
+    </button>
+    ${isAg ? `<div class="fav-cur-row is-static">
+      <span class="fav-label">選択肢担当</span>
+      <span class="fav-cur-value"><span class="fav-model-name">${esc(agChoicesStatus(state?.setting))}</span></span>
+    </div>` : ""}
+    <p class="fav-note">${isAg
+      ? "選択肢は別会話。未割当の場合は本文会話のモデルを使います。"
+      : "本文と選択肢は同じプロバイダーのモデルから選びます。画像推敲・記憶抽出もこの思考レベルを使います。"}</p>
+  `;
+
+  box.querySelectorAll("[data-fav-current]").forEach((row) => {
+    row.addEventListener("click", () => openFavPicker(row.dataset.favCurrent, "current"));
+  });
+}
+
+function renderFavModelSheet() {
+  const list = $("favModelList");
+  const empty = $("favModelEmpty");
+  if (!list || !empty) return;
+
+  const cur = currentModelConfig();
+  renderFavCurrent(cur);
+
+  const count = $("favCount");
+  if (count) count.textContent = `${modelFavorites.length}件`;
+
+  list.innerHTML = "";
+
+  if (!modelFavorites.length) {
+    list.classList.add("hidden");
+    empty.classList.remove("hidden");
+    renderFavSaveControls();
+    return;
+  }
+  list.classList.remove("hidden");
+  empty.classList.add("hidden");
+
+  let activeSeen = false;
+  modelFavorites.forEach((f) => {
+    const c = normFavConfig(f);
+    const active = !activeSeen && sameFavConfig(c, cur);
+    if (active) activeSeen = true;
+
+    const row = document.createElement("div");
+    row.className = "fav-model-row" + (active ? " is-active" : "");
+    row.tabIndex = 0;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", active ? "true" : "false");
+    row.setAttribute("aria-label", `「${f.name}」を適用`);
+
+    const pLabel = FAV_PROVIDER_LABELS[c.provider] || c.provider;
+    const pBadgeCls = favProviderBadgeClass(c.provider);
+    const mainLabel = shortModelLabel(c.provider, c.main);
+    const chLabel = c.choices ? shortModelLabel(c.provider, c.choices) : "本文と同じ";
+    const isAg = c.provider === "antigravity";
+    const mainThink = isAg ? "" : `<span class="fav-think-pill">思考 ${esc(plainThinkingLabel(c.thinking))}</span>`;
+    const chThink = isAg ? "" : `<span class="fav-think-pill">思考 ${esc(plainThinkingLabel(c.choicesThinking))}</span>`;
+
+    row.innerHTML = `
+      <div class="fav-row-main">
+        <div class="fav-row-title">
+          <span class="fav-row-star" aria-hidden="true">${active ? "★" : "☆"}</span>
+          <span class="fav-provider-badge${pBadgeCls}">${esc(pLabel)}</span>
+          <span class="fav-row-name">${esc(f.name)}</span>
+          ${active ? '<span class="fav-badge">使用中</span>' : ""}
+        </div>
+        <div class="fav-row-meta">
+          <span class="fav-meta-label">本文</span><b>${esc(mainLabel)}</b>${mainThink}
+        </div>
+        <div class="fav-row-meta">
+          <span class="fav-meta-label">選択肢など</span><b>${esc(chLabel)}</b>${chThink}
+        </div>
+      </div>
+      <div class="fav-row-actions">
+        <button type="button" class="fav-row-edit" data-fav-edit="${esc(f.id)}"
+          aria-label="「${esc(f.name)}」のモデルを変える">›</button>
+        <button type="button" class="fav-row-delete" data-fav-delete="${esc(f.id)}"
+          aria-label="「${esc(f.name)}」を削除">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4.8 6.8h14.4M9.6 6.8V4.9h4.8v1.9M7.2 6.8l.8 12.3h8l.8-12.3"></path>
+            <path d="M10.3 10.4v5.4M13.7 10.4v5.4"></path>
+          </svg>
+        </button>
+      </div>
+    `;
+
+    row.addEventListener("click", (e) => {
+      const t = e.target;
+      if (t && typeof t.closest === "function" && t.closest("[data-fav-delete], [data-fav-edit]")) return;
+      applyModelFavorite(f);
+    });
+    row.addEventListener("keydown", (e) => {
+      const t = e.target;
+      if (t && typeof t.closest === "function" && t.closest("[data-fav-delete], [data-fav-edit]")) return;
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        applyModelFavorite(f);
+      }
+    });
+    row.querySelector("[data-fav-edit]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openFavPicker("main", "fav", f);
+    });
+    row.querySelector("[data-fav-delete]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteModelFavorite(f.id);
+    });
+
+    list.appendChild(row);
+  });
+
+  renderFavSaveControls();
+}
+
+// モデル一覧が読めたあとに、MODEL_PLACEHOLDER_... のような内部名を表示名へ差し替える
+function refreshFavModelLabels() {
+  const sheet = $("favModelSheet");
+  if (!sheet || sheet.classList.contains("hidden")) return;
+  renderFavModelSheet();
+  const picker = $("favPickerModal");
+  if (favPickerCtx && picker && !picker.classList.contains("hidden")) renderFavPicker();
+}
+
+function openFavModelSheet() {
+  const sheet = $("favModelSheet");
+  if (!sheet) return;
+  if (!state?.setting) {
+    if (typeof toast === "function") toast("チャンネルを開いてください", 2500);
+    return;
+  }
+  if (typeof hideReveal === "function") hideReveal();
+  document.activeElement?.blur?.();
+  hideFavSubModals();
+  favPickerCtx = null;
+  favDeleteTarget = null;
+  loadModelFavorites();
+  sheet.classList.remove("hidden");
+  if (!ideModels && typeof loadModels === "function") {
+    // モデル名を出すために一覧が必要（読めたら名前だけ差し替える）
+    loadModels().then(refreshFavModelLabels).catch(() => {});
+  }
+  renderFavModelSheet();
+  if (typeof updateFabState === "function") updateFabState();
+  if (typeof updateModelSheetLeft === "function") updateModelSheetLeft();
+  const dialog = sheet.querySelector(".modal-content.fav-model-sheet");
+  if (typeof setTimeout === "function") {
+    setTimeout(() => dialog?.focus?.({ preventScroll: true }), 0);
+  }
+}
+
+function closeFavModelSheet() {
+  const sheet = $("favModelSheet");
+  if (!sheet || sheet.classList.contains("hidden")) return;
+  hideFavSubModals();
+  favPickerCtx = null;
+  favDeleteTarget = null;
+  sheet.classList.add("hidden");
+  const area = $("favSaveArea");
+  if (area) area.innerHTML = "";
+  if (typeof updateFabState === "function") updateFabState();
+  $("favModelBtn")?.focus();
+}
+
+function openAiModalFromFavSheet() {
+  closeFavModelSheet();
+  if (typeof openAiToolModal === "function") openAiToolModal("model");
+}
+
+// 現在のチャンネルに、指定の組み合わせを適用する
+async function pushCurrentConfig(rawCfg, opts = {}) {
+  if (!sid || favApplying) return false;
+  const cfg = normFavConfig(rawCfg);
+  const cur = currentModelConfig();
+  const providerChanged = cfg.provider !== cur.provider;
+
+  if (providerChanged && !opts.skipConfirm && typeof confirm === "function") {
+    const extra = cfg.provider === "antigravity"
+      ? "\nAntigravity の会話が未割当なら新しく作成します。" : "";
+    if (!confirm(
+      `${FAV_PROVIDER_FULL[cfg.provider] || cfg.provider} に切り替えます。\n` +
+      `次の送信で会話と設定を送り直します。${extra}`
+    )) return false;
+  }
+
+  if (cfg.provider === "google" && !googleConfigured) {
+    if (typeof toast === "function") toast("Google APIキーが未設定です。モデル設定から登録してください。", 4000);
+    return false;
+  }
+  if (cfg.provider === "vertex" && !vertexConfigured) {
+    if (typeof toast === "function") toast("Vertex AI が未設定です。モデル設定から登録してください。", 4000);
+    return false;
+  }
+
+  favApplying = true;
+  try {
+    const body = {
+      sid,
+      provider: cfg.provider,
+      model: cfg.main || "",
+      choices_model: cfg.choices || "",
+      strict: true,
+    };
+    if (cfg.provider !== "antigravity") {
+      body.thinking_level = cfg.thinking || "auto";
+      body.choices_thinking_level = cfg.choicesThinking || "low";
+    }
+    const r = await api("/api/ai/provider", body);
+    if (!r || r.error) {
+      if (typeof toast === "function") toast(r?.error || "モデルを切り替えられませんでした", 4000);
+      return false;
+    }
+
+    applyProviderSettings(r);
+    if (typeof syncGoogleSettingsUI === "function") syncGoogleSettingsUI();
+    if (typeof renderModels === "function") renderModels();
+    // プロバイダーを跨ぐ適用では、会話状態とモデル一覧を裏で更新する
+    if (typeof poll === "function") poll().catch((e) => console.warn("poll after favorite apply failed:", e));
+    if (typeof loadModels === "function") loadModels().catch((e) => console.warn("loadModels after favorite apply failed:", e));
+
+    if (typeof ThinkingUI !== "undefined" && typeof ThinkingUI.render === "function") ThinkingUI.render();
+    syncComposerModelChip();
+    if (typeof renderFavSaveControls === "function") renderFavSaveControls();
+    if (providerChanged && !opts.silent && typeof toast === "function") {
+      toast(`${FAV_PROVIDER_FULL[cfg.provider] || cfg.provider} に切り替えました`, 1800);
+    }
+    return true;
+  } finally {
+    favApplying = false;
+  }
+}
+
+// お気に入り1件の組み合わせだけを書き換える（使用中ならチャンネルにも反映）
+async function updateFavoriteConfig(rawFav, nextCfg) {
+  if (!rawFav) return false;
+  const fav = modelFavorites.find((x) => x.id === rawFav.id) || rawFav;
+  const c = normFavConfig(nextCfg);
+  const wasActive = sameFavConfig(fav, currentModelConfig());
+  const favorite = {
+    name: fav.name,
+    provider: c.provider,
+    main: c.main,
+    choices: c.choices,
+    thinking: c.thinking,
+    choices_thinking: c.choicesThinking,
+  };
+  try {
+    await postModelFavorites({ action: "update", id: fav.id, favorite });
+  } catch (e) {
+    if (typeof toast === "function") toast(e.message, 3500);
+    return false;
+  }
+  const updated = modelFavorites.find((x) => x.id === fav.id) || fav;
+  if (favPickerCtx && favPickerCtx.favorite && favPickerCtx.favorite.id === updated.id) {
+    favPickerCtx.favorite = updated;
+  }
+  if (wasActive) await pushCurrentConfig(updated, { silent: true, skipConfirm: true });
+  syncComposerModelChip();
+  return true;
+}
+
+async function applyModelFavorite(fav) {
+  if (!sid || favApplying) return;
+  const ok = await pushCurrentConfig(fav);
+  if (!ok) return;
+  renderFavModelSheet();
+  closeFavModelSheet();
+  if (typeof toast === "function") toast(`${fav.name} に切り替えました`, 1800);
+}
+
+// ---- 削除確認 ------------------------------------------------------------
+let favDeleteTarget = null;
+
+function deleteModelFavorite(id) {
+  const fav = modelFavorites.find((f) => f.id === id);
+  if (!fav) return;
+  openFavDeleteModal(fav);
+}
+
+function openFavDeleteModal(fav) {
+  const modal = $("favDeleteModal");
+  if (!modal || !fav) return;
+  hideFavSubModals();
+  favDeleteTarget = fav;
+  const c = normFavConfig(fav);
+  const active = sameFavConfig(fav, currentModelConfig());
+
+  const nameEl = $("favDeleteName");
+  if (nameEl) nameEl.textContent = `「${fav.name}」を削除しますか？`;
+  const warn = $("favDeleteWarn");
+  if (warn) {
+    warn.textContent = active
+      ? "使用中の場合も、削除後は今のモデル設定が維持され、チップは本文モデル名に戻ります。"
+      : "";
+    warn.classList.toggle("hidden", !active);
+  }
+  const modelEl = $("favDeleteModel");
+  if (modelEl) {
+    modelEl.innerHTML = `<span class="fav-delete-model-star" aria-hidden="true">☆</span>`
+      + `<span>${esc(shortModelLabel(c.provider, c.main))}</span>`;
+  }
+  modal.classList.remove("hidden");
+  const btn = $("favDeleteConfirm");
+  if (btn) btn.disabled = false;
+  if (typeof setTimeout === "function") setTimeout(() => $("favDeleteCancel")?.focus(), 0);
+}
+
+function closeFavDeleteModal() {
+  $("favDeleteModal")?.classList.add("hidden");
+  favDeleteTarget = null;
+}
+
+async function confirmFavDelete() {
+  const fav = favDeleteTarget;
+  if (!fav) return;
+  const btn = $("favDeleteConfirm");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await postModelFavorites({ action: "delete", id: fav.id });
+    lastDeletedFav = { favorite: r.deleted, index: r.index };
+    closeFavDeleteModal();
+    if (favPickerCtx && favPickerCtx.favorite && favPickerCtx.favorite.id === fav.id) closeFavPicker();
+    showFavUndoBar(r.deleted?.name || "お気に入り");
+    renderFavModelSheet();
+  } catch (e) {
+    if (typeof toast === "function") toast(e.message, 3500);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ---- モデル／プロバイダーの選択（＞ から開くモーダル） ----------------------
+let favPickerCtx = null; // { section: "provider"|"main"|"choices", scope: "current"|"fav", favorite, from }
+
+function hideFavSubModals() {
+  ["favNameModal", "favPickerModal", "favDeleteModal"].forEach((id) => $(id)?.classList.add("hidden"));
+}
+
+function closeFavPicker() {
+  $("favPickerModal")?.classList.add("hidden");
+  favPickerCtx = null;
+}
+
+function openFavPicker(section, scope = "current", fav = null, from = "sheet") {
+  const modal = $("favPickerModal");
+  if (!modal) return;
+  if (scope === "fav" && !fav) return;
+  hideFavSubModals();
+  favPickerCtx = {
+    section: section || "main",
+    scope,
+    favorite: scope === "fav" ? (modelFavorites.find((x) => x.id === fav.id) || fav) : null,
+    from,
+  };
+  renderFavPicker();
+  modal.classList.remove("hidden");
+}
+
+function favPickerConfig() {
+  const ctx = favPickerCtx;
+  if (!ctx) return normFavConfig(currentModelConfig());
+  if (ctx.scope === "fav" && ctx.favorite) return normFavConfig(ctx.favorite);
+  return normFavConfig(currentModelConfig());
+}
+
+function favPickRow(o) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "fav-pick-item" + (o.selected ? " is-selected" : "") + (o.disabled ? " is-disabled" : "");
+  b.setAttribute("role", "radio");
+  b.setAttribute("aria-checked", o.selected ? "true" : "false");
+  if (o.disabled) b.disabled = true;
+
+  const main = document.createElement("span");
+  main.className = "fav-pick-main";
+  const label = document.createElement("span");
+  label.className = "fav-pick-label";
+  label.textContent = o.label || "";
+  main.appendChild(label);
+  if (o.hint) {
+    const hint = document.createElement("span");
+    hint.className = "fav-pick-hint";
+    hint.textContent = o.hint;
+    main.appendChild(hint);
+  }
+  if (o.note) {
+    const note = document.createElement("span");
+    note.className = "fav-pick-note";
+    note.textContent = o.note;
+    main.appendChild(note);
+  }
+  b.appendChild(main);
+
+  if (o.badge) {
+    const badge = document.createElement("span");
+    badge.className = "fav-pick-badge";
+    badge.textContent = o.badge;
+    b.appendChild(badge);
+  }
+  const radio = document.createElement("span");
+  radio.className = "fav-pick-radio";
+  radio.setAttribute("aria-hidden", "true");
+  b.appendChild(radio);
+
+  if (!o.disabled && typeof o.onClick === "function") b.addEventListener("click", o.onClick);
+  return b;
+}
+
+function renderFavPicker() {
+  const ctx = favPickerCtx;
+  if (!ctx) return;
+  const cfg = favPickerConfig();
+  const provider = cfg.provider;
+  const isAg = provider === "antigravity";
+  const provFull = FAV_PROVIDER_FULL[provider] || provider;
+
+  const titleEl = $("favPickerTitle");
+  const subEl = $("favPickerSub");
+  const noteEl = $("favPickerNote");
+  const list = $("favPickerList");
+  const thinkBox = $("favPickerThink");
+  const jumpProv = $("favPickerProviderRow");
+  const jumpChoices = $("favPickerChoicesRow");
+  const renameBtn = $("favPickerRename");
+  if (!titleEl || !subEl || !noteEl || !list || !thinkBox) return;
+
+  if (subEl) subEl.textContent = provFull;
+  list.innerHTML = "";
+  thinkBox.classList.add("hidden");
+  jumpProv?.classList.add("hidden");
+  jumpChoices?.classList.add("hidden");
+  renameBtn?.classList.add("hidden");
+  if (renameBtn) renameBtn.textContent = "";
+
+  if (ctx.section === "provider") {
+    titleEl.textContent = "プロバイダー";
+    noteEl.textContent = "本文と選択肢は同じプロバイダーのモデルから選びます。切り替えると会話の文脈は送り直しになります。";
+    ["antigravity", "google", "vertex"].forEach((p) => {
+      list.appendChild(favPickRow({
+        label: FAV_PROVIDER_FULL[p] || p,
+        hint: favProviderHint(p),
+        selected: p === provider,
+        onClick: () => chooseFavPickerProvider(p),
+      }));
+    });
+    return;
+  }
+
+  const isMain = ctx.section === "main";
+  titleEl.textContent = isMain ? "本文のモデルと思考" : "選択肢などのモデルと思考";
+  noteEl.textContent = isMain
+    ? `本文と選択肢は ${provFull} のモデルから選びます。`
+    : `本文と同じプロバイダーなので、${provFull} のモデルだけ表示しています。`;
+
+  const rows = favModelRows(provider);
+  const curModel = isMain ? cfg.main : cfg.choices;
+
+  if (!isMain) {
+    list.appendChild(favPickRow({
+      label: "本文と同じ",
+      hint: "いちばん安全",
+      badge: "おすすめ",
+      selected: !curModel,
+      onClick: () => chooseFavPickerModel(""),
+    }));
+  }
+
+  if (!rows.length) {
+    const p = document.createElement("p");
+    p.className = "fav-pick-empty";
+    p.textContent = provider === "google"
+      ? "Google のモデル一覧を読めません。AI・モデル・認証の詳細からキーを確認してください。"
+      : provider === "vertex"
+        ? "Vertex のモデル一覧を読めません。AI・モデル・認証の詳細から認証を確認してください。"
+        : "Antigravity のモデル一覧を読めません。";
+    list.appendChild(p);
+  }
+
+  rows.forEach((r) => {
+    list.appendChild(favPickRow({
+      label: r.label,
+      hint: r.hint,
+      note: r.note,
+      disabled: r.disabled,
+      selected: r.id === curModel,
+      onClick: () => chooseFavPickerModel(r.id),
+    }));
+  });
+
+  if (curModel && !rows.some((r) => r.id === curModel)) {
+    list.appendChild(favPickRow({
+      label: shortModelLabel(provider, curModel),
+      hint: "いまは選べない",
+      selected: true,
+      disabled: true,
+    }));
+  }
+
+  if (!isAg) {
+    thinkBox.classList.remove("hidden");
+    const isChoices = !isMain;
+    const thinkTitle = $("favPickerThinkTitle");
+    if (thinkTitle) thinkTitle.textContent = isChoices ? "思考の深さ（選択肢など）" : "思考の深さ（本文）";
+    const levels = isChoices
+      ? ["low", "minimal", "medium", "high", "same", "auto"]
+      : ["auto", "minimal", "low", "medium", "high", "xhigh"];
+    const activeLevel = isChoices ? cfg.choicesThinking : cfg.thinking;
+    const chips = $("favPickerThinkChips");
+    if (chips) {
+      chips.innerHTML = "";
+      levels.forEach((lv) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "fav-think-chip" + (lv === activeLevel ? " is-active" : "");
+        chip.textContent = favThinkChipLabel(lv);
+        chip.addEventListener("click", () => chooseFavPickerThinking(lv, isChoices));
+        chips.appendChild(chip);
+      });
+    }
+    const eff = isChoices
+      ? ThinkingUI.resolveChoices(cfg.thinking, cfg.choicesThinking, cfg.choices || cfg.main)
+      : ThinkingUI.resolve(cfg.main, cfg.thinking);
+    const effEl = $("favPickerEff");
+    if (effEl) effEl.textContent = `実効: ${favEffLabel(eff)}`;
+  }
+
+  if (isMain) {
+    jumpChoices?.classList.remove("hidden");
+    jumpProv?.classList.remove("hidden");
+    // いまの組み合わせ（または開いている行）がお気に入りなら、ここから名前を変えられる
+    const target = favPickerRenameTarget(ctx);
+    if (renameBtn && target) {
+      renameBtn.textContent = `✎「${target.name}」の名前を変える`;
+      renameBtn.classList.remove("hidden");
+    }
+  }
+}
+
+// 名前を変える対象のお気に入り（保存済みの組み合わせを開いているときだけ）
+function favPickerRenameTarget(ctx) {
+  if (!ctx) return null;
+  if (ctx.scope === "fav") {
+    const id = ctx.favorite?.id;
+    return modelFavorites.find((f) => f.id === id) || ctx.favorite || null;
+  }
+  return typeof activeFavorite === "function" ? activeFavorite() : null;
+}
+
+async function chooseFavPickerModel(modelId) {
+  const ctx = favPickerCtx;
+  if (!ctx) return;
+  const cfg = favPickerConfig();
+  const next = normFavConfig({
+    ...cfg,
+    ...(ctx.section === "main" ? { main: modelId } : { choices: modelId }),
+  });
+  const ok = ctx.scope === "fav"
+    ? await updateFavoriteConfig(ctx.favorite, next)
+    : await pushCurrentConfig(next, { skipConfirm: true });
+  if (!ok) return;
+  closeFavPicker();
+  renderFavModelSheet();
+}
+
+async function chooseFavPickerThinking(level, isChoices) {
+  const ctx = favPickerCtx;
+  if (!ctx) return;
+  const cfg = favPickerConfig();
+  const next = normFavConfig({
+    ...cfg,
+    ...(isChoices ? { choicesThinking: level } : { thinking: level }),
+  });
+  if (ctx.scope === "fav") {
+    if (!(await updateFavoriteConfig(ctx.favorite, next))) return;
+  } else if (isChoices) {
+    await ThinkingUI.setThinking(null, level);
+  } else {
+    await ThinkingUI.setThinking(level, null);
+  }
+  renderFavModelSheet();
+  renderFavPicker();
+}
+
+async function chooseFavPickerProvider(provider) {
+  const ctx = favPickerCtx;
+  if (!ctx) return;
+  const cfg = favPickerConfig();
+  const next = normFavConfig({
+    provider,
+    main: defaultModelForProvider(provider),
+    choices: "",
+    thinking: cfg.thinking,
+    choicesThinking: cfg.choicesThinking,
+  });
+  if (ctx.scope === "fav") {
+    if (!(await updateFavoriteConfig(ctx.favorite, next))) return;
+    renderFavModelSheet();
+    const fav = modelFavorites.find((x) => x.id === ctx.favorite?.id) || ctx.favorite;
+    openFavPicker("main", "fav", fav);
+    return;
+  }
+  if (!(await pushCurrentConfig(next, { skipConfirm: true }))) return;
+  renderFavModelSheet();
+  openFavPicker("main", "current");
+}
+
+function favPickerBack() {
+  const ctx = favPickerCtx;
+  if (!ctx) { closeFavPicker(); return; }
+  // 「＞」で直接開いた画面はシートへ、プロバイダー／選択肢は本文の画面へ戻す
+  if ((ctx.section === "provider" || ctx.section === "choices") && ctx.from === "main") {
+    openFavPicker("main", ctx.scope, ctx.favorite, "sheet");
+    return;
+  }
+  closeFavPicker();
+}
+
+function showFavUndoBar(name) {
+  const bar = $("favUndoBar");
+  const txt = $("favUndoText");
+  if (!bar || !txt) return;
+  if (favUndoTimer) clearTimeout(favUndoTimer);
+  txt.textContent = `「${name}」を削除しました`;
+  bar.classList.remove("hidden");
+  favUndoTimer = setTimeout(() => {
+    bar.classList.add("hidden");
+    lastDeletedFav = null;
+    favUndoTimer = null;
+  }, 5000);
+}
+
+async function restoreDeletedFavorite() {
+  if (!lastDeletedFav) return;
+  if (favUndoTimer) {
+    clearTimeout(favUndoTimer);
+    favUndoTimer = null;
+  }
+  const payload = lastDeletedFav;
+  lastDeletedFav = null;
+  $("favUndoBar")?.classList.add("hidden");
+  try {
+    await postModelFavorites({
+      action: "restore",
+      favorite: payload.favorite,
+      index: payload.index,
+    });
+    if (typeof toast === "function") toast(`「${payload.favorite.name}」を元に戻しました`, 1800);
+  } catch (e) {
+    if (typeof toast === "function") toast(e.message, 3500);
+  }
+}
+
+function defaultFavoriteName() {
+  const cur = currentModelConfig();
+  return Array.from(shortModelLabel(cur.provider, cur.main)).slice(0, 12).join("");
+}
+
+function renderFavSaveControls() {
+  const area = $("favSaveArea");
+  const sheet = $("favModelSheet");
+  if (!area || !sheet || sheet.classList.contains("hidden")) return;
+
+  area.innerHTML = "";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "fav-save-btn";
+  btn.innerHTML = `<span class="fav-save-icon" aria-hidden="true">＋</span><span>お気に入りを登録</span>`;
+  btn.onclick = () => openFavNameModal(null);
+  area.appendChild(btn);
+}
+
+function openFavNameModal(existingFav) {
+  const modal = $("favNameModal");
+  if (!modal) return;
+  // ピッカーの中から名前を変えるときは、戻ったときにピッカーへ戻れるように残す
+  const picker = $("favPickerModal");
+  const keepPicker = !!(picker && !picker.classList.contains("hidden"));
+  if (!keepPicker) hideFavSubModals();
+  modal.classList.remove("hidden");
+  renderFavNameEditor(existingFav);
+}
+
+function closeFavNameModal() {
+  $("favNameModal")?.classList.add("hidden");
+  const picker = $("favPickerModal");
+  if (favPickerCtx && picker && !picker.classList.contains("hidden")) renderFavPicker();
+  renderFavSaveControls();
+}
+
+function renderFavNameEditor(existingFav) {
+  const modal = $("favNameModal");
+  const input = $("favNameInput");
+  const count = $("favNameCount");
+  const preview = $("favNamePreview");
+  const cancel = $("favNameCancel");
+  const save = $("favNameSave");
+  const title = $("favNameModalTitle");
+  if (!modal || !input || !count || !preview || !cancel || !save) return;
+
+  if (title) title.textContent = existingFav ? "お気に入りの名前" : "お気に入りに追加";
+  save.textContent = "この名前で保存";
+  save.disabled = false;
+  input.value = existingFav?.name || defaultFavoriteName();
+
+  const clampLen = () => {
+    const chars = Array.from(input.value.normalize("NFC"));
+    if (chars.length > 12) input.value = chars.slice(0, 12).join("");
+  };
+  const update = () => {
+    count.textContent = String(Array.from(input.value.normalize("NFC")).length);
+    preview.textContent = input.value.trim() || "お気に入り";
+  };
+
+  input.oninput = () => {
+    if (!input.isComposing) {
+      clampLen();
+      update();
+    }
+  };
+  input.oncompositionend = () => {
+    clampLen();
+    update();
+  };
+  input.onblur = () => {
+    clampLen();
+    update();
+  };
+
+  cancel.onclick = closeFavNameModal;
+
+  let saving = false;
+  const doSave = async () => {
+    if (saving) return;
+    clampLen();
+    const name = input.value.trim();
+    if (!name) {
+      if (typeof toast === "function") toast("お気に入り名を入れてください", 2500);
+      return;
+    }
+    if (/[\x00-\x1f\x7f]/.test(name)) {
+      if (typeof toast === "function") toast("お気に入り名に使えない文字があります", 2500);
+      return;
+    }
+    const cur = currentModelConfig();
+    // 名前だけ変えるときは、そのお気に入りのモデル構成はそのままにする
+    const src = existingFav
+      ? {
+        provider: existingFav.provider,
+        main: existingFav.main,
+        choices: existingFav.choices,
+        thinking: existingFav.thinking,
+        choicesThinking: existingFav.choices_thinking,
+      }
+      : cur;
+    if (src.provider !== "antigravity" && !src.main) {
+      if (typeof toast === "function") toast("本文のモデルを選んでください", 2500);
+      return;
+    }
+    const favorite = {
+      name,
+      provider: src.provider,
+      main: src.main,
+      choices: src.choices,
+      thinking: src.thinking,
+      choices_thinking: src.choicesThinking,
+    };
+    saving = true;
+    save.disabled = true;
+    try {
+      if (existingFav) {
+        await postModelFavorites({ action: "update", id: existingFav.id, favorite });
+        if (typeof toast === "function") toast(`「${name}」に更新しました`, 1800);
+      } else {
+        await postModelFavorites({ action: "create", favorite });
+        if (typeof toast === "function") toast(`「${name}」をお気に入りに保存しました`, 1800);
+      }
+      closeFavNameModal();
+    } catch (e) {
+      if (typeof toast === "function") toast(e.message, 3500);
+    } finally {
+      saving = false;
+      save.disabled = false;
+    }
+  };
+
+  save.onclick = doSave;
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      doSave();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeFavNameModal();
+    }
+  };
+
+  update();
+  if (typeof setTimeout === "function") {
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
 }
 
 // ---------------------------------------------------------------- Thinking Level UI & Resolvers
@@ -1991,6 +3232,8 @@ const ThinkingUI = {
 
   async setThinking(mainLevel, choicesLevel) {
     if (!state || !state.setting) return;
+    const beforeMain = state.setting.thinking_level;
+    const beforeChoices = state.setting.choices_thinking_level;
     const body = { sid };
     if (mainLevel !== null && mainLevel !== undefined) {
       const lv = String(mainLevel).toLowerCase();
@@ -2007,15 +3250,32 @@ const ThinkingUI = {
       }
     }
     this.render(state.setting);
+    if (typeof syncComposerModelChip === "function") syncComposerModelChip();
     try {
       const res = await api("/api/ai/thinking", body);
-      if (res && res.ok && state && state.setting) {
+      if (!res || res.error || !res.ok) {
+        throw new Error(res?.error || "思考レベルを保存できませんでした");
+      }
+      if (state && state.setting) {
         if (res.thinking_level) state.setting.thinking_level = res.thinking_level;
         if (res.choices_thinking_level) state.setting.choices_thinking_level = res.choices_thinking_level;
-        this.render(state.setting);
       }
+      this.render(state?.setting);
+      if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+      if (typeof renderFavSaveControls === "function") renderFavSaveControls();
+      if (typeof toast === "function") toast("思考レベルを変更しました", 1600);
     } catch (e) {
       console.warn("failed to save thinking level:", e);
+      if (state && state.setting) {
+        state.setting.thinking_level = beforeMain;
+        state.setting.choices_thinking_level = beforeChoices;
+      }
+      this.render(state?.setting);
+      if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+      if (typeof renderFavSaveControls === "function") renderFavSaveControls();
+      if (typeof toast === "function") {
+        toast(e?.message || "思考レベルを保存できませんでした", 3500);
+      }
     }
   },
 
@@ -2045,17 +3305,23 @@ const ThinkingUI = {
     const choicesResolved = this.resolveChoices(mainLevel, choicesLevel, choicesModelId);
 
     // 2. SettingsPanel AI Summary row
+    const fav = typeof activeFavorite === "function" ? activeFavorite() : null;
     const summaryEl = $("aiSummaryText");
     if (summaryEl) {
       if (isGoogle) {
         const mLabel = currentModelId || "モデル未設定";
-        summaryEl.textContent = `Google: ${mLabel} (思考: ${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
+        const thLabel = this.LEVEL_LABELS[mainLevel] || mainLevel;
+        summaryEl.textContent = fav ? `使用中: ${fav.name}` : `使用中: AI Studio: ${mLabel} (思考: ${thLabel})`;
       } else if (isVertex) {
         const mLabel = currentModelId || "モデル未設定";
-        summaryEl.textContent = `Vertex AI: ${mLabel} (思考: ${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
+        const thLabel = this.LEVEL_LABELS[mainLevel] || mainLevel;
+        summaryEl.textContent = fav ? `使用中: ${fav.name}` : `使用中: Vertex AI: ${mLabel} (思考: ${thLabel})`;
       } else {
-        const mLabel = ($("agModel")?.value !== undefined ? $("agModel").value : st.ide_model) || "会話と同じ";
-        summaryEl.textContent = `Antigravity (${mLabel})`;
+        const rawAg = ($("agModel")?.value !== undefined ? $("agModel").value : st.ide_model) || "";
+        const mLabel = rawAg && typeof shortModelLabel === "function"
+          ? shortModelLabel("antigravity", rawAg)
+          : (rawAg || "会話と同じ");
+        summaryEl.textContent = fav ? `使用中: ${fav.name}` : `使用中: Antigravity (${mLabel})`;
       }
     }
 
@@ -2063,10 +3329,11 @@ const ThinkingUI = {
     const sideSummaryEl = $("sideAiSummaryText");
     if (sideSummaryEl) {
       if (isGoogle || isVertex) {
-        const pName = isGoogle ? "Google" : "Vertex";
-        sideSummaryEl.textContent = `${pName}: ${currentModelId || "-"} (${this.LEVEL_LABELS[mainLevel] || mainLevel})`;
+        const pName = isGoogle ? "AI Studio" : "Vertex";
+        const thLabel = this.LEVEL_LABELS[mainLevel] || mainLevel;
+        sideSummaryEl.textContent = fav ? `使用中: ${fav.name}` : `使用中: ${pName}: ${currentModelId || "-"} (${thLabel})`;
       } else {
-        sideSummaryEl.textContent = "Antigravity";
+        sideSummaryEl.textContent = fav ? `使用中: ${fav.name}` : "Antigravity";
       }
     }
 
@@ -2138,9 +3405,9 @@ const ThinkingUI = {
       // Choices Badge & Guide
       const choicesBadgeEl = $("choicesThinkingBadge");
       if (choicesBadgeEl) {
-        if (choicesResolved.isNone) choicesBadgeEl.textContent = "実効: 思考非対応";
-        else if (choicesResolved.rounded) choicesBadgeEl.textContent = `実効: ${choicesResolved.eff} (丸め)`;
-        else choicesBadgeEl.textContent = `実効: ${choicesResolved.eff}`;
+        if (choicesResolved.isNone) choicesBadgeEl.textContent = "選択肢の実効: 思考非対応";
+        else if (choicesResolved.rounded) choicesBadgeEl.textContent = `選択肢の実効: ${choicesResolved.eff} (丸め)`;
+        else choicesBadgeEl.textContent = `選択肢の実効: ${choicesResolved.eff}`;
       }
       const choicesGuideEl = $("choicesThinkingGuide");
       if (choicesGuideEl) choicesGuideEl.textContent = this.CHOICES_GUIDES[choicesLevel] || "";
@@ -2359,7 +3626,42 @@ async function saveVertexConfig() {
   }
 }
 
+function applyProviderSettingsResponse(d) {
+  if (!state || !state.setting || !d) return;
+  const st = state.setting;
+  const p = d.provider || st.ai_provider;
+  st.ai_provider = p;
+  if (d.google_model !== undefined) st.google_model = d.google_model;
+  if (d.google_choices_model !== undefined) st.google_choices_model = d.google_choices_model;
+  if (d.vertex_model !== undefined) st.vertex_model = d.vertex_model;
+  if (d.vertex_choices_model !== undefined) st.vertex_choices_model = d.vertex_choices_model;
+  if (d.ide_model !== undefined) st.ide_model = d.ide_model;
+  if (d.choices_ide_model !== undefined) st.choices_ide_model = d.choices_ide_model;
+  if (d.model !== undefined) {
+    if (p === "vertex") st.vertex_model = d.model;
+    else if (p === "google") st.google_model = d.model;
+    else st.ide_model = d.model;
+  }
+  if (d.choices_model !== undefined) {
+    if (p === "vertex") st.vertex_choices_model = d.choices_model;
+    else if (p === "google") st.google_choices_model = d.choices_model;
+    else st.choices_ide_model = d.choices_model;
+  }
+  if (typeof d.fetch === "boolean") st.google_fetch = d.fetch;
+  if (typeof d.safety_off === "boolean") st.google_safety_off = d.safety_off;
+  if (d.max_output_tokens) st.google_max_output_tokens = d.max_output_tokens;
+  if (d.thinking_level) st.thinking_level = d.thinking_level;
+  if (d.choices_thinking_level) st.choices_thinking_level = d.choices_thinking_level;
+  if (typeof ThinkingUI !== "undefined" && typeof ThinkingUI.render === "function") ThinkingUI.render();
+  syncComposerModelChip();
+  if (typeof renderFavSaveControls === "function") renderFavSaveControls();
+}
+
 async function applyProviderSettings(provider) {
+  if (typeof provider === "object" && provider !== null) {
+    applyProviderSettingsResponse(provider);
+    return;
+  }
   const p = ["google", "vertex"].includes(provider) ? provider : "antigravity";
   const body = { sid, provider: p };
   if (p === "google") {
@@ -2379,22 +3681,14 @@ async function applyProviderSettings(provider) {
   try {
     const d = await checked("/api/ai/provider", body);
     if (state?.setting && d) {
-      state.setting.ai_provider = d.provider || p;
-      if (p === "vertex" && d.model) state.setting.vertex_model = d.model;
-      if (p === "google" && d.model) state.setting.google_model = d.model;
-      if (p === "antigravity" && "model" in d) state.setting.ide_model = d.model || "";
-      if (typeof d.fetch === "boolean") state.setting.google_fetch = d.fetch;
-      if (typeof d.safety_off === "boolean") state.setting.google_safety_off = d.safety_off;
-      if (d.max_output_tokens) state.setting.google_max_output_tokens = d.max_output_tokens;
-      if (d.thinking_level) state.setting.thinking_level = d.thinking_level;
-      if (d.choices_thinking_level) state.setting.choices_thinking_level = d.choices_thinking_level;
+      applyProviderSettingsResponse(d);
     }
     await poll();
     await loadModels();
     renderModels();
     syncGoogleSettingsUI();
     flash(p === "vertex" ? "Vertex AI に切り替えました"
-      : p === "google" ? "Google Gemini に切り替えました" : "Antigravity に切り替えました");
+      : p === "google" ? "Google AI Studio に切り替えました" : "Antigravity に切り替えました");
   } catch (e) {
     if (e.code === "vertex_not_configured") openVertexConfigModal();
     else if (e.code === "google_no_key") openGoogleKeyModal();
@@ -2481,6 +3775,7 @@ function syncGoogleSettingsUI() {
   updateVertexStateBadge(vertexStatus);
 
   ThinkingUI.render(st);
+  if (typeof syncComposerModelChip === "function") syncComposerModelChip();
 }
 
 async function loadGoogleStatus() {
@@ -2622,7 +3917,7 @@ if ($("googleKeySave")) {
         try {
           const defaultModel = (d.models && d.models[0]?.id) || "";
           await checked("/api/ai/provider", { sid, provider: "google", model: defaultModel });
-          flash("Google Gemini に切り替えました");
+          flash("Google AI Studio に切り替えました");
           await poll();
         } catch (_) {}
       }
@@ -2748,7 +4043,7 @@ $("ideModel").onchange = async () => {
     try {
       await checked("/api/ai/provider", { sid, provider: "google", model });
       const label = $("ideModel").selectedOptions[0]?.textContent || model;
-      toast("Google Gemini: " + label);
+      toast("Google AI Studio: " + label);
       await poll();
       renderModels();
     } catch (e) {
@@ -3143,7 +4438,11 @@ function moreOnDocClick(e) {
 function moreOnKey(e) {
   if (e.key !== "Escape") return;
   e.stopPropagation();
+  const anchor = moreOpen.cur && moreOpen.cur.anchor;
   closeMoreMenu();
+  if (anchor && anchor.tagName === "BUTTON" && anchor.isConnected !== false) {
+    try { anchor.focus(); } catch (err) {}
+  }
 }
 
 function moreOnReflow() {
@@ -3164,7 +4463,8 @@ function closeMoreMenu() {
   if (!cur) return;
   moreOpen.cur = null;
   unbindMoreGlobal();
-  if (cur.anchor && typeof cur.anchor.setAttribute === "function") {
+  if (cur.pinWrap && cur.pinWrap.classList) cur.pinWrap.classList.remove("actions-pinned");
+  if (cur.anchor && cur.anchor.tagName === "BUTTON" && typeof cur.anchor.setAttribute === "function") {
     cur.anchor.setAttribute("aria-expanded", "false");
   }
   if (cur.el && cur.el.parentNode) cur.el.parentNode.removeChild(cur.el);
@@ -3255,7 +4555,7 @@ function buildMoreMenu(m, isLast, s) {
       }
     } catch (e) { alert("チャンネルは分岐しましたが、Antigravity の会話は分岐できませんでした:\n" + e.message); }
   }, { title: "ここまでの会話で新しいチャンネルを作る（担当の Antigravity 会話も同じところで分岐して、新しいチャンネルの担当にする）", icon: MORE_ICON_BRANCH });
-  item("📋 コピー", () => navigator.clipboard.writeText(m.text || ""));
+  item("📋 コピー", () => copyMessageText(m));
   sep();
 
   // 取り消しにくい操作はまとめて一番下に置く
@@ -3279,36 +4579,427 @@ function buildMoreMenu(m, isLast, s) {
   return menu;
 }
 
-function toggleMoreMenu(anchorBtn, m, isLast, s) {
+function toggleMoreMenu(anchorBtn, m, isLast, s, opts = {}) {
+  // 送信中の発言は操作させない（ホバー / 長押し / a11y のどの経路でもここで止まる）
+  if (isBusyUserMsg(m)) {
+    toast("応答中は操作できません。停止してから操作してください。", 4000);
+    return;
+  }
   const already = !!moreOpen.cur && moreOpen.cur.anchor === anchorBtn;
   closeMoreMenu();
   if (already) return;
 
   const menu = buildMoreMenu(m, isLast, s);
-  if (isNarrowScreen()) {
-    const backdrop = document.createElement("div");
+  const pinWrap = opts.pinWrap
+    || (anchorBtn && typeof anchorBtn.closest === "function" ? anchorBtn.closest(".msg-wrap") : null);
+  const useSheet = opts.sheet === true || isNarrowScreen();   // 長押しは常にシート
+  let backdrop = null;
+
+  if (useSheet) {
+    backdrop = document.createElement("div");
     backdrop.className = "more-backdrop";
     menu.classList.add("more-sheet");
     document.body.appendChild(backdrop);
     document.body.appendChild(menu);
     backdrop.addEventListener("click", closeMoreMenu);
-    // 画面下のメニューボタン（☰）はシートに重なる。表示は updateFabState() が導出する
-    moreOpen.cur = { kind: "sheet", el: menu, backdrop, anchor: anchorBtn };
+    moreOpen.cur = { kind: "sheet", el: menu, backdrop, anchor: anchorBtn, pinWrap };
   } else {
     menu.classList.add("more-popup");
-    menu.style.visibility = "hidden";  // 位置を決める前に見えないように
+    menu.style.visibility = "hidden";
     document.body.appendChild(menu);
     placeMorePopup(menu, anchorBtn);
     menu.style.visibility = "";
-    moreOpen.cur = { kind: "popup", el: menu, backdrop: null, anchor: anchorBtn };
+    moreOpen.cur = { kind: "popup", el: menu, backdrop: null, anchor: anchorBtn, pinWrap };
   }
 
-  if (typeof anchorBtn.setAttribute === "function") anchorBtn.setAttribute("aria-expanded", "true");
+  if (pinWrap && pinWrap.classList) pinWrap.classList.add("actions-pinned");
+
+  // aria-expanded は実ボタンのときだけ（長押しの anchor は div）
+  if (anchorBtn && anchorBtn.tagName === "BUTTON" && typeof anchorBtn.setAttribute === "function") {
+    anchorBtn.setAttribute("aria-expanded", "true");
+  }
   document.addEventListener("keydown", moreOnKey, true);
   document.addEventListener("click", moreOnDocClick, true);
   document.addEventListener("scroll", moreOnReflow, true);
   window.addEventListener("resize", moreOnReflow);
-  updateFabState();   // ⋯ シート（z66/67）は FAB を覆うので、ここで表示を導出し直す
+  updateFabState();
+}
+
+// ---- ユーザー発言カードの操作（テスト抽出開始）
+// ユーザー発言カードの操作アイコン（Material Symbols Outlined / Apache License 2.0）
+const MSG_ICON_EDIT =
+  '<svg viewBox="0 -960 960 960" aria-hidden="true" focusable="false">' +
+  '<path d="M200-200h57l391-391-57-57-391 391v57Zm-80 80v-170l528-527q12-11 26.5-17t30.5-6q16 0 31 6t26 18l55 56q12 11 17.5 26t5.5 30q0 16-5.5 30.5T817-647L290-120H120Zm640-584-56-56 56 56Zm-141 85-28-29 57 57-29-28Z"/>' +
+  '</svg>';
+const MSG_ICON_COPY =
+  '<svg viewBox="0 -960 960 960" aria-hidden="true" focusable="false">' +
+  '<path d="M360-240q-33 0-56.5-23.5T280-320v-480q0-33 23.5-56.5T360-880h360q33 0 56.5 23.5T800-800v480q0 33-23.5 56.5T720-240H360Zm0-80h360v-480H360v480ZM200-80q-33 0-56.5-23.5T120-160v-560h80v560h440v80H200Zm160-240v-480 480Z"/>' +
+  '</svg>';
+
+// 送信中（■ 停止 が見えている間）のユーザー発言か。
+// createMessageWrap / toggleMoreMenu / openUserMsgSheet で共通に使う。
+function isBusyUserMsg(m) {
+  return !!(m && m.role === "user" && (m.status === "pending" || m.status === "processing"));
+}
+
+// LAN の http でもコピーできるようにする（navigator.clipboard は secure context 限定）
+async function copyText(text) {
+  const t = String(text == null ? "" : text);
+  if (!t) return false;
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard && (typeof window !== "undefined" ? window.isSecureContext : false)) {
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch (e) { /* fallback へ */ }
+  // readonly textarea + select() + setSelectionRange() で iOS / Android / PC 共通対応。
+  // readonly によりモバイルで仮想キーボードを出さず、改行も保持し、スタブ DOM でも createRange 不要で動く。
+  let box = null;
+  const prevFocus = typeof document !== "undefined" ? document.activeElement : null;
+  try {
+    box = document.createElement("textarea");
+    box.value = t;
+    if (typeof box.setAttribute === "function") box.setAttribute("readonly", "");
+    box.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;pointer-events:none;font-size:16px;-webkit-user-select:text;user-select:text;";
+    document.body.appendChild(box);
+    if (typeof box.focus === "function") box.focus({ preventScroll: true });
+    if (typeof box.select === "function") box.select();
+    if (typeof box.setSelectionRange === "function") box.setSelectionRange(0, t.length);
+    return typeof document.execCommand === "function" ? !!document.execCommand("copy") : false;
+  } catch (e) {
+    return false;
+  } finally {
+    if (box && box.parentNode) box.parentNode.removeChild(box);   // 失敗時も DOM を残さない
+    if (prevFocus && prevFocus !== box && typeof prevFocus.focus === "function") {
+      try { prevFocus.focus({ preventScroll: true }); } catch (e2) {}
+    }
+  }
+}
+
+async function copyMessageText(m) {
+  const ok = await copyText(m && m.text ? m.text : "");
+  toast(ok ? "コピーしました" : "コピーできませんでした", ok ? 1800 : 4000);
+}
+
+function makeMoreButton(m, isLast, s) {
+  const moreBtn = document.createElement("button");
+  moreBtn.type = "button";
+  moreBtn.className = "btn-more";
+  moreBtn.textContent = "⋯";
+  moreBtn.title = "その他の操作";
+  moreBtn.setAttribute("aria-haspopup", "true");
+  moreBtn.setAttribute("aria-expanded", "false");
+  moreBtn.onclick = () => toggleMoreMenu(moreBtn, m, isLast, s);
+  return moreBtn;
+}
+
+function buildMsgHoverActions(m, isLast, s) {
+  const box = document.createElement("div");
+  box.className = "msg-hover-actions";
+  box.setAttribute("role", "group");
+  box.setAttribute("aria-label", "この発言の操作");
+
+  const text = String(m && m.text ? m.text : "").trim();
+
+  if (text) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "msg-action-btn";
+    edit.title = "この入力を編集して再送";
+    edit.setAttribute("aria-label", "この入力を編集して再送");
+    edit.innerHTML = MSG_ICON_EDIT;       // 固定の SVG 文字列だけ
+    edit.onclick = (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+      openEdit(m);
+    };
+    box.appendChild(edit);
+
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "msg-action-btn";
+    copy.title = "本文をコピー";
+    copy.setAttribute("aria-label", "本文をコピー");
+    copy.innerHTML = MSG_ICON_COPY;
+    copy.onclick = (e) => {
+      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+      copyMessageText(m);
+    };
+    box.appendChild(copy);
+  }
+
+  const more = makeMoreButton(m, isLast, s);
+  more.classList.add("msg-action-btn");   // ホバーグループ内だけ丸ボタン化
+  box.appendChild(more);
+  return box;
+}
+
+const LONG_PRESS_MS = 520;
+const LONG_PRESS_MOVE_PX = 10;
+// 長押し直後の「合成 click」を 1 回だけ握りつぶすためのフラグ。
+// 時間窓ではなく「指を離した後の次の pointerdown / keydown で解除」するので、
+// 合成 click が発生しない端末でも次の意図的なタップを飲み込まない。
+let swallowNextClick = false;
+
+function createLongPressController(opts) {
+  const delay = opts.delay;
+  const tolerance = opts.tolerance;
+  let timer = null;
+  let sx = 0, sy = 0;
+  let target = null;
+  let fired = false;
+
+  function clearTimer() {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  }
+  function reset() {
+    clearTimer();
+    target = null;
+    fired = false;
+  }
+
+  function trigger() {
+    clearTimer();
+    if (fired) return false;
+    if (!target || target.isConnected === false) { reset(); return false; }
+    if (opts.isEnabled && !opts.isEnabled()) { reset(); return false; }
+    const el = target;
+    fired = true;
+    swallowNextClick = true;   // 指を離したときの合成 click を 1 回だけ止める
+    let res = false;
+    try {
+      res = opts.onLongPress(el);
+    } catch (e) {
+      res = false;
+    }
+    if (res === false) {
+      swallowNextClick = false;
+      reset();
+      return false;
+    }
+    try { if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(10); } catch (e) {}
+    return true;
+  }
+
+  function start(x, y, el) {
+    if (opts.isEnabled && !opts.isEnabled()) return false;
+    reset();
+    sx = x; sy = y; target = el; fired = false;
+    timer = setTimeout(() => {
+      timer = null;
+      trigger();
+    }, delay);
+    return true;
+  }
+
+  function move(x, y) {
+    if (!target || fired) return;
+    if (Math.hypot(x - sx, y - sy) > tolerance) reset();  // スクロール優先
+  }
+
+  function cancel() {
+    if (fired) return;   // 発火後の scroll 等では状態を壊さない
+    reset();
+  }
+
+  function end() {
+    clearTimer();
+    const did = fired;
+    target = null;
+    fired = false;
+    return did;
+  }
+
+  return {
+    start, move, cancel, end, trigger,
+    get active() { return !!target; },
+    get fired() { return fired; },
+  };
+}
+
+function openUserMsgSheet(wrap) {
+  if (!state || !wrap) return false;
+  const mid = (wrap.dataset && wrap.dataset.mid)
+    || (typeof wrap.getAttribute === "function" ? wrap.getAttribute("data-mid") : "")
+    || "";
+  const idx = Array.isArray(state.messages) ? state.messages.findIndex((x) => x && x.id === mid) : -1;
+  if (idx < 0) return false;
+  const m = state.messages[idx];
+  if (!m || m.role !== "user") return false;
+  if (isBusyUserMsg(m)) return false;   // 送信中は開かない
+  toggleMoreMenu(wrap, m, idx === state.messages.length - 1, state, { sheet: true, pinWrap: wrap });
+  return true;
+}
+// ---- ユーザー発言カードの操作（テスト抽出終了）
+
+let userMsgLongPressInitialized = false;
+
+function initUserMsgLongPress() {
+  if (userMsgLongPressInitialized) return;
+  if (typeof log === "undefined" || !log || typeof log.addEventListener !== "function") return;
+  if (typeof document === "undefined" || typeof window === "undefined") return;
+  userMsgLongPressInitialized = true;
+
+  const asEl = (t) => (t && t.nodeType === 3 ? (t.parentElement || t.parentNode) : t);
+  const pickWrap = (t) => {
+    const el = asEl(t);
+    return (el && typeof el.closest === "function") ? el.closest(".msg-wrap.user") : null;
+  };
+  const isBlocked = (t) => {
+    const el = asEl(t);
+    return !!(el && typeof el.closest === "function"
+      && el.closest("button, input, select, textarea, [contenteditable]:not([contenteditable='false'])"));
+  };
+
+  const lp = createLongPressController({
+    delay: LONG_PRESS_MS,
+    tolerance: LONG_PRESS_MOVE_PX,
+    // 既に別の ⋯ ポップオーバー/シートが開いているなら開始しない
+    // （.more-popup は isOverlayOpen() の対象外なので、moreOpen.cur も見る）
+    isEnabled: () => !isOverlayOpen() && !moreOpen.cur && !!state,
+    onLongPress: (wrap) => openUserMsgSheet(wrap),
+  });
+
+  // 長押し成立後のドラッグで下の #chatLog がスクロールしないようにする。
+  // ネイティブの touchmove は passive にできないので、ジェスチャ中だけ登録する。
+  const lockTouchMove = (e) => {
+    if (lp.fired && e.cancelable) e.preventDefault();
+  };
+  const addLock = () => window.addEventListener("touchmove", lockTouchMove, { passive: false });
+  const removeLock = () => window.removeEventListener("touchmove", lockTouchMove);
+
+  let activePointerId = null;
+
+  const begin = (x, y, t) => {
+    const wrap = pickWrap(t);
+    if (!wrap || isBlocked(t)) return false;
+    if (wrap.classList && wrap.classList.contains("is-busy")) return false;   // 送信中は長押ししない
+    if (!lp.start(x, y, wrap)) return false;
+    addLock();
+    return true;
+  };
+
+  log.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse") return;   // マウスはホバーUIに任せる
+    // 2 本目の指（ピンチズーム等）が置かれたら長押しを即キャンセル
+    if (e.isPrimary === false || activePointerId !== null) {
+      activePointerId = null;
+      lp.cancel();
+      if (!lp.fired) removeLock();
+      return;
+    }
+    if (begin(e.clientX, e.clientY, e.target)) {
+      activePointerId = e.pointerId !== undefined ? e.pointerId : -1;
+    }
+  });
+
+  // PointerEvent 非対応の古い iOS 用フォールバック
+  if (!window.PointerEvent) {
+    log.addEventListener("touchstart", (e) => {
+      if (!e.touches || e.touches.length !== 1) {
+        lp.cancel();
+        if (!lp.fired) removeLock();
+        return;
+      }
+      begin(e.touches[0].clientX, e.touches[0].clientY, e.target);
+    }, { passive: true });
+  }
+
+  window.addEventListener("pointermove", (e) => {
+    if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+    lp.move(e.clientX, e.clientY);
+    if (!lp.active && !lp.fired) removeLock();
+  });
+  const onPointerEnd = (e) => {
+    if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+    activePointerId = null;
+    lp.end();
+    removeLock();
+  };
+  window.addEventListener("pointerup", onPointerEnd);
+  window.addEventListener("pointercancel", onPointerEnd);  // fired 状態も必ず解除
+
+  if (!window.PointerEvent) {
+    window.addEventListener("touchend", (e) => {
+      if (lp.fired && e.cancelable) e.preventDefault();  // 合成 click を止める
+      lp.end();
+      removeLock();
+    }, { passive: false });
+    window.addEventListener("touchcancel", () => { lp.end(); removeLock(); }, { passive: true });
+  }
+
+  // Android のネイティブ長押しメニューは、直前にタッチで押した時だけ横取りする。
+  // シート表示中は指の下が backdrop になるため、pointerdown は document で拾う。
+  let lastTouchDownAt = 0;
+  document.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "mouse") lastTouchDownAt = Date.now();
+  }, true);
+  const isTouchContextMenu = () => Date.now() - lastTouchDownAt <= 1000;
+
+  // 長押し中/直後は、対象が backdrop でもネイティブメニューを出さない
+  document.addEventListener("contextmenu", (e) => {
+    if (!isTouchContextMenu()) return;
+    if (lp.active || lp.fired || moreOpen.cur) e.preventDefault();
+  }, true);
+
+  log.addEventListener("contextmenu", (e) => {
+    if (!isTouchContextMenu()) return;                 // マウスの右クリックは通常メニュー
+    const wrap = pickWrap(e.target);
+    if (!wrap || isBlocked(e.target)) return;
+    if (wrap.classList && wrap.classList.contains("is-busy")) { e.preventDefault(); return; }  // 送信中
+    if (!lp.active && !lp.fired) return;               // スクロール等で取り消し済み → ネイティブに任せる
+    e.preventDefault();                                 // 長押し候補/シート表示中だけ止める
+    if (moreOpen.cur || isOverlayOpen()) return;       // 既に開いているなら何もしない
+    if (!lp.fired) {
+      // 520ms タイマーより先に contextmenu が来た場合も trigger() で同じ発火状態（fired=true）に遷移させる
+      lp.trigger();
+    }
+  });
+
+  // スクロールが始まったら長押しを取り消す（発火後は何もしない）
+  log.addEventListener("scroll", () => {
+    if (!lp.fired) { lp.cancel(); removeLock(); }
+  }, { passive: true });
+
+  // 長押し直後の合成 click を 1 回だけ握りつぶす（シート項目の誤爆防止 & シート即閉じ防止）。
+  // pointerdown が .msg.user、pointerup が .more-backdrop/.more-sheet になると合成 click の target が
+  // document.body になり、同じ document capture 上の moreOnDocClick が走るとシートが即座に閉じてしまう。
+  // stopImmediatePropagation() で同一 document 上の後続 capture リスナー（moreOnDocClick）も確実に止める。
+  document.addEventListener("click", (e) => {
+    if (!swallowNextClick) return;
+    swallowNextClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+  }, true);
+
+  // 指を離した後の新しいジェスチャ / キー操作が始まったら「握りつぶし」を解除する。
+  // これにより、合成 click が無い端末でも次の意図的なタップや Enter 操作を飲み込まない。
+  // ※ focusin は pointerup → click の間に発火するブラウザがあり、合成 click より前に解除されると危険なため使わない。
+  // ※ 長押し継続中（lp.active / lp.fired）は解除しない（2本目の指やキー押下でガードが外れるのを防ぐ）。
+  window.addEventListener("pointerdown", () => {
+    if (!lp.fired) swallowNextClick = false;
+  }, true);
+  window.addEventListener("keydown", () => {
+    if (!lp.active && !lp.fired) swallowNextClick = false;
+  }, true);
+
+  // キーボード由来のフォーカスだけで操作を出す（マウス操作後や Alt+Tab 復帰時に残らないようにする）
+  let lastInputWasKeyboard = false;
+  window.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    if (e.key === "Tab" || e.key === "Enter" || e.key === " " || e.key === "Escape" || (typeof e.key === "string" && e.key.startsWith("Arrow"))) {
+      lastInputWasKeyboard = true;
+    }
+  }, true);
+  window.addEventListener("pointerdown", () => { lastInputWasKeyboard = false; }, true);
+  log.addEventListener("focusin", (e) => {
+    const w = pickWrap(e.target);
+    if (w && lastInputWasKeyboard) w.classList.add("kbd-focus");
+  });
+  log.addEventListener("focusout", (e) => {
+    const w = pickWrap(e.target);
+    if (w && (!e.relatedTarget || !w.contains(e.relatedTarget))) w.classList.remove("kbd-focus");
+  });
 }
 
 function textDecensorLine(m, s) {
@@ -3358,6 +5049,9 @@ function createMessageWrap(m, isLast, s) {
   const wrap = document.createElement("div");
   wrap.className = "msg-wrap " + m.role;
   if (m.id) wrap.id = "msg-" + m.id;
+  if (m.id) wrap.dataset.mid = m.id;
+  // 送信中は ■ 停止 だけを出す（ホバー / 長押し / ⋯ を出さない）
+  if (isBusyUserMsg(m)) wrap.classList.add("is-busy");
   const bubble = document.createElement("div");
   bubble.className = "msg md " + m.role;
   bubble.innerHTML = m.edited ? fmtAltered(m.original_text, m.text || "") : fmt(m.text || "");
@@ -3367,7 +5061,7 @@ function createMessageWrap(m, isLast, s) {
     if (rpMode && m.role === "assistant") {
       const targetImg = m.image?.file || wrap.dataset.img || rpBgFile;
       if (targetImg) {
-        openLightbox(imgUrl(targetImg));
+        openLightboxByTap(imgUrl(targetImg));
       }
       return;
     }
@@ -3403,7 +5097,7 @@ function createMessageWrap(m, isLast, s) {
     box.className = "gen-image";
     const img = document.createElement("img");
     img.src = imgUrl(m.image.file);
-    img.onclick = () => openLightbox(img.src);
+    img.onclick = () => openLightboxByTap(img.src);
     box.appendChild(img);
     wrap.dataset.img = m.image.file;  // 背景表示で、この発言を読んでいる間の背景にする
     wrap.appendChild(box);
@@ -3552,18 +5246,29 @@ function createMessageWrap(m, isLast, s) {
   // 送信状態のテキストは表示しない。
   // 送信中かどうかは ■ 停止 ボタン自身で分かる。
 
-  // その他の操作（⋯）。常に右端。狭い画面で2段目に落ちても右端に寄せる
-  const moreBtn = document.createElement("button");
-  moreBtn.type = "button";
-  moreBtn.className = "btn-more";
-  moreBtn.textContent = "⋯";
-  moreBtn.title = "その他の操作";
-  moreBtn.setAttribute("aria-haspopup", "true");
-  moreBtn.setAttribute("aria-expanded", "false");
-  moreBtn.onclick = () => toggleMoreMenu(moreBtn, m, isLast, s);
-  bar.appendChild(moreBtn);
+  // その他の操作（⋯）:
+  //  - AI応答は従来どおり常時表示（ホバーグループに入れない）
+  //  - ユーザー発言はホバー/キーボードで出すグループに入れる（モバイルは長押し）
+  if (m.role === "user") {
+    bar.appendChild(buildMsgHoverActions(m, isLast, s));
+    if (bar.children.length === 1) bar.classList.add("hover-only-bar");
+    wrap.appendChild(bar);
 
-  wrap.appendChild(bar);
+    const a11y = document.createElement("button");
+    a11y.type = "button";
+    a11y.className = "msg-more-a11y";
+    a11y.textContent = "⋯ 操作";
+    a11y.title = "この発言の操作メニューを開く";
+    a11y.setAttribute("aria-label", "この発言の操作メニューを開く");
+    a11y.setAttribute("aria-haspopup", "true");
+    a11y.setAttribute("aria-expanded", "false");
+    a11y.onclick = () => toggleMoreMenu(a11y, m, isLast, s, { sheet: true, pinWrap: wrap });
+    wrap.appendChild(a11y);
+  } else {
+    bar.appendChild(makeMoreButton(m, isLast, s));
+    wrap.appendChild(bar);
+  }
+
   return wrap;
 }
 
@@ -3729,7 +5434,7 @@ function updateModelSheetLeft() {
   if (!sheet || sheet.classList.contains("hidden")) return;
   const prov = state?.setting?.ai_provider || "antigravity";
   if (prov === "google") {
-    el.textContent = googleConfigured ? `Google Gemini API（…${googleKeyHint}）` : "Google Gemini API（APIキー未設定）";
+    el.textContent = googleConfigured ? `Google AI Studio（…${googleKeyHint}）` : "Google AI Studio（APIキー未設定）";
     el.classList.remove("hidden");
     return;
   }
@@ -3891,7 +5596,7 @@ function render() {
   $("ragCount").textContent = (s.setting?.rag_collections || []).length;
   updateElapsedTimeUI(s.setting?.elapsed_time);
   document.title = (s.setting?.title || "") + " - RP Image Chat";
-  const nearBottom = !navHoldBottom && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
+  const nearBottom = !navHoldBottom && !topAlignHold && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
 
   const existingMap = new Map();
   for (const child of log.children) {
@@ -3993,24 +5698,35 @@ function render() {
   $("rpToggle").classList.toggle("on", rpMode);
   updateHeaderAndSideStatus();
 
-  // スマホ限定：AIから新しい返信が届いた瞬間に、本文をすぐ読めるよう上部チップ直下にカード上端を寄せる
+  // AIから新しい返信が届いた瞬間に、本文をすぐ読めるよう上部チップ直下にカード上端を寄せる
+  // （スマホ・PCの両方。送信直後で自分の発言を読んでいるときも、返信の上端へ移す）
   let didAutoScroll = false;
-  if (isMobileLayout() && nearBottom && renderLastAsstId && renderLastAsstId !== lastAutoScrolledAsstId) {
+  // 位置は見ない（キーボード伸縮などで数 px ずれるため）。「自分でスクロールしたか」で判定する
+  if ((nearBottom || !userScrolledSinceAlign) && renderLastAsstId && renderLastAsstId !== lastAutoScrolledAsstId) {
     const latestAsstMsg = s.messages.find((m) => m.id === renderLastAsstId && m.role === "assistant" && (m.text || "").trim());
     if (latestAsstMsg) {
       const wrap = document.getElementById("msg-" + renderLastAsstId);
       const bubble = wrap?.querySelector(".msg.assistant") || wrap;
       if (bubble) {
         lastAutoScrolledAsstId = renderLastAsstId;
-        scrollAssistantToTop(bubble);
+        alignCardToTopRetry(bubble);   // 余白は返信の高さに合わせて計算し直す
         didAutoScroll = true;
-        const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
-        raf(() => {
-          scrollAssistantToTop(bubble);
-        }, 0);
       }
     }
   }
+  // 返信が届いても読んでいる位置から動かさない場合（履歴を読み返し中など）は、上端合わせの保持だけ解除する。
+  // （一時余白をその場で外すと、余白の分だけスクロール位置がクランプされて画面が飛ぶ。
+  //   余白は下の内容が増えたときの後片付けに任せる）
+  if (topAlignHold && renderLastAsstId && renderLastAsstId !== lastAutoScrolledAsstId) {
+    const arrived = s.messages.find((m) => m.id === renderLastAsstId && m.role === "assistant" && (m.text || "").trim());
+    if (arrived) topAlignHold = null;
+  }
+  // 上端合わせしたカードが消えた（停止・枝分かれなど）ら位置の記録と余白を片付ける
+  if (topAlignHold && topAlignHold.mid && !document.getElementById(topAlignHold.mid)) clearTopAlignHold();
+  // 上端合わせを保持している間は余白が必要なので残す。
+  // 保持が解けて、外してもスクロール位置がクランプされないときだけ片付ける。
+  if (!topAlignHold && topAlignSpacerPx
+      && log.scrollHeight - topAlignSpacerPx - log.clientHeight >= log.scrollTop) applyTopAlignSpacer(0);
 
   if (!didAutoScroll && nearBottom) { log.scrollTop = log.scrollHeight; pinnedBottom = true; }
   updateRpBg();
@@ -4050,12 +5766,36 @@ log.addEventListener("scroll", () => {
     const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
     if (gap <= 2) navHoldBottom = false;
   }
+  // 上端合わせの位置より上へ戻った（読み返し）／大きく下へ読み進んだ → ユーザー自身の操作とみなす
+  if (topAlignHold && log.scrollTop < topAlignHold.scrollTop - 40) userScrolledSinceAlign = true;
+  // 上端合わせした長いカードを読み進めたら、保持を解除して普通の追従に戻す
+  // （余白があると最下段との区別がつかないので、長いカードのときだけ）
+  if (topAlignHold && !topAlignSpacerPx && log.scrollTop > topAlignHold.scrollTop + 40) topAlignHold = null;
+  // 自分で最下段まで戻ったら保持も解除する
+  if (topAlignHold && userScrolledSinceAlign
+      && log.scrollHeight - log.scrollTop - log.clientHeight <= 2) topAlignHold = null;
   // 最下段から離れた（＝ユーザーが読み返している）ら、勝手に最下段へ戻さない。
   if (log.scrollHeight - log.scrollTop - log.clientHeight > 2) pinnedBottom = false;
   if (!rpMode || rpTick) return;
   const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
   rpTick = raf(() => { rpTick = 0; updateRpBg(); }, 0);
 }, { passive: true });
+// ユーザーが自分でスクロールした操作（指・ホイール）を覚えておく。
+// プログラム側のスクロールやキーボードの伸縮では立たないので、「読んでいる途中か」の判定に使える。
+// タップのわずかな指ぶれをスクロールと誤ならないよう、指が 12px 以上動いたときだけ立てる。
+let logTouchStartY = null;
+log.addEventListener("touchstart", (e) => {
+  const t = e.touches && e.touches[0];
+  logTouchStartY = t ? t.clientY : null;
+}, { passive: true });
+log.addEventListener("touchmove", (e) => {
+  const t = e.touches && e.touches[0];
+  if (!t || logTouchStartY === null) return;
+  if (Math.abs(t.clientY - logTouchStartY) > 12) userScrolledSinceAlign = true;
+}, { passive: true });
+log.addEventListener("touchend", () => { logTouchStartY = null; }, { passive: true });
+log.addEventListener("touchcancel", () => { logTouchStartY = null; }, { passive: true });
+log.addEventListener("wheel", () => { userScrolledSinceAlign = true; }, { passive: true });
 
 async function poll() {
   if (!sid) return refreshSessions();
@@ -4093,6 +5833,13 @@ async function poll() {
         lastRotationNotice = s.setting.rotation_notice;
         if (!first) {
           flash(s.setting.rotation_notice);
+        }
+      }
+      // 初回表示では、最新の返信を「もう読んだ」扱いにして上端合わせ（新着時の動き）を起こさない
+      if (first) {
+        lastAutoScrolledAsstId = "";
+        for (let i = s.messages.length - 1; i >= 0; i--) {
+          if (s.messages[i].role === "assistant" && s.messages[i].id) { lastAutoScrolledAsstId = s.messages[i].id; break; }
         }
       }
       render();
@@ -4139,7 +5886,7 @@ async function pollProgress() {
     progressSid = s.id;
     const box = $("progress");
     if (box && box.innerHTML !== progressHtml) {
-      const nearBottom = !navHoldBottom && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
+      const nearBottom = !navHoldBottom && !topAlignHold && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
       box.innerHTML = progressHtml;
       if (nearBottom) { log.scrollTop = log.scrollHeight; pinnedBottom = true; }
     }
@@ -4209,9 +5956,14 @@ async function send() {
     }
     wakePoll();
     navHoldBottom = false;
-    lastAutoScrolledAsstId = "";
-    log.scrollTop = log.scrollHeight;
-    pinnedBottom = true;
+    // この時点の最新返信は「もう読んだ」扱いにする（返信が届いたときだけ上端合わせするため）
+    lastAutoScrolledAsstId = renderLastAsstId || "";
+    // 自分の発言をすぐ読める位置へ（短ければ最下段、長ければ上端合わせ）
+    revealSentUserMessage();
+    {   // 折り返しや添付画像の高さが確定したあとにもう一度合わせる
+      const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout;
+      raf(() => { revealSentUserMessage(); });
+    }
   } catch (e) {
     // 通信が切れたときもボタンが「送信中」のまま固まらないようにする
     alert("送信に失敗しました: " + (e.message || e) + "\n画面を更新して、送れたか確認してください。");
@@ -4298,7 +6050,7 @@ function filesBox(files) {
       const img = document.createElement("img");
       img.src = uploadUrl(f.path);
       img.alt = img.title = f.name;
-      img.onclick = () => openLightbox(img.src);
+      img.onclick = () => openLightboxByTap(img.src);
       box.appendChild(img);
     } else {
       const a = document.createElement("a");
@@ -5120,6 +6872,15 @@ async function revertIde(r, chSid) {
 }
 
 function openEdit(m) {
+  // 応答中（■ 停止 が見えている間、または送信/停止リクエスト通信中）は、どのユーザー発言も編集させない。
+  // 編集すると会話が巻き戻り、生成中の応答が stale として捨てられるため。
+  const busyTurn = (typeof hasWaitingInput === "function" && hasWaitingInput())
+    || (typeof sending !== "undefined" && sending)
+    || (typeof stopping !== "undefined" && stopping);
+  if (m && m.role === "user" && busyTurn) {
+    toast("応答中は編集できません。停止してから操作してください。", 4000);
+    return;
+  }
   editTarget = m;
   $("editTitle").textContent = m.role === "user" ? "過去の入力を編集" : "AI応答を改変";
   $("editHint").textContent = m.role === "user"
@@ -5136,6 +6897,14 @@ async function saveEdit() {
   const m = editTarget;
   const text = $("editText").value.trim();
   if (!m || !text) return;
+  // モーダルを開いた後に送信が始まったケースの再確認
+  const busyTurn = (typeof hasWaitingInput === "function" && hasWaitingInput())
+    || (typeof sending !== "undefined" && sending)
+    || (typeof stopping !== "undefined" && stopping);
+  if (m.role === "user" && busyTurn) {
+    toast("応答中は保存できません。停止してから操作してください。", 4000);
+    return;
+  }
   if (m.role === "user" && !confirm("この入力以降の会話を削除して再応答を待ちますか？")) return;
   const button = $("editSave");
   button.disabled = true;
@@ -5317,6 +7086,222 @@ let ragMemFilter = "all";
 let ragAllMemories = [];
 // 並び順：desc = 追加日時の新しい順（デフォルト）、asc = 古い順
 let ragMemSortDir = "desc";
+let ragMemSearchQuery = "";
+let ragMemLastSid = null;
+let ragMemSearchTimer = null;
+
+// 日本語文字単位の正規化（NFKC → 小文字化 → 全角カタカナをひらがなへ変換）
+function normalizeSearchChar(ch) {
+  if (ch == null) return "";
+  const nfkc = String(ch).normalize("NFKC").toLowerCase();
+  let out = "";
+  for (let i = 0; i < nfkc.length; i++) {
+    const code = nfkc.charCodeAt(i);
+    // 全角カタカナ (ァ..ヶ, ヴ: U+30A1..U+30F6) → ひらがな (U+3041..U+3096)
+    out += (code >= 0x30a1 && code <= 0x30f6) ? String.fromCharCode(code - 0x60) : nfkc[i];
+  }
+  return out;
+}
+
+function normalizeSearchText(str) {
+  if (str == null) return "";
+  const nfkc = String(str).normalize("NFKC").toLowerCase();
+  let out = "";
+  for (let i = 0; i < nfkc.length; i++) {
+    const code = nfkc.charCodeAt(i);
+    out += (code >= 0x30a1 && code <= 0x30f6) ? String.fromCharCode(code - 0x60) : nfkc[i];
+  }
+  return out;
+}
+
+function parseSearchWords(query) {
+  if (!query) return [];
+  return normalizeSearchText(query).trim().split(/\s+/).filter(Boolean);
+}
+
+// カード表示用と検索判定用で完全に同一のメタ文字列を生成する
+function formatRagMemMeta(mem) {
+  if (!mem) return "";
+  const parts = [];
+  if (mem.turn_idx != null) parts.push(`T${mem.turn_idx}`);
+  if (mem.elapsed_time) {
+    if (typeof mem.elapsed_time === "object") {
+      const d = mem.elapsed_time.day != null ? `${mem.elapsed_time.day}日目` : "";
+      const p = mem.elapsed_time.period || "";
+      if (d || p) parts.push(d && p ? `${d}・${p}` : (d || p));
+    } else {
+      parts.push(String(mem.elapsed_time));
+    }
+  }
+  if (mem.character_name) parts.push(`[${mem.character_name}]`);
+  return parts.join(" ");
+}
+
+// XSSゼロ＆サロゲートペア・合成文字位置ズレゼロの安全なDOMハイライト生成関数
+function appendHighlightedText(container, rawText, normWords) {
+  if (!container) return false;
+  const text = String(rawText || "");
+  if (!text || !normWords || normWords.length === 0) {
+    container.textContent = text;
+    return false;
+  }
+  const chars = Array.from(text);
+  let normFull = "";
+  const normToRawStart = [];
+  const normToRawEnd = [];
+  let rawPos = 0;
+  for (let ci = 0; ci < chars.length; ci++) {
+    let ch = chars[ci];
+    // 濁点・半濁点マーク（半角 U+FF9E/U+FF9F、結合用 U+3099/U+309A）は先行文字と一括で正規化する。
+    // 1文字ずつ NFKC すると "ｶﾞ" が "カ"+"゙" に分離してしまい、マッチ判定側（文字列全体の NFKC では "ガ" に合成）
+    // と正規化結果が食い違い、ハイライトが付かない不具合が起きるのを防ぐため。
+    while (ci + 1 < chars.length && /[\uFF9E\uFF9F\u3099\u309A]/.test(chars[ci + 1])) {
+      ch += chars[ci + 1];
+      ci++;
+    }
+    const nextRawPos = rawPos + ch.length;
+    const normCh = normalizeSearchChar(ch);
+    for (let k = 0; k < normCh.length; k++) {
+      normToRawStart.push(rawPos);
+      normToRawEnd.push(nextRawPos);
+    }
+    normFull += normCh;
+    rawPos = nextRawPos;
+  }
+
+  const ranges = [];
+  for (const w of normWords) {
+    if (!w) continue;
+    let from = 0;
+    while (from <= normFull.length - w.length) {
+      const idx = normFull.indexOf(w, from);
+      if (idx === -1) break;
+      const rStart = normToRawStart[idx];
+      const rEnd = normToRawEnd[idx + w.length - 1];
+      if (rStart < rEnd) ranges.push([rStart, rEnd]);
+      from = idx + 1;
+    }
+  }
+  if (ranges.length === 0) {
+    container.textContent = text;
+    return false;
+  }
+  // 区間ソートとマージ
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [ranges[0].slice()];
+  for (let i = 1; i < ranges.length; i++) {
+    const prev = merged[merged.length - 1];
+    if (ranges[i][0] <= prev[1]) {
+      if (ranges[i][1] > prev[1]) prev[1] = ranges[i][1];
+    } else {
+      merged.push(ranges[i].slice());
+    }
+  }
+
+  const frag = document.createDocumentFragment();
+  let cursor = 0;
+  for (const [s, e] of merged) {
+    if (cursor < s) frag.appendChild(document.createTextNode(text.slice(cursor, s)));
+    const mark = document.createElement("mark");
+    mark.className = "rag-search-highlight";
+    mark.textContent = text.slice(s, e);
+    frag.appendChild(mark);
+    cursor = e;
+  }
+  if (cursor < text.length) frag.appendChild(document.createTextNode(text.slice(cursor)));
+  container.textContent = "";
+  container.appendChild(frag);
+  return true;
+}
+
+function clearRagMemSearch(focusInput = false) {
+  clearTimeout(ragMemSearchTimer);
+  ragMemSearchQuery = "";
+  const input = $("ragMemSearchInput");
+  if (input) {
+    input.value = "";
+    input.classList.remove("has-query");
+    if (focusInput) input.focus();
+  }
+  $("ragMemSearchClear")?.classList.add("hidden");
+  if (!focusInput) {
+    $("ragModal")?.classList.remove("rag-search-focused");
+  }
+}
+
+function setupRagSearchBar() {
+  const input = $("ragMemSearchInput");
+  const clearBtn = $("ragMemSearchClear");
+  if (!input || input._bound) return;
+  input._bound = true;
+
+  const applySearch = () => {
+    ragMemSearchQuery = input.value.trim();
+    input.classList.toggle("has-query", !!ragMemSearchQuery);
+    clearBtn?.classList.toggle("hidden", !input.value);
+    renderRagMemories();
+  };
+
+  // compositionend 直後にブラウザが再発火する input（isComposing=false）の二重実行を抑止
+  let isComposing = false;
+  let composingJustEnded = false;
+
+  input.addEventListener("focus", () => {
+    $("ragModal")?.classList.add("rag-search-focused");
+  });
+  input.addEventListener("blur", () => {
+    $("ragModal")?.classList.remove("rag-search-focused");
+  });
+
+  input.addEventListener("compositionstart", () => {
+    isComposing = true;
+  });
+
+  input.addEventListener("input", (e) => {
+    const hasText = !!input.value;
+    const hasQuery = !!input.value.trim();
+    input.classList.toggle("has-query", hasQuery);
+    clearBtn?.classList.toggle("hidden", !hasText);
+    clearTimeout(ragMemSearchTimer);
+    if (e.isComposing || isComposing) return;
+    if (composingJustEnded) {
+      composingJustEnded = false;
+      if (input.value.trim() === ragMemSearchQuery) return;
+    }
+    if (input.value.trim() === ragMemSearchQuery) return;
+    ragMemSearchTimer = setTimeout(applySearch, 80);
+  });
+
+  input.addEventListener("compositionend", () => {
+    isComposing = false;
+    clearTimeout(ragMemSearchTimer);
+    composingJustEnded = true;
+    applySearch();
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if ((e.key === "Escape" || e.key === "Esc") && !e.isComposing && !isComposing) {
+      if (input.value) {
+        e.preventDefault();
+        e.stopPropagation();
+        clearRagMemSearch(true);
+        renderRagMemories();
+      }
+      // 入力が空のときの Esc は何もしない（伝播は止めない）。
+      // 現行アプリには Esc でモーダルを閉じるグローバルハンドラが存在しないため、
+      // 伝播してもモーダルは閉じず現行動作と同一。将来の Esc 閉鎖追加に備え伝播は許可する。
+    } else if (e.key === "Enter" && !e.isComposing && !isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      clearTimeout(ragMemSearchTimer);
+      applySearch();
+    }
+  });
+
+  clearBtn?.addEventListener("click", () => {
+    clearRagMemSearch(true);
+    renderRagMemories();
+  });
+}
 
 // 記憶の追加日時（UNIX秒）。無い古いデータは更新日時で代用する
 function ragMemTimestamp(mem) {
@@ -5396,6 +7381,16 @@ function setupRagFilterTabs() {
 
 async function openRag() {
   if (!sid) return;
+  // チャンネル（sid）が変わっていたら検索語とタブをリセットする
+  if (ragMemLastSid !== sid) {
+    ragMemLastSid = sid;
+    clearRagMemSearch(false);
+    ragMemFilter = "all";
+    const tabContainer = $("ragMemFilterTabs");
+    tabContainer?.querySelectorAll(".rag-filter-btn").forEach(b => {
+      b.classList.toggle("active", b.getAttribute("data-cat") === "all");
+    });
+  }
   $("ragModal").classList.remove("hidden");
   ragEditingEntry = null;
   ragMemEditingId = null;
@@ -5404,6 +7399,7 @@ async function openRag() {
   syncRagMemEditingClass();
   updateFabState();
   setupRagFilterTabs();
+  setupRagSearchBar();
   await loadRagCollections();
   switchRagTab(ragActiveTab);
 }
@@ -5455,6 +7451,8 @@ async function loadRagMemories() {
   if (!sid) return;
   const list = $("ragMemEntries");
   if (!list) return;
+  const countEl = $("ragMemSearchCount");
+  if (countEl) countEl.textContent = ""; // 読み込み中・エラー時はバッジ非表示（3.2-5）
   list.innerHTML = `<div class="muted" style="padding:12px;">記憶を読み込み中...</div>`;
   try {
     const res = await checked("/api/rag/memories?session_id=" + encodeURIComponent(sid));
@@ -5479,26 +7477,140 @@ function renderRagMemories(memories = null) {
   const list = $("ragMemEntries");
   if (!list) return;
   list.innerHTML = "";
-  // 旧データ（taboo / rule_taboo）は rule に寄せて表示する
+
+  setupRagSearchBar();
+
   const normCat = (c) => (c === "taboo" || c === "rule_taboo" ? "rule" : (c === "item_status" ? "item" : (c || "promise")));
-  const filtered = ragMemFilter === "all" ? ragAllMemories : ragAllMemories.filter(m => {
+  const searchWords = parseSearchWords(ragMemSearchQuery);
+
+  // 1. 各記憶のキーワードマッチ判定関数
+  const matchesQuery = (m) => {
+    if (searchWords.length === 0) return { matched: true, inHistory: false };
+    const metaText = formatRagMemMeta(m);
+    const mainNorm = normalizeSearchText([m.content || "", metaText].join(" "));
+    const mainMatch = searchWords.every(w => mainNorm.includes(w));
+    if (mainMatch) return { matched: true, inHistory: false };
+
+    // 履歴（history）の探索
+    // ※作中時間はカード表示（中黒区切り「2日目・夜」）と完全同一形式に統一する。
+    //   スペース区切りだと「2日目・夜」という検索語が履歴のみの記憶にヒットしない不整合になる。
+    if (m.history && Array.isArray(m.history)) {
+      for (const h of m.history) {
+        let hEt = "";
+        if (h.elapsed_time) {
+          if (typeof h.elapsed_time === "object") {
+            const hd = h.elapsed_time.day != null ? `${h.elapsed_time.day}日目` : "";
+            const hp = h.elapsed_time.period || "";
+            hEt = hd && hp ? `${hd}・${hp}` : (hd || hp);
+          } else {
+            hEt = String(h.elapsed_time);
+          }
+        }
+        const hNorm = normalizeSearchText([h.content || "", hEt].join(" "));
+        if (searchWords.every(w => hNorm.includes(w))) {
+          return { matched: true, inHistory: true };
+        }
+      }
+    }
+    return { matched: false, inHistory: false };
+  };
+
+  // 2. フィルタ処理と件数集計
+  const matchMap = new Map();
+  let allMatchedCount = 0;
+  for (const m of ragAllMemories) {
+    const res = matchesQuery(m);
+    if (res.matched) {
+      matchMap.set(m, res);
+      allMatchedCount++;
+    }
+  }
+
+  const filtered = ragAllMemories.filter(m => {
     const c = normCat(m.category);
-    if (c === ragMemFilter) return true;
-    return false;
+    if (ragMemFilter !== "all" && c !== ragMemFilter) return false;
+    return matchMap.has(m);
   });
-  // 追加日時で並び替え（デフォルトは新しい順）
-  const displayList = (filtered || []).slice().sort(compareRagMemories);
-  if (!displayList || !displayList.length) {
-    list.innerHTML = `<p class="muted" style="padding:12px;">${ragMemFilter === "all" ? "記憶はまだありません。会話が進むと自動で蓄積されます（手動追加も可能）。" : "このカテゴリの記憶はありません。"}</p>`;
+
+  // 件数バッジの更新
+  const countEl = $("ragMemSearchCount");
+  if (countEl) {
+    if (ragMemSearchQuery || ragMemFilter !== "all") {
+      countEl.textContent = `${filtered.length} / ${ragAllMemories.length}件`;
+    } else {
+      countEl.textContent = `${ragAllMemories.length}件`;
+    }
+  }
+
+  // 3. 0件時の Empty State 表示（4分岐制御）
+  if (!filtered || filtered.length === 0) {
+    const emptyWrap = document.createElement("div");
+    emptyWrap.className = "rag-empty-state";
+
+    if (ragAllMemories.length === 0) {
+      emptyWrap.innerHTML = `<p class="muted">記憶はまだありません。会話が進むと自動で蓄積されます（手動追加も可能）。</p>`;
+    } else if (ragMemSearchQuery) {
+      const msg = document.createElement("div");
+      msg.className = "rag-empty-state-msg";
+      const qText = `「${ragMemSearchQuery}」`;
+
+      if (ragMemFilter !== "all") {
+        const catLabel = CAT_LABELS[ragMemFilter] || ragMemFilter;
+        if (allMatchedCount > 0) {
+          msg.textContent = `「${catLabel}」カテゴリ内に ${qText} に一致する記憶はありません（他のカテゴリに ${allMatchedCount}件 の一致があります）`;
+        } else {
+          msg.textContent = `すべてのカテゴリに ${qText} に一致する記憶はありません。`;
+        }
+      } else {
+        msg.textContent = `${qText} に一致する記憶は見つかりませんでした。`;
+      }
+      emptyWrap.appendChild(msg);
+
+      const actDiv = document.createElement("div");
+      actDiv.className = "rag-empty-actions";
+
+      if (ragMemFilter !== "all" && allMatchedCount > 0) {
+        const allCatBtn = document.createElement("button");
+        allCatBtn.type = "button";
+        allCatBtn.className = "main-btn";
+        allCatBtn.textContent = `すべてのカテゴリで表示 (${allMatchedCount}件)`;
+        allCatBtn.onclick = () => {
+          const container = $("ragMemFilterTabs");
+          container?.querySelectorAll(".rag-filter-btn").forEach(b => b.classList.toggle("active", b.getAttribute("data-cat") === "all"));
+          ragMemFilter = "all";
+          renderRagMemories();
+        };
+        actDiv.appendChild(allCatBtn);
+      }
+
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "sub";
+      clearBtn.textContent = "検索条件をクリア";
+      clearBtn.onclick = () => {
+        clearRagMemSearch(true);
+        renderRagMemories();
+      };
+      actDiv.appendChild(clearBtn);
+      emptyWrap.appendChild(actDiv);
+    } else {
+      emptyWrap.innerHTML = `<p class="muted">このカテゴリの記憶はありません。</p>`;
+    }
+
+    list.appendChild(emptyWrap);
     return;
   }
+
+  // 4. ソート適用
+  const displayList = filtered.slice().sort(compareRagMemories);
+
+  // 5. カード描画ループ
   for (const mem of displayList) {
     const cat = normCat(mem.category);
     const pKey = resolveMemoryPriorityKey(mem);
     const card = document.createElement("div");
     card.className = `rag-entry rag-entry-${cat}`;
     if (pKey === "pinned") card.classList.add("rag-entry-pinned");
-    // 達成済（解決済み）の記憶は薄く見せる（バッジは下で付ける）
     if ((mem.status || "active") !== "active") card.classList.add("rag-entry-resolved");
 
     const header = document.createElement("div");
@@ -5510,12 +7622,10 @@ function renderRagMemories(memories = null) {
     const catBadge = document.createElement("span");
     catBadge.className = `badge-cat badge-cat-${cat}`;
     catBadge.textContent = CAT_LABELS[cat] || cat || "記憶";
-
     badges.append(catBadge);
 
     const srcBadge = document.createElement("span");
     srcBadge.className = `badge-source badge-source-${mem.source || "auto"}`;
-    // 自動 = ロボット / 手動 = パー（文字だと折り返しの原因になる）
     const manual = mem.source === "manual";
     srcBadge.textContent = manual ? "✋" : "🤖";
     srcBadge.title = manual ? "手動で追加" : "会話から自動で抽出";
@@ -5530,29 +7640,14 @@ function renderRagMemories(memories = null) {
 
     const meta = document.createElement("span");
     meta.className = "rag-mem-meta";
-    const metaParts = [];
-    if (mem.turn_idx != null) metaParts.push(`T${mem.turn_idx}`);
-    if (mem.elapsed_time) {
-      if (typeof mem.elapsed_time === "object") {
-        const d = mem.elapsed_time.day != null ? `${mem.elapsed_time.day}日目` : "";
-        const p = mem.elapsed_time.period || "";
-        metaParts.push(d && p ? `${d}・${p}` : (d || p));
-      } else {
-        metaParts.push(mem.elapsed_time);
-      }
-    }
-    if (mem.character_name) metaParts.push(`[${mem.character_name}]`);
-    meta.textContent = metaParts.join(" ");
+    meta.textContent = formatRagMemMeta(mem);
 
-    // 自動/手動のアイコンと日時は 1段下の行に置く
     const sub = document.createElement("div");
     sub.className = "rag-entry-sub";
     sub.append(srcBadge, meta);
 
     const actions = document.createElement("div");
     actions.className = "rag-entry-actions";
-
-    // 優先度ドロップダウン（固定/優先度を統合したボタン）
     actions.appendChild(createInlinePrioritySelect(sid, mem));
 
     const jumpBtn = document.createElement("button");
@@ -5560,6 +7655,7 @@ function renderRagMemories(memories = null) {
     jumpBtn.className = "sub rag-jump-btn";
     jumpBtn.textContent = "💬";
     jumpBtn.setAttribute("aria-label", "会話へ");
+    // 現行コードと同じ title 分岐を維持する（mid なしはジャンプ先がないため）
     if (mem.mid) {
       jumpBtn.title = "この記憶が抽出された会話へジャンプ";
       jumpBtn.onclick = () => {
@@ -5579,7 +7675,7 @@ function renderRagMemories(memories = null) {
     editBtn.className = "rag-entry-edit";
     editBtn.textContent = "✏️";
     editBtn.title = "編集";
-    editBtn.setAttribute("aria-label", "編集");
+    editBtn.setAttribute("aria-label", "編集"); // 現行コードの aria-label を維持
     editBtn.onclick = () => openRagMemEditor(mem);
 
     const delBtn = document.createElement("button");
@@ -5587,7 +7683,7 @@ function renderRagMemories(memories = null) {
     delBtn.className = "rag-entry-del";
     delBtn.textContent = "🗑";
     delBtn.title = "削除";
-    delBtn.setAttribute("aria-label", "削除");
+    delBtn.setAttribute("aria-label", "削除"); // 現行コードの aria-label を維持
     delBtn.onclick = async () => {
       if (!confirm(`この記憶を削除しますか？\n「${mem.content}」`)) return;
       try {
@@ -5597,23 +7693,29 @@ function renderRagMemories(memories = null) {
         alert(e.message);
       }
     };
-
     actions.append(editBtn, delBtn);
     header.append(badges, actions, sub);
 
+    // 本文の安全ハイライト描画
     const body = document.createElement("div");
     body.className = "rag-mem-content";
     body.style.whiteSpace = "pre-wrap";
-    body.textContent = mem.content;
+    appendHighlightedText(body, mem.content, searchWords);
 
     card.append(header, body);
 
+    // 変更履歴の描画（履歴ヒット時は自動展開）
+    const matchInfo = matchMap.get(mem);
     if (mem.history && mem.history.length > 0) {
       const histDetails = document.createElement("details");
       histDetails.className = "rag-mem-history";
+      if (matchInfo && matchInfo.inHistory) {
+        histDetails.open = true; // 履歴でヒットしたカードは自動オープン
+      }
       const histSummary = document.createElement("summary");
       histSummary.textContent = `変更履歴 (${mem.history.length}件)`;
       histDetails.appendChild(histSummary);
+
       for (const h of mem.history) {
         const hDiv = document.createElement("div");
         hDiv.className = "rag-mem-history-item";
@@ -5633,8 +7735,10 @@ function renderRagMemories(memories = null) {
         const hMeta = document.createElement("span");
         hMeta.className = "muted";
         hMeta.textContent = `${hTime}${hEt}${hStatus}: `;
+
         const hBody = document.createElement("div");
-        hBody.textContent = h.content || "";
+        appendHighlightedText(hBody, h.content || "", searchWords);
+
         hDiv.append(hMeta, hBody);
         histDetails.appendChild(hDiv);
       }
@@ -5781,6 +7885,7 @@ async function regenerateRagMemories(reset = false) {
       "・達成済みの手動記憶は「有効」に戻ります\n" +
       "・削除前の内容は data/trash にバックアップされます"
     )) return;
+    clearRagMemSearch(false); // 2.2 ライフサイクル: 全消し確認時のみ検索語を破棄（キャンセル時は破棄しない）
   } else {
     if (!confirm("会話ログを再分析して記憶を追加します。\n既存の記憶は消しません（同じ内容は自動で除外）。")) return;
   }
@@ -5919,6 +8024,130 @@ async function saveRagEntry() {
 
 $("sendBtn").onclick = send;
 if ($("stopBtn")) $("stopBtn").onclick = () => stopTurn();
+// マイク: 音声入力はこれから（用意だけ。押したら準備中と出す）
+if ($("micBtn")) {
+  $("micBtn").onclick = () => toast("音声入力は準備中です", 3000);
+}
+// お気に入りモデル: タップ/クリックでシートを開く
+if ($("favModelBtn")) {
+  const favBtn = $("favModelBtn");
+  let favBtnPressed = false;
+  let favPressStartX = 0;
+  let favPressStartY = 0;
+  let favPressMoved = false;
+  let suppressClickUntil = 0;
+  const TAP_SLOP = 12;
+
+  const handleOpenFav = () => {
+    const ae = document.activeElement;
+    if (ae && typeof ae.blur === "function") ae.blur();
+    openFavModelSheet();
+  };
+
+  // 入力欄フォーカス中に押したとき、フォーカス外れ（blur）による縮小や非表示で
+  // click が破棄されるのを防ぐため、pointerdown で preventDefault する
+  favBtn.addEventListener("pointerdown", (e) => {
+    if (e && e.button !== undefined && e.button !== 0) return;
+    favBtnPressed = true;
+    favPressStartX = e.clientX || 0;
+    favPressStartY = e.clientY || 0;
+    favPressMoved = false;
+    if (typeof e.preventDefault === "function") e.preventDefault();
+  }, { passive: false });
+
+  favBtn.addEventListener("pointermove", (e) => {
+    if (!favBtnPressed) return;
+    const dx = (e.clientX || 0) - favPressStartX;
+    const dy = (e.clientY || 0) - favPressStartY;
+    if (Math.hypot(dx, dy) > TAP_SLOP) favPressMoved = true;
+  }, { passive: true });
+
+  favBtn.addEventListener("pointerup", () => {
+    if (!favBtnPressed) return;
+    favBtnPressed = false;
+    if (favPressMoved) return;
+    suppressClickUntil = Date.now() + 600;
+    handleOpenFav();
+  }, { passive: true });
+
+  favBtn.addEventListener("pointercancel", () => {
+    favBtnPressed = false;
+  }, { passive: true });
+
+  favBtn.onclick = () => {
+    if (Date.now() < suppressClickUntil) return;
+    handleOpenFav();
+  };
+}
+if ($("favModelSheetClose")) $("favModelSheetClose").onclick = closeFavModelSheet;
+if ($("favOpenAiModalBtn")) $("favOpenAiModalBtn").onclick = openAiModalFromFavSheet;
+if ($("favEmptyOpenSettings")) $("favEmptyOpenSettings").onclick = openAiModalFromFavSheet;
+if ($("favUndoBtn")) $("favUndoBtn").onclick = restoreDeletedFavorite;
+if ($("favPickerBack")) $("favPickerBack").onclick = favPickerBack;
+if ($("favPickerProviderRow")) {
+  $("favPickerProviderRow").onclick = () => {
+    const ctx = favPickerCtx;
+    if (!ctx) return;
+    openFavPicker("provider", ctx.scope, ctx.favorite, "main");
+  };
+}
+if ($("favPickerChoicesRow")) {
+  $("favPickerChoicesRow").onclick = () => {
+    const ctx = favPickerCtx;
+    if (!ctx) return;
+    openFavPicker("choices", ctx.scope, ctx.favorite, "main");
+  };
+}
+if ($("favDeleteCancel")) $("favDeleteCancel").onclick = closeFavDeleteModal;
+if ($("favDeleteConfirm")) $("favDeleteConfirm").onclick = confirmFavDelete;
+document.querySelectorAll("[data-fav-subclose]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    btn.closest(".fav-submodal")?.classList.add("hidden");
+    if (btn.closest("#favPickerModal")) favPickerCtx = null;
+    if (btn.closest("#favDeleteModal")) favDeleteTarget = null;
+    if (btn.closest("#favNameModal")) renderFavSaveControls();
+  });
+});
+if ($("favModelSheet")) {
+  $("favModelSheet").addEventListener("click", (e) => {
+    if (e.target === $("favModelSheet")) closeFavModelSheet();
+  });
+}
+["favNameModal", "favPickerModal", "favDeleteModal"].forEach((id) => {
+  $(id)?.addEventListener("click", (e) => {
+    if (e.target !== $(id)) return;
+    if (id === "favPickerModal") closeFavPicker();
+    else if (id === "favDeleteModal") closeFavDeleteModal();
+    else closeFavNameModal();
+  });
+});
+if ($("favPickerRename")) {
+  $("favPickerRename").onclick = () => {
+    const target = favPickerRenameTarget(favPickerCtx);
+    if (target) openFavNameModal(target);
+  };
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const name = $("favNameModal");
+  if (name && !name.classList.contains("hidden")) {
+    closeFavNameModal();
+    return;
+  }
+  const del = $("favDeleteModal");
+  if (del && !del.classList.contains("hidden")) {
+    closeFavDeleteModal();
+    return;
+  }
+  const picker = $("favPickerModal");
+  if (picker && !picker.classList.contains("hidden")) {
+    favPickerBack();
+    return;
+  }
+  if ($("favModelSheet") && !$("favModelSheet").classList.contains("hidden")) {
+    closeFavModelSheet();
+  }
+});
 $("sendBtn").addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
     closeChoicesAccordions();
@@ -5961,13 +8190,23 @@ $("messageInput").addEventListener("input", () => {
     }
   }
 });
+// 入力中はカードを広げる（テキストが上段、ボタンが下段へ）
+// 高さは CSS の min-height で変わるので、切り替えたあとに測り直す
+function setComposerExpanded(on) {
+  const card = (typeof document !== "undefined" && typeof document.querySelector === "function")
+    ? document.querySelector(".foot-input") : null;
+  if (card && card.classList) card.classList.toggle("is-expanded", !!on);
+  autoResizeInput();
+}
 $("messageInput").addEventListener("focus", () => {
+  setComposerExpanded(true);
   setTypingInput(true);
   updateFabState();
 });
 $("messageInput").addEventListener("blur", () => {
   inputIsComposing = false;
   if (inputComposingTimer) { clearTimeout(inputComposingTimer); inputComposingTimer = null; }
+  setComposerExpanded(false);
   setTypingInput(false);
   updateFabState();
 });
@@ -6566,26 +8805,36 @@ if ($("vertexMaxTokens")) {
 if ($("agModel")) {
   $("agModel").addEventListener("change", () => {
     ThinkingUI.render(state?.setting);
+    if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+    if (typeof renderFavSaveControls === "function") renderFavSaveControls();
   });
 }
 if ($("googleModel")) {
   $("googleModel").addEventListener("change", () => {
     ThinkingUI.render(state?.setting);
+    if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+    if (typeof renderFavSaveControls === "function") renderFavSaveControls();
   });
 }
 if ($("vertexModel")) {
   $("vertexModel").addEventListener("change", () => {
     ThinkingUI.render(state?.setting);
+    if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+    if (typeof renderFavSaveControls === "function") renderFavSaveControls();
   });
 }
 if ($("vertexCustomModel")) {
   $("vertexCustomModel").addEventListener("input", () => {
     ThinkingUI.render(state?.setting);
+    if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+    if (typeof renderFavSaveControls === "function") renderFavSaveControls();
   });
 }
 if ($("choicesIdeModel")) {
   $("choicesIdeModel").addEventListener("change", () => {
     ThinkingUI.render(state?.setting);
+    if (typeof syncComposerModelChip === "function") syncComposerModelChip();
+    if (typeof renderFavSaveControls === "function") renderFavSaveControls();
   });
 }
 
@@ -6642,6 +8891,7 @@ function onLayoutChange() {
   if (!isMobileLayout()) {
     hideReveal();                                  // 幅が戻ったらモバイル専用の小物は畳む
     if ($("modelSheet")) $("modelSheet").classList.add("hidden");
+  closeFavModelSheet();
     if ($("elapsedModal")) $("elapsedModal").classList.add("hidden");
   }
   syncFootBarPlacement();
@@ -6730,7 +8980,7 @@ if (log && typeof log.addEventListener === "function") {
     if (!rpMode) return;
     if (!rpBgFile) return;
 
-    openLightbox(imgUrl(rpBgFile));
+    openLightboxByTap(imgUrl(rpBgFile));
   });
 }
 const footerEl = document.querySelector("footer");
@@ -7053,9 +9303,11 @@ $("promptRegen").onclick = async () => {
   updateFabState();
   updateHeaderAndSideStatus();
   initPushNotifications();
+  initUserMsgLongPress();
   await loadOptions();
   updatePushStatus().catch(console.error);
   loadModels();
+  await loadModelFavorites();
   await refreshSessions();
 
   const params = new URLSearchParams(window.location.search);

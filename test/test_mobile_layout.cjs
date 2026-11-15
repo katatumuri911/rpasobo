@@ -307,8 +307,15 @@ function declaresNumeric(block, selector, prop, minPx) {
   if (at < 0) return false;
   const open = block.indexOf("{", at);
   const close = block.indexOf("}", open);
-  const m = open >= 0 ? block.slice(open, close).match(new RegExp(prop + "\\s*:\\s*(\\d+(?:\\.\\d+)?)px")) : null;
-  return !!m && parseFloat(m[1]) >= minPx;
+  if (open < 0 || close <= open) return false;
+  const decl = block.slice(open, close);
+  const m = decl.match(new RegExp(prop + "\\s*:\\s*([^;]+)"));
+  if (!m) return false;
+  const value = m[1];
+  /* calc(...) でもよい（入力カードの高さ --footer-h を含む式を許す）。
+     値の中の px のどれかが下限以上なら「下余白あり」とみなす */
+  const nums = [...value.matchAll(/(\d+(?:\.\d+)?)px/g)].map((x) => parseFloat(x[1]));
+  return nums.some((n) => n >= minPx);
 }
 for (const id of ["mobileActionToggle", "mobileReveal", "sideBottomSection", "revealBackdrop"]) {
   t(`#${id} が @media 内で id セレクタで display を宣言している`, declares(mediaBlock, `#${id}`, "display"));

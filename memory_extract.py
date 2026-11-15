@@ -207,10 +207,17 @@ def extract_memories_from_text(user_text="", asst_text="", char_name="", user_na
         add("user_fact", s, user_label)
 
     # 7. relationship (関係性の変化)
-    rel_kws = ("恋人", "付き合", "付き合う", "付き合おう", "仲直り", "信頼", "親密", "両思い", "告白", "愛してる", "愛して", "大切にする", "特別", "大好き", "好きだよ", "好きです", "好きだった", "ずっと一緒", "彼氏", "彼女", "結婚")
-    for text, actor in ((user_text, user_label), (asst_text, char_label)):
-        for s in extract_matching_sentences(text, rel_kws):
-            add("relationship", s, actor)
+    #    関係の変化は「ユーザーが語った事実」だけを拾う。キャラ側の地の文は比喩・内心・
+    #    情景描写の宝庫で（「恋人のように」「大好きで溢れて」）、relationship の最大の
+    #    誤爆源になる。キャラ側の変化は応答の memories 出力（三人称の要約）に任せる。
+    #    「恋人」「大好き」「特別」「彼女（＝she）」のような語単体では作らない。
+    rel_kws = ("付き合", "交際", "恋人同士", "恋人にな", "両思い", "両想い", "告白",
+               "プロポーズ", "婚約", "結婚", "入籍", "破局", "仲直り", "和解", "復縁",
+               "よりを戻", "関係が変わ", "関係が深ま", "特別な関係", "距離が縮")
+    for s in extract_matching_sentences(user_text, rel_kws):
+        if memory_store.should_skip_relationship_extraction(s):
+            continue
+        add("relationship", s, user_label)
 
     # 8. event (重要出来事)
     event_kws = ("初めて", "告白", "助けた", "助けて", "救った", "救って", "出会った", "記念", "事件", "雨宿り", "旅行", "お泊まり", "デート")

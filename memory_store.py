@@ -4,6 +4,7 @@
 """
 import collections
 import copy
+import difflib
 import hashlib
 import json
 import math
@@ -171,6 +172,92 @@ def should_skip_rule_extraction(text, from_user=False):
     if from_user:
         return False
     return any(p in t for p in _RULE_TRANSIENT_WEAK)
+
+
+# --- relationship（関係性の変化）の誤爆防止 -----------------------------------
+# 「まるで恋人みたい」「恋人のふり」「恋人ごっこ」のような比喩・演技・仮定や、
+# 「大好き」「特別」といったその場の感情の叫びは“関係の変化”ではない。
+# 8カテゴリの中で relationship は最も誤爆が多く、常時枠と想起枠を感情ノイズで埋める。
+# そのため「確定した変化の言い回し」が文に無ければ relationship を作らない。
+_REL_SIMILE = (
+    "みたい", "かのよう", "ように", "ような気", "ふり", "ごっこ",
+    "演技", "妄想", "想像", "錯覚", "ロールプレイ", "たとえ", "例え", "もし",
+    "仮に", "仮定", "つもり", "気分", "見立て", "真似", "役を",
+)
+# 願望・推測・意見（「付き合いたい」「付き合うべき」は確定事実ではない）
+_REL_WISH = (
+    "したい", "したかった", "しようと", "しようか", "してみたい", "たい", "かもしれ",
+    "だろう", "でしょう", "思う", "思っ", "考え", "願", "祈", "憧れ", "いつか",
+    "だったら", "ならば", "べき", "はず",
+)
+# 否定（「付き合っていない」「恋人じゃない」「関係が変わらない」）
+_REL_NEG = ("ない", "なかっ", "なく", "ではない", "じゃない", "別れず", "変わらず")
+# 申し出・依頼・質問（まだ確定していない）
+_REL_PROPOSAL = (
+    "付き合おう", "付き合いましょ", "付き合ってください", "付き合ってほし", "付き合って欲し",
+    "結婚しよう", "結婚してくれ", "告白しよう", "告白しよっ", "プロポーズしよう",
+)
+# 関係が実際に動いた確定事実の言い回し
+_REL_CHANGE = (
+    "付き合", "交際", "恋人同士", "恋人にな", "恋人と言", "両思い", "両想い",
+    "告白", "プロポーズ", "婚約", "結婚", "入籍", "別れ", "破局", "振られ",
+    "振った", "仲直り", "和解", "復縁", "よりを戻", "関係が変わ", "関係を変",
+    "関係が深ま", "絆が", "特別な関係", "信頼を深", "距離が縮", "距離を縮", "距離が近",
+    "親密にな", "彼氏にな", "彼女にな",
+)
+
+
+def should_skip_relationship_extraction(text, from_user=False):
+    """抽出時に relationship を作らない文か。
+
+    記録してよいのは「関係が実際に変わった確定事実」だけ。比喩（〜みたい／〜のふり／
+    ごっこ）・仮定・願望・否定・その場の感情（大好き／特別）だけの文は作らない。
+    from_user は将来の拡張用（今はユーザー発言も同じ基準で判定する）。
+    """
+    t = str(text or "").strip()
+    if not t:
+        return True
+    if t[-1:] in ("？", "?"):
+        return True
+    if any(p in t for p in _REL_SIMILE):
+        return True
+    if any(p in t for p in _REL_WISH):
+        return True
+    if any(p in t for p in _REL_PROPOSAL):
+        return True
+    if any(p in t for p in _REL_NEG):
+        return True
+    return not any(p in t for p in _REL_CHANGE)
+
+
+# 関係記憶は「要約された事実文」だけを許可する。元のセリフ・地の文をそのまま写した
+# 記憶（比喩や情景描写のコピー）は、語彙リストにない言い回しでもここで弾ける。
+_REL_COPY_MIN_BLOCK = 24   # これ以上の連続一致は引用とみなす
+_REL_COPY_RATIO = 0.75     # 記憶本文のうち一致している割合
+_COPY_STRIP_RE = re.compile(r"[\s「」『』“”\"'、。．,.!！?？…‥・]+")
+
+
+def is_narration_copy(content, source_text):
+    """記憶が元のセリフ・地の文のコピー（引用）かどうか。"""
+    c = _COPY_STRIP_RE.sub("", str(content or ""))
+    s = _COPY_STRIP_RE.sub("", str(source_text or ""))
+    if not c or not s or len(c) < _REL_COPY_MIN_BLOCK:
+        return False
+    block = difflib.SequenceMatcher(None, c, s, autojunk=False).find_longest_match(0, len(c), 0, len(s))
+    return block.size >= max(_REL_COPY_MIN_BLOCK, int(len(c) * _REL_COPY_RATIO))
+
+
+def drop_narrated_relationship(items, narration_text):
+    """relationship 記憶から「地の文のコピー」を除く（他のカテゴリはそのまま）。"""
+    out = []
+    for it in (items or []):
+        if isinstance(it, dict):
+            content = str(it.get("content") or it.get("text") or "").strip()
+            if resolve_category(it.get("category") or it.get("type") or "", content) == "relationship":
+                if is_narration_copy(content, narration_text):
+                    continue
+        out.append(it)
+    return out
 
 
 # --- 5段階優先度（ピン留め＋乗算Boost）定義 -----------------------------------
@@ -360,6 +447,11 @@ MEMORY_MIN_RECALL        = 1    # フロア（想起）
 # 常時の下駄。rule は 0.0（No-Op のため）。calling の常時下駄は廃止（Tier 2 移行に伴い他カテゴリと公平化）。
 # 既存の `bonus`（クエリにカテゴリ語がある時 +0.15 / if-elif連鎖）とは別枠。
 CATEGORY_SCORE_BOOST = {"promise": 0.10, "item": 0.03, "status": 0.02}
+# 類似度・キーワード一致に掛けるデバフ。relationship は感情語（好き・大切等）を
+# 共有しやすく、情景コピーが混ざるとクエリと異常に似て上位を占めるため軽く減衰させる。
+# クエリにカテゴリ語（恋人・付き合い等）がある場合の bonus は別途加算するので、
+# 「関係の話をしている時」の想起は従来どおり残る。
+CATEGORY_SCORE_MULT = {"relationship": 0.90}
 
 # --- 自動抽出の保存条件 -------------------------------------------------------
 # 1ターンで新規に追加する記憶の上限（既存記憶へのマージは数えない）
@@ -821,7 +913,7 @@ def compute_memory_score(mem, query_tokens, query_vec, query_text, current_turn=
             mem_vec = []
     s_vec = cosine_similarity(query_vec, mem_vec)
 
-    s_base = 0.70 * s_vec + 0.30 * s_kw + bonus
+    s_base = (0.70 * s_vec + 0.30 * s_kw) * CATEGORY_SCORE_MULT.get(cat, 1.0) + bonus
 
     # Recency Boost (0.0 for shared memories, 0.0-1.0 clamped ratio for own session)
     if mem.get("_is_other") or current_turn is None or current_turn <= 0:
@@ -907,6 +999,14 @@ def search_memories(session_id, query_text, current_turn=None, shared_memories=F
         cat = m.get("category", "")
         p_key = memory_priority_key(m)
         is_prioritized = p_key in ("pinned", "highest", "high")
+
+        # 旧バージョンが作った誤爆 relationship（「〜みたい」等）を想起させない。
+        # データは消さず、手動追加・ピン留め・優先指定だけは残す。
+        if (resolve_category(cat, m.get("content", "")) == "relationship"
+                and m.get("source") != "manual"
+                and not is_prioritized
+                and should_skip_relationship_extraction(m.get("content"))):
+            continue
 
         ttl = TRANSIENT_TURNS.get(cat)
         # 古い痕跡や外れた装着物は「今の前提」にしない（手動記憶、またはピン留め・最優先・優先にした記憶は残す）
@@ -1174,6 +1274,10 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
         # （rule としては選抜されない。status は TRANSIENT_TURNS で自然に消える）
         if cat == "rule" and should_skip_rule_extraction(content):
             cat = "status"
+        # 比喩（〜みたい／〜のふり）・仮定・感情の叫びから relationship を作らない
+        # （最大の誤爆源。誤って作ると Tier1/Tier2 を感情ノイズで埋めるので破棄する）
+        if cat == "relationship" and should_skip_relationship_extraction(content):
+            continue
         pair = (cat, content)
         if pair in seen_items:
             continue
