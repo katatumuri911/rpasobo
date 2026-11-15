@@ -5,6 +5,7 @@
 const fs = require("fs");
 const vm = require("vm");
 const path = require("path");
+const assert = require("node:assert");
 
 const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8").replace(/\r\n/g, "\n");
 function slice(startMarker, endMarker) {
@@ -364,6 +365,918 @@ els.mobileActionToggle.fire("pointerup");
 els.mobileActionToggle.onclick();
 t("ツールではメニューが開く", !els.mobileReveal.classList.contains("hidden"));
 t("ツールでは send() を呼ばない", sendCount === 1);
+
+console.log("[8] サイドドロワー スワイプ開閉（T1〜T24）");
+
+/* --- 時計（I-7: 各テスト冒頭でリセット、テスト内は単調増加） --- */
+let swipeClock = 0;
+function resetClock() { swipeClock = 0; }
+
+/* --- app.js からスワイプモジュールのみ抽出（末尾の即時 async 起動を実行しない） --- */
+const SWIPE_START = '/* ============================================================\n * ドロワー開閉の単一窓口';
+const SWIPE_END = '\n/* テスト用フック（副作用なし・app.js 末尾で公開） */';
+
+function createSwipeStubEnv() {
+  const docListeners = {};
+  const winListeners = {};
+  let selectionStub = { isCollapsed: true, toString: () => '' };
+  let mobileViewportMatch = true;
+
+  class StubEl {
+    constructor(id, tag = 'div', ownerDoc = null) {
+      this.id = id;
+      this.tagName = tag.toUpperCase();
+      this.ownerDocument = ownerDoc;
+      this.children = [];
+      this.parentElement = null;
+      this.style = { transform: '', opacity: '', overflowX: '' };
+      this.dataset = {};
+      this.attrs = {};
+      this.inert = false;
+      this._classes = new Set();
+      this._listeners = {};
+      this._rect = { width: 0, height: 0, left: 0, top: 0 };
+      this._scrollWidth = 0;
+      this._clientWidth = 0;
+      this.classList = {
+        add: (...c) => c.forEach((x) => this._classes.add(x)),
+        remove: (...c) => c.forEach((x) => this._classes.delete(x)),
+        contains: (c) => this._classes.has(c),
+        toggle: (c, on) => {
+          const v = on === undefined ? !this._classes.has(c) : !!on;
+          v ? this._classes.add(c) : this._classes.delete(c);
+          return v;
+        }
+      };
+    }
+    get offsetWidth() { return this._rect.width; }
+    get scrollWidth() { return this._scrollWidth; }
+    get clientWidth() { return this._clientWidth; }
+    getBoundingClientRect() { return this._rect; }
+    appendChild(c) { c.parentElement = this; this.children.push(c); return c; }
+    contains(n) { return this === n || this.children.some((c) => c.contains(n)); }
+    setAttribute(k, v) { this.attrs[k] = String(v); }
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
+    removeAttribute(k) { delete this.attrs[k]; }
+    hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); }
+    focus() {}
+    blur() {}
+    addEventListener(type, fn, opts) {
+      const cap = typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture);
+      (this._listeners[type] = this._listeners[type] || []).push({ fn, capture: cap, once: Boolean(opts && opts.once) });
+    }
+    removeEventListener(type, fn, opts) {
+      const cap = typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture);
+      if (!this._listeners[type]) return;
+      this._listeners[type] = this._listeners[type].filter((l) => !(l.fn === fn && l.capture === cap));
+    }
+    matchesSelector(sel) {
+      for (const part of sel.split(/\s*,\s*/)) {
+        if (!part) continue;
+        if (part.startsWith('#') && this.id === part.slice(1)) return true;
+        if (part.startsWith('.') && this._classes.has(part.slice(1))) return true;
+        if (part === '[data-no-drawer-swipe]' && this.hasAttribute('data-no-drawer-swipe')) return true;
+        if (part === '[contenteditable="true"]' && this.getAttribute('contenteditable') === 'true') return true;
+        if (part === '[contenteditable=""]' && this.getAttribute('contenteditable') === '') return true;
+        if (part === '[role="button"]' && this.getAttribute('role') === 'button') return true;
+        if (/^[a-z]+$/i.test(part) && this.tagName === part.toUpperCase()) return true;
+      }
+      return false;
+    }
+    closest(sel) {
+      let cur = this;
+      while (cur) {
+        if (cur.matchesSelector(sel)) return cur;
+        cur = cur.parentElement;
+      }
+      return null;
+    }
+    createText(text = '') {
+      const node = {
+        nodeType: 3,
+        textContent: text,
+        parentElement: this,
+        dispatchEvent: (ev) => {
+          ev.target = node;
+          return this.dispatchEvent(ev);
+        }
+      };
+      this.children.push(node);
+      return node;
+    }
+    dispatchEvent(ev) {
+      if (!ev.target) ev.target = this;
+      const chain = [];
+      let cur = this;
+      while (cur) { chain.unshift(cur); cur = cur.parentElement; }
+      let stopped = false, immediateStopped = false;
+      ev.preventDefault = () => { if (ev.cancelable) ev.defaultPrevented = true; };
+      ev.stopPropagation = () => { stopped = true; };
+      ev.stopImmediatePropagation = () => { stopped = true; immediateStopped = true; };
+
+      const invoke = (list, capFilter) => {
+        for (const item of list.slice()) {
+          if (item.capture !== capFilter) continue;
+          if (item.once) {
+            const idx = list.indexOf(item);
+            if (idx >= 0) list.splice(idx, 1);
+          }
+          item.fn(ev);
+          if (immediateStopped) return;
+        }
+      };
+
+      // Capture: window -> document -> ancestors
+      invoke(winListeners[ev.type] || [], true);
+      if (stopped) return !ev.defaultPrevented;
+      invoke(docListeners[ev.type] || [], true);
+      if (stopped) return !ev.defaultPrevented;
+      for (const el of chain) {
+        invoke(el._listeners[ev.type] || [], true);
+        if (stopped) return !ev.defaultPrevented;
+      }
+      // Bubble: target -> ancestors -> document -> window
+      for (let i = chain.length - 1; i >= 0; i--) {
+        invoke(chain[i]._listeners[ev.type] || [], false);
+        if (stopped) return !ev.defaultPrevented;
+      }
+      invoke(docListeners[ev.type] || [], false);
+      if (stopped) return !ev.defaultPrevented;
+      invoke(winListeners[ev.type] || [], false);
+      return !ev.defaultPrevented;
+    }
+  }
+
+  const doc = {
+    hidden: false,
+    activeElement: null,
+    body: null,
+    documentElement: null,
+    addEventListener(t, fn, opts) {
+      const cap = typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture);
+      (docListeners[t] = docListeners[t] || []).push({ fn, capture: cap });
+    },
+    removeEventListener(t, fn, opts) {
+      const cap = typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture);
+      if (!docListeners[t]) return;
+      docListeners[t] = docListeners[t].filter((l) => !(l.fn === fn && l.capture === cap));
+    },
+    getElementById(id) { return byId[id] || null; },
+    querySelectorAll(sel) {
+      if (sel.includes('.modal') && !modal.classList.contains('hidden')) return [modal];
+      if (sel.includes('#settingsPanel') && !settingsPanel.classList.contains('hidden')) return [settingsPanel];
+      return [];
+    }
+  };
+  doc.documentElement = new StubEl('html', 'html', doc);
+  doc.body = new StubEl('body', 'body', doc);
+  doc.documentElement.appendChild(doc.body);
+
+  const drawer = new StubEl('sidebar', 'aside', doc);
+  drawer._rect.width = 280;
+  drawer.setAttribute('aria-hidden', 'true');
+  const closeInside = new StubEl('close-inside', 'button', doc);
+  drawer.appendChild(closeInside);
+  const overlay = new StubEl('sideBackdrop', 'div', doc);
+  const app = new StubEl('app', 'div', doc);
+  const toggle = new StubEl('sideToggle', 'button', doc);
+  toggle.setAttribute('aria-expanded', 'false');
+  const composer = new StubEl('messageInput', 'textarea', doc);
+  const promptToolbar = new StubEl('prompt-toolbar', 'div', doc);
+  const codeBlock = new StubEl('code1', 'code', doc);
+  const hscroll = new StubEl('hscroll', 'div', doc);
+  hscroll.style.overflowX = 'auto';
+  hscroll._scrollWidth = 320;
+  hscroll._clientWidth = 100;
+  const hscrollInner = new StubEl('hscroll-inner', 'span', doc);
+  hscroll.appendChild(hscrollInner);
+  const noSwipe = new StubEl('no-swipe', 'div', doc);
+  noSwipe.setAttribute('data-no-drawer-swipe', '1');
+  const modal = new StubEl('modal', 'div', doc);
+  modal.classList.add('modal', 'hidden');
+  const settingsPanel = new StubEl('settingsPanel', 'section', doc);
+  settingsPanel.classList.add('hidden');
+
+  app.appendChild(toggle);
+  app.appendChild(composer);
+  app.appendChild(promptToolbar);
+  app.appendChild(codeBlock);
+  app.appendChild(hscroll);
+  app.appendChild(noSwipe);
+  app.appendChild(modal);
+  app.appendChild(settingsPanel);
+  doc.body.appendChild(drawer);
+  doc.body.appendChild(overlay);
+  doc.body.appendChild(app);
+
+  const byId = {
+    sidebar: drawer, sideBackdrop: overlay, app: app, sideToggle: toggle,
+    messageInput: composer, 'prompt-toolbar': promptToolbar, hscroll: hscroll,
+    'hscroll-inner': hscrollInner, 'no-swipe': noSwipe, modal: modal,
+    settingsPanel: settingsPanel, 'close-inside': closeInside
+  };
+
+  const win = {
+    innerWidth: 400,
+    location: { search: '' },
+    matchMedia: () => ({ matches: mobileViewportMatch, addListener() {}, removeListener() {} }),
+    getSelection: () => selectionStub,
+    getComputedStyle: (el) => ({
+      display: el.classList.contains('hidden') ? 'none' : 'block',
+      visibility: 'visible',
+      opacity: '1',
+      overflowX: el.style.overflowX || 'visible',
+      width: '280px',
+      transitionDuration: '0s'
+    }),
+    addEventListener(t, fn, opts) {
+      const cap = typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture);
+      (winListeners[t] = winListeners[t] || []).push({ fn, capture: cap });
+    },
+    removeEventListener(t, fn, opts) {
+      const cap = typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture);
+      if (!winListeners[t]) return;
+      winListeners[t] = winListeners[t].filter((l) => !(l.fn === fn && l.capture === cap));
+    }
+  };
+
+  const sb = {
+    console, setTimeout, clearTimeout,
+    document: doc, window: win,
+    $: (id) => byId[id] || null,
+    isMobileLayout: () => mobileViewportMatch,
+    closeMoreMenu: () => {},
+    hideReveal: () => {},
+    updateFabState: () => {},
+    performance: { now: () => swipeClock },
+    Date
+  };
+  sb.globalThis = sb;
+  vm.createContext(sb);
+
+  const swipeModuleSrc = slice(SWIPE_START, SWIPE_END) +
+    '\nwindow.__appTestHooks = { initDrawerSwipe, initAppDrawerSwipe, applyDrawerState, DRAWER_SWIPE_CONFIG, setDrawerOpen, syncDrawerDesktopAccessibility, ensureDrawerAdapter };';
+  vm.runInContext(swipeModuleSrc, sb, { filename: 'app.js#drawer-swipe' });
+
+  return {
+    sb, doc, win, hooks: win.__appTestHooks, winListeners, docListeners,
+    drawer, overlay, toggle, main: app,
+    composer, promptToolbar, codeBlock, hscrollInner, noSwipe, modal, closeInside,
+    setMobileViewport: (v) => { mobileViewportMatch = v; },
+    setSelection: (s) => { selectionStub = s; }
+  };
+}
+
+function dispatchTouch(target, type, { id = 0, x, y, allTouches = null }) {
+  const touch = { identifier: id, clientX: x, clientY: y, target };
+  const ev = {
+    type, bubbles: true, cancelable: true, defaultPrevented: false,
+    changedTouches: [touch],
+    touches: allTouches !== null ? allTouches : ((type === 'touchend' || type === 'touchcancel') ? [] : [touch]),
+    _testTimeStamp: swipeClock
+  };
+  target.dispatchEvent(ev);
+  return ev;
+}
+
+function dispatchClick(target) {
+  const ev = { type: 'click', bubbles: true, cancelable: true, defaultPrevented: false, _testTimeStamp: swipeClock };
+  target.dispatchEvent(ev);
+  return ev;
+}
+
+function buildFixture() {
+  const env = createSwipeStubEnv();
+  const state = { open: false, calls: 0, dragStarts: 0 };
+  const fx = {
+    ...env, state, transitionMs: 0,
+    setOpenDirect: (open) => {
+      state.open = open;
+      env.hooks.applyDrawerState({ drawerEl: env.drawer, overlayEl: env.overlay, toggleEl: env.toggle, open });
+    },
+    tapToggle: () => {
+      const next = !state.open;
+      if (fx.controller) fx.controller.flush();           // P-19
+      state.calls += 1;
+      state.open = next;
+      env.hooks.applyDrawerState({ drawerEl: env.drawer, overlayEl: env.overlay, toggleEl: env.toggle, open: next });
+    }
+  };
+  fx.controller = env.hooks.initDrawerSwipe({
+    drawerEl: env.drawer, overlayEl: env.overlay, chatAreaEl: env.main,
+    isOpen: () => state.open,
+    setOpen: (open) => {
+      state.calls += 1; state.open = open;
+      env.hooks.applyDrawerState({ drawerEl: env.drawer, overlayEl: env.overlay, toggleEl: env.toggle, open });
+    },
+    onDragStart: () => { state.dragStarts += 1; },
+    isMobileViewport: () => env.win.matchMedia().matches,
+    now: () => swipeClock,
+    getDrawerWidth: () => 280,
+    getTransitionDurationMs: () => fx.transitionMs,
+    force: true
+  });
+  return fx;
+}
+
+function teardown(fx) {
+  if (fx && fx.controller && typeof fx.controller.destroy === 'function') {
+    fx.controller.destroy();
+  }
+}
+
+// --- T1: 左端フリック開 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 100; dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 115; dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 140; dispatchTouch(fx.main, 'touchmove', { x: 65, y: 202 });
+  swipeClock = 145; dispatchTouch(fx.main, 'touchend', { x: 65, y: 202 });
+  const dbg = fx.controller.getDebugState();
+  const cond = dbg.path === 'flick' &&
+    Math.abs(dbg.progress - 0.125) < 0.001 &&   // 35/280 = 0.125
+    Math.abs(dbg.vx - (35 / 30)) < 0.02 &&      // 35/30 ≈ 1.17
+    fx.state.open === true &&
+    fx.state.dragStarts === 1;
+  t("T1: 左端フリック開", cond);
+  teardown(fx);
+}
+
+// --- T2: 開→左フリック閉 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setOpenDirect(true);
+  swipeClock = 200; dispatchTouch(fx.drawer, 'touchstart', { x: 220, y: 200 });
+  swipeClock = 215; dispatchTouch(fx.drawer, 'touchmove', { x: 205, y: 200 });
+  swipeClock = 240; dispatchTouch(fx.drawer, 'touchmove', { x: 160, y: 200 });
+  swipeClock = 245; dispatchTouch(fx.drawer, 'touchend', { x: 160, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = dbg.path === 'flick' &&
+    Math.abs(dbg.vx - (-1.5)) < 0.01 &&         // -45/30 = -1.50
+    dbg.progress > 0.65 &&                      // 235/280 ≈ 0.839 > 0.65
+    fx.state.open === false;
+  t("T2: 開→左フリック閉", cond);
+  teardown(fx);
+}
+
+// --- T3: 逆フリックでキャンセル ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;   dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 20;  dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 300; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+  swipeClock = 330; dispatchTouch(fx.main, 'touchmove', { x: 160, y: 200 });
+  swipeClock = 335; dispatchTouch(fx.main, 'touchend', { x: 160, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = Math.abs(dbg.vx - (-40 / 35)) < 0.02 &&  // -40/35 ≈ -1.14
+    fx.state.open === false;                              // 総変位+145でも閉
+  t("T3: 逆フリックでキャンセル", cond);
+  teardown(fx);
+}
+
+// --- T4: 静止後の離指 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;   dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 15;  dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 40;  dispatchTouch(fx.main, 'touchmove', { x: 70, y: 200 });
+  swipeClock = 160; dispatchTouch(fx.main, 'touchend', { x: 70, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = dbg.vx === 0 && dbg.path === 'ratio' && fx.state.open === false;
+  t("T4: 静止後の離指", cond);
+  teardown(fx);
+}
+
+// --- T5: 初期ジャンプ防止 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 15, y: 100 });
+  swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 30, y: 100 });
+  const cond = fx.drawer.style.transform === 'translate3d(-280px, 0, 0)' &&
+    fx.overlay.style.opacity === '0' &&
+    fx.controller.getState() === 'DRAGGING_X';
+  t("T5: 初期ジャンプ防止", cond);
+  teardown(fx);
+}
+
+// --- T6a: 低速ドラッグ開 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  const pts = [15, 40, 69, 98, 127, 156];
+  swipeClock = 0; dispatchTouch(fx.main, 'touchstart', { x: pts[0], y: 200 });
+  for (let i = 1; i < pts.length; i++) {
+    swipeClock = i * 100;
+    dispatchTouch(fx.main, 'touchmove', { x: pts[i], y: 200 });
+  }
+  swipeClock = 560; dispatchTouch(fx.main, 'touchend', { x: 156, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = dbg.path === 'ratio' &&
+    Math.abs(dbg.progress - (116 / 280)) < 0.005 &&  // 116/280 ≈ 0.414
+    fx.state.open === true;
+  t("T6a: 低速ドラッグ開", cond);
+  teardown(fx);
+}
+
+// --- T6b: 低速ドラッグ閉 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  const pts = [15, 40, 65, 80];
+  swipeClock = 0; dispatchTouch(fx.main, 'touchstart', { x: pts[0], y: 200 });
+  for (let i = 1; i < pts.length; i++) {
+    swipeClock = i * 100;
+    dispatchTouch(fx.main, 'touchmove', { x: pts[i], y: 200 });
+  }
+  swipeClock = 310; dispatchTouch(fx.main, 'touchend', { x: 80, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = Math.abs(dbg.progress - (40 / 280)) < 0.005 &&  // 40/280 ≈ 0.143
+    fx.state.open === false;
+  t("T6b: 低速ドラッグ閉", cond);
+  teardown(fx);
+}
+
+// --- T7: 縦スクロールラッチ ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;   dispatchTouch(fx.main, 'touchstart', { x: 20, y: 200 });
+  swipeClock = 30;  dispatchTouch(fx.main, 'touchmove', { x: 25, y: 230 });
+  const midScrollY = fx.controller.getState() === 'SCROLLING_Y';
+  swipeClock = 100; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 235 });
+  const cond = midScrollY &&
+    !fx.drawer.classList.contains('is-dragging') &&
+    fx.drawer.style.transform === '' &&
+    (() => {
+      swipeClock = 120; dispatchTouch(fx.main, 'touchend', { x: 200, y: 235 });
+      return fx.controller.getState() === 'IDLE';
+    })();
+  t("T7: 縦スクロールラッチ", cond);
+  teardown(fx);
+}
+
+// --- T8: マルチタッチ耐性 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  const t1b = { identifier: 1, clientX: 30, clientY: 200, target: fx.main };
+  const t2  = { identifier: 2, clientX: 120, clientY: 150, target: fx.main };
+  const t1c = { identifier: 1, clientX: 70, clientY: 200, target: fx.main };
+
+  swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { id: 1, x: 15, y: 200 });
+  swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { id: 1, x: 30, y: 200, allTouches: [t1b] });
+  swipeClock = 40; dispatchTouch(fx.main, 'touchstart', { id: 2, x: 120, y: 150, allTouches: [t1b, t2] });
+  swipeClock = 60; dispatchTouch(fx.main, 'touchend', { id: 2, x: 120, y: 150, allTouches: [t1b] });
+  swipeClock = 80; dispatchTouch(fx.main, 'touchmove', { id: 1, x: 70, y: 200, allTouches: [t1c] });
+
+  const activeId = fx.controller.getDebugState().activeTouchId === 1;
+  const stateDrag = fx.controller.getState() === 'DRAGGING_X';
+  const transformMatch = fx.drawer.style.transform === 'translate3d(-240px, 0, 0)';
+
+  swipeClock = 90; dispatchTouch(fx.main, 'touchend', { id: 1, x: 70, y: 200, allTouches: [] });
+  const cond = activeId && stateDrag && transformMatch && fx.state.open === true;
+  t("T8: マルチタッチ耐性", cond);
+  teardown(fx);
+}
+
+// --- T9: 除外ガード（8サブ） ---
+{
+  let allGuardOk = true;
+
+  // ① #messageInput
+  {
+    resetClock(); const fx = buildFixture();
+    swipeClock = 0;  dispatchTouch(fx.composer, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.composer, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.composer, 'touchend', { x: 200, y: 200 });
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || fx.controller.getState() !== 'IDLE') allGuardOk = false;
+    teardown(fx);
+  }
+  // ② #prompt-toolbar
+  {
+    resetClock(); const fx = buildFixture();
+    swipeClock = 0;  dispatchTouch(fx.promptToolbar, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.promptToolbar, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.promptToolbar, 'touchend', { x: 200, y: 200 });
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || fx.controller.getState() !== 'IDLE') allGuardOk = false;
+    teardown(fx);
+  }
+  // ③ code
+  {
+    resetClock(); const fx = buildFixture();
+    swipeClock = 0;  dispatchTouch(fx.codeBlock, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.codeBlock, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.codeBlock, 'touchend', { x: 200, y: 200 });
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || fx.controller.getState() !== 'IDLE') allGuardOk = false;
+    teardown(fx);
+  }
+  // ④ #hscroll-inner
+  {
+    resetClock(); const fx = buildFixture();
+    swipeClock = 0;  dispatchTouch(fx.hscrollInner, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.hscrollInner, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.hscrollInner, 'touchend', { x: 200, y: 200 });
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || fx.controller.getState() !== 'IDLE') allGuardOk = false;
+    teardown(fx);
+  }
+  // ⑤ [data-no-drawer-swipe]
+  {
+    resetClock(); const fx = buildFixture();
+    swipeClock = 0;  dispatchTouch(fx.noSwipe, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.noSwipe, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.noSwipe, 'touchend', { x: 200, y: 200 });
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || fx.controller.getState() !== 'IDLE') allGuardOk = false;
+    teardown(fx);
+  }
+  // ⑥ #modal active
+  {
+    resetClock(); const fx = buildFixture();
+    fx.modal.classList.remove('hidden'); fx.modal.classList.add('active');
+    swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.main, 'touchend', { x: 200, y: 200 });
+    const st = fx.controller.getState();
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || (st !== 'IDLE' && st !== 'IGNORED')) allGuardOk = false;
+    teardown(fx);
+  }
+  // ⑦ getSelection 非collapsed
+  {
+    resetClock(); const fx = buildFixture();
+    fx.setSelection({ isCollapsed: false, toString: () => 'selected text' });
+    swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.main, 'touchend', { x: 200, y: 200 });
+    const st = fx.controller.getState();
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || (st !== 'IDLE' && st !== 'IGNORED')) allGuardOk = false;
+    teardown(fx);
+  }
+  // ⑧ setMobileViewport(false)
+  {
+    resetClock(); const fx = buildFixture();
+    fx.setMobileViewport(false);
+    swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 100, y: 200 });
+    swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+    swipeClock = 30; dispatchTouch(fx.main, 'touchend', { x: 200, y: 200 });
+    const st = fx.controller.getState();
+    if (fx.state.open !== false || fx.drawer.classList.contains('is-dragging') || (st !== 'IDLE' && st !== 'IGNORED')) allGuardOk = false;
+    teardown(fx);
+  }
+  // ⑨ Safari iOS Textノード (nodeType === 3) は除外されず追跡される
+  {
+    resetClock(); const fx = buildFixture();
+    const textNode = fx.main.createText('chat message');
+    swipeClock = 0;  dispatchTouch(textNode, 'touchstart', { x: 15, y: 200 });
+    const st = fx.controller.getState();
+    if (st !== 'PENDING') allGuardOk = false;
+    teardown(fx);
+  }
+
+  t("T9: 除外ガード（8サブ）", allGuardOk);
+}
+
+// --- T10: ゴーストクリック ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setOpenDirect(true);
+  let listenerCalled = 0;
+  fx.closeInside.addEventListener('click', () => { listenerCalled++; });
+
+  swipeClock = 300; dispatchTouch(fx.drawer, 'touchstart', { x: 200, y: 200 });
+  swipeClock = 315; dispatchTouch(fx.drawer, 'touchmove', { x: 180, y: 200 });
+  swipeClock = 330; dispatchTouch(fx.drawer, 'touchmove', { x: 120, y: 200 });
+  swipeClock = 335; dispatchTouch(fx.drawer, 'touchend', { x: 120, y: 200 });
+
+  const closed = fx.state.open === false;
+  swipeClock = 435; const c1 = dispatchClick(fx.closeInside);
+  swipeClock = 445; const c2 = dispatchClick(fx.closeInside);
+  const midCount = listenerCalled;
+  swipeClock = 735; const c3 = dispatchClick(fx.closeInside);
+
+  const cond = closed &&
+    c1.defaultPrevented === true &&
+    c2.defaultPrevented === true &&
+    midCount === 0 &&
+    listenerCalled === 1;
+  t("T10: ゴーストクリック", cond);
+  teardown(fx);
+}
+
+// --- T11: 純タップ ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setOpenDirect(true);
+  let listenerCalled = 0;
+  fx.closeInside.addEventListener('click', () => { listenerCalled++; });
+
+  swipeClock = 400; dispatchTouch(fx.closeInside, 'touchstart', { x: 200, y: 200 });
+  swipeClock = 410; dispatchTouch(fx.closeInside, 'touchend', { x: 200, y: 200 });
+  swipeClock = 420; dispatchClick(fx.closeInside);
+
+  t("T11: 純タップ", listenerCalled === 1);
+  teardown(fx);
+}
+
+// --- T12: 状態同期 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  const initOk = !fx.doc.body.classList.contains('side-open') &&
+    !fx.drawer.classList.contains('open') &&
+    !fx.overlay.classList.contains('open') &&
+    fx.drawer.getAttribute('aria-hidden') === 'true' &&
+    fx.toggle.getAttribute('aria-expanded') === 'false';
+
+  fx.setOpenDirect(true);
+  const openOk = fx.doc.body.classList.contains('side-open') &&
+    fx.drawer.classList.contains('open') &&
+    fx.overlay.classList.contains('open') &&
+    fx.drawer.getAttribute('aria-hidden') === null &&
+    fx.toggle.getAttribute('aria-expanded') === 'true';
+
+  // T2 手順で閉じる
+  swipeClock = 200; dispatchTouch(fx.drawer, 'touchstart', { x: 220, y: 200 });
+  swipeClock = 215; dispatchTouch(fx.drawer, 'touchmove', { x: 205, y: 200 });
+  swipeClock = 240; dispatchTouch(fx.drawer, 'touchmove', { x: 160, y: 200 });
+  swipeClock = 245; dispatchTouch(fx.drawer, 'touchend', { x: 160, y: 200 });
+
+  const closeOk = !fx.doc.body.classList.contains('side-open') &&
+    !fx.drawer.classList.contains('open') &&
+    !fx.overlay.classList.contains('open') &&
+    fx.drawer.getAttribute('aria-hidden') === 'true' &&
+    fx.toggle.getAttribute('aria-expanded') === 'false' &&
+    fx.state.calls === 1;
+
+  t("T12: 状態同期", initOk && openOk && closeOk);
+  teardown(fx);
+}
+
+// --- T13: 残留なし ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 100; dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 115; dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 140; dispatchTouch(fx.main, 'touchmove', { x: 65, y: 202 });
+  swipeClock = 145; dispatchTouch(fx.main, 'touchend', { x: 65, y: 202 });
+
+  const cond = fx.drawer.style.transform === '' &&
+    fx.overlay.style.opacity === '' &&
+    !fx.drawer.classList.contains('is-dragging') &&
+    !fx.overlay.classList.contains('is-dragging') &&
+    !fx.overlay.classList.contains('is-peeking') &&
+    fx.state.open === true;
+  t("T13: 残留なし", cond);
+  teardown(fx);
+}
+
+// --- T14: 二重初期化/destroy ---
+{
+  resetClock();
+  const fx = buildFixture();
+  const second = fx.hooks.initDrawerSwipe({
+    drawerEl: fx.drawer, overlayEl: fx.overlay,
+    isOpen: () => fx.state.open,
+    setOpen: () => { throw new Error('二重登録で上書き禁止'); }
+  });
+  const sameInst = second === fx.controller;
+
+  // 1回ドラッグ
+  swipeClock = 100; dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 115; dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 140; dispatchTouch(fx.main, 'touchmove', { x: 65, y: 202 });
+  swipeClock = 145; dispatchTouch(fx.main, 'touchend', { x: 65, y: 202 });
+  const calls1 = fx.state.calls === 1;
+
+  fx.controller.destroy();
+  const transformClean = fx.drawer.style.transform === '';
+
+  // 再タッチで無反応
+  swipeClock = 200; dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 215; dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 240; dispatchTouch(fx.main, 'touchmove', { x: 65, y: 202 });
+  swipeClock = 245; dispatchTouch(fx.main, 'touchend', { x: 65, y: 202 });
+  const callsStill1 = fx.state.calls === 1;
+
+  t("T14: 二重初期化/destroy", sameInst && calls1 && transformClean && callsStill1);
+}
+
+// --- T15: settle中の再タッチ ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.transitionMs = 250;
+  fx.setOpenDirect(true);
+
+  swipeClock = 100; dispatchTouch(fx.drawer, 'touchstart', { x: 220, y: 200 });
+  swipeClock = 115; dispatchTouch(fx.drawer, 'touchmove', { x: 205, y: 200 });
+  swipeClock = 140; dispatchTouch(fx.drawer, 'touchmove', { x: 160, y: 200 });
+  swipeClock = 145; dispatchTouch(fx.drawer, 'touchend', { x: 160, y: 200 });
+  assert.strictEqual(fx.drawer.style.transform, 'translate3d(-280px, 0, 0)');
+
+  // settle 保留中に新しいタッチ開始
+  swipeClock = 160; dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 175; dispatchTouch(fx.main, 'touchmove', { x: 120, y: 200 });
+  swipeClock = 190; dispatchTouch(fx.main, 'touchmove', { x: 150, y: 200 });
+
+  t("T15: settle中の再タッチ", fx.drawer.style.transform === 'translate3d(-250px, 0, 0)');
+  teardown(fx);
+}
+
+// --- T16: ステイル復帰 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { id: 0, x: 15, y: 200 });
+  swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { id: 0, x: 60, y: 200 });
+  assert.strictEqual(fx.controller.getState(), 'DRAGGING_X');
+
+  // touchend 欠落のまま新 touchstart (id:9)
+  const t9 = { identifier: 9, clientX: 15, clientY: 200, target: fx.main };
+  swipeClock = 40; dispatchTouch(fx.main, 'touchstart', { id: 9, x: 15, y: 200, allTouches: [t9] });
+
+  const cond = fx.controller.getState() === 'PENDING' &&
+    fx.controller.getDebugState().activeTouchId === 9;
+
+  // window blur で PENDING 状態が安全に IDLE へリセットされる
+  for (const l of fx.winListeners['blur'] || []) l.fn();
+  const blurOk = fx.controller.getState() === 'IDLE';
+
+  t("T16: ステイル復帰", cond && blurOk);
+  teardown(fx);
+}
+
+// --- T17: デスクトップ非干渉 ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setMobileViewport(false);
+
+  swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+  swipeClock = 30; dispatchTouch(fx.main, 'touchend', { x: 200, y: 200 });
+
+  const cond = fx.controller.getState() === 'IDLE' &&
+    fx.state.open === false &&
+    fx.drawer.style.transform === '';
+
+  // デスクトップ側でチャンネル切替等（setDrawerOpen(false)）が実行されても sidebar が inert / aria-hidden にならない
+  fx.hooks.setDrawerOpen(false, { reason: 'switch' });
+  const desktopInteractive = fx.drawer.getAttribute('aria-hidden') === null &&
+    fx.drawer.inert === false &&
+    !fx.drawer.hasAttribute('inert');
+
+  t("T17: デスクトップ非干渉", cond && desktopInteractive);
+  teardown(fx);
+}
+
+// --- T18: キルスイッチ＋タップ生存 ---
+{
+  resetClock();
+  const env = createSwipeStubEnv();
+  env.doc.body.dataset.drawerSwipe = 'off';
+  const ret = env.sb.initAppDrawerSwipe();
+  const isNull = ret === null;
+
+  env.hooks.applyDrawerState({ drawerEl: env.drawer, overlayEl: env.overlay, toggleEl: env.toggle, open: true });
+  const tapAlive = env.drawer.classList.contains('open') && env.doc.body.classList.contains('side-open');
+
+  // dataset が存在しない（undefined）環境でも例外が発生しないことを検証
+  delete env.doc.body.dataset;
+  let noDatasetOk = false;
+  try {
+    env.sb.initAppDrawerSwipe();
+    noDatasetOk = true;
+  } catch (e) {
+    noDatasetOk = false;
+  }
+
+  // モバイル初期化時に closed 状態の aria-hidden / inert / aria-expanded が正しく同期されることを検証
+  const env2 = createSwipeStubEnv();
+  env2.drawer.removeAttribute('aria-hidden');
+  env2.toggle.removeAttribute('aria-expanded');
+  env2.sb.initAppDrawerSwipe();
+  const mobileInitOk = env2.drawer.getAttribute('aria-hidden') === 'true' &&
+    env2.drawer.inert === true &&
+    env2.toggle.getAttribute('aria-expanded') === 'false';
+
+  t("T18: キルスイッチ＋タップ生存", isNull && tapAlive && noDatasetOk && mobileInitOk);
+}
+
+// --- T19: DIR_RATIO_BODY ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 100, y: 200 });
+  swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 130, y: 220 });
+  // dx = 30, dy = 20, 30 < 20 * 2.2 = 44
+  t("T19: DIR_RATIO_BODY", fx.controller.getState() === 'SCROLLING_Y');
+  teardown(fx);
+}
+
+// --- T20: touchcancel ---
+{
+  resetClock();
+  const fx = buildFixture();
+  swipeClock = 0;   dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 20;  dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 300; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+  swipeClock = 310; dispatchTouch(fx.main, 'touchcancel', { x: 200, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = dbg.path === 'cancel' && fx.state.open === true;
+  t("T20: touchcancel", cond);
+  teardown(fx);
+}
+
+// --- T21: 開＋右フリック ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setOpenDirect(true);
+  swipeClock = 0;  dispatchTouch(fx.drawer, 'touchstart', { x: 100, y: 200 });
+  swipeClock = 15; dispatchTouch(fx.drawer, 'touchmove', { x: 120, y: 200 });
+  swipeClock = 40; dispatchTouch(fx.drawer, 'touchmove', { x: 200, y: 200 });
+  swipeClock = 45; dispatchTouch(fx.drawer, 'touchend', { x: 200, y: 200 });
+  const dbg = fx.controller.getDebugState();
+  const cond = dbg.path === 'flick' && fx.state.open === true && fx.drawer.style.transform === '';
+  t("T21: 開＋右フリック", cond);
+  teardown(fx);
+}
+
+// --- T22: CSS スモーク ---
+{
+  const cssText = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
+  const bodyNoTouchAction = !/body\s*\{[^}]*touch-action/i.test(cssText);
+  const sidebarTransform = /#sidebar\s*\{[^}]*translate3d\(-100%/i.test(cssText) &&
+    /#sidebar\s*\{[^}]*transition:\s*transform/i.test(cssText);
+  const noTransitionAll = !/#sidebar\s*\{[^}]*transition:\s*all/i.test(cssText) &&
+    !/#sideBackdrop\s*\{[^}]*transition:\s*all/i.test(cssText);
+  const backdropRules = /#sideBackdrop\s*\{[^}]*touch-action:\s*none/i.test(cssText) &&
+    /#sideBackdrop\s*\{[^}]*display:\s*block/i.test(cssText);
+  t("T22: CSS スモーク", bodyNoTouchAction && sidebarTransform && noTransitionAll && backdropRules);
+}
+
+// --- T23: CSS スコープ（AC-25 の正） ---
+{
+  let t23Passed = false;
+  try {
+    const cssText = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
+    let desktop = '';
+    let pos = 0;
+    let mobileBlockCount = 0;
+    while (true) {
+      const start = cssText.indexOf('@media (max-width: 768px)', pos);
+      if (start < 0) { desktop += cssText.slice(pos); break; }
+      desktop += cssText.slice(pos, start);
+      let depth = 0, end = -1;
+      for (let i = cssText.indexOf('{', start); i < cssText.length; i++) {
+        if (cssText[i] === '{') depth++;
+        else if (cssText[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      assert.ok(end > start, 'モバイルブロックの終端が見つかる');
+      mobileBlockCount++;
+      pos = end + 1;
+    }
+    assert.ok(mobileBlockCount >= 1, 'モバイルブロックが存在する');
+    ['is-dragging', 'is-peeking', 'translate3d(-100%'].forEach(function (needle) {
+      assert.strictEqual(desktop.indexOf(needle), -1, 'デスクトップ側にスワイプ用規則が漏れていない: ' + needle);
+    });
+    t23Passed = true;
+  } catch (err) {
+    t23Passed = false;
+  }
+  t("T23: CSS スコープ（AC-25 の正）", t23Passed);
+}
+
+// --- T24: settle中のタップ切替（P-19） ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.transitionMs = 250;
+  fx.setOpenDirect(true);
+
+  // T2 手順で閉じる（settle 保留）
+  swipeClock = 200; dispatchTouch(fx.drawer, 'touchstart', { x: 220, y: 200 });
+  swipeClock = 215; dispatchTouch(fx.drawer, 'touchmove', { x: 205, y: 200 });
+  swipeClock = 240; dispatchTouch(fx.drawer, 'touchmove', { x: 160, y: 200 });
+  swipeClock = 245; dispatchTouch(fx.drawer, 'touchend', { x: 160, y: 200 });
+
+  const prevCalls = fx.state.calls;
+  fx.tapToggle();
+
+  const cond = fx.drawer.style.transform === '' &&
+    fx.drawer.classList.contains('open') &&
+    fx.doc.body.classList.contains('side-open') &&
+    fx.state.calls === prevCalls + 1;
+  t("T24: settle中のタップ切替（P-19）", cond);
+  teardown(fx);
+}
 
 console.log(`\n===== PASS ${pass} / FAIL ${fail} =====`);
 process.exit(fail ? 1 : 0);
