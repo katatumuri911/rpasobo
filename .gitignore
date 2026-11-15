@@ -50,7 +50,7 @@ htmlcov/
 *.raw
 *.svg
 # 既存のアプリアイコン等は除外対象から外して追跡を維持
-!public/icon*.png
+# !public/icon*.png
 
 *.mp4
 *.webm
