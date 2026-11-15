@@ -449,6 +449,7 @@ footer { flex-shrink: 0; }
 .progress .p-row.now .p-mark { animation: blink 1.4s infinite both; color: #ffd27a; }
 .progress .p-row.now .p-text { color: #ffd27a; }
 .progress .p-row.error .p-text { color: #ff9999; }
+.progress .p-row.filter .p-mark, .progress .p-row.filter .p-text { color: #f59e0b; }
 .progress .p-note { color: #777; }
 
 .gen-image { margin-top: 8px; max-width: 100%; }

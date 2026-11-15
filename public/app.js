@@ -60,6 +60,7 @@ let decToastTimer = 0;
 let lastRotationNotice = "";
 let formSid = "";  // 設定フォームに今入っているのはどのチャンネルの設定か
 const openChoicesSet = new Set();       // 開いているアコーディオンのメッセージIDを保持
+const choicesNoticeToasted = new Set();  // 同じ通知を何度もトーストしない
 const userClosedChoicesSet = new Set(); // ユーザーが手動で閉じたアコーディオンのメッセージIDを保持
 const selectedChoiceMap = new Map();    // メッセージID -> 選択中のchoiceインデックス
 const displayChoicesMode = new Map();   // msgKey -> "normal" | "erotic"
@@ -747,6 +748,9 @@ async function switchTo(id) {
   lastSelectedChoiceText = "";
   selectedChoiceMap.clear();
   openChoicesSet.clear();
+  choicesNoticeToasted.clear();
+  lastStepToastKey = "";
+  replyToastTurnId = "";
   displayChoicesMode.clear();
   $("charList").innerHTML = "";  // 前のチャンネルで編集中だった行は捨てる
   attaching = [];  // 添付は上げたチャンネルの発言にしか付けられない
@@ -5623,7 +5627,7 @@ function render() {
       desiredChildren.push(p);
       if (!p.innerHTML) setTimeout(pollProgress, 0);  // 送った直後は2秒待たずに読む
     }
-  } else if (progressSid === s.id) progressHtml = "";  // 次の入力で前のターンの表示が一瞬出ないように
+  } else if (progressSid === s.id) { progressHtml = ""; lastStepToastKey = ""; }  // 次の入力で前のターンの表示が一瞬出ないように
 
   // Sync desired children with log DOM
   const desiredSet = new Set(desiredChildren);
@@ -5802,6 +5806,25 @@ async function poll() {
         for (let i = s.messages.length - 1; i >= 0; i--) {
           if (s.messages[i].role === "assistant" && s.messages[i].id) { lastAutoScrolledAsstId = s.messages[i].id; break; }
         }
+        // チャンネルを開いた瞬間・切り替えた瞬間に、過去ターンの choices_notice が誤発火しないよう登録しておく
+        for (const m of s.messages || []) {
+          const n = m.choices_notice || (m.choices_timeout ? { kind: "timeout", slot: m.choices_slot || m.choices_type || "normal" } : null);
+          if (n) {
+            const mKey = m.id || ("msg-" + (m.ts || ""));
+            choicesNoticeToasted.add(`${mKey}|${n.kind}|${n.filter_name || ""}|${n.ts || n.task || ""}`);
+          }
+        }
+      }
+      // 応答待ちだったターンに新しいAI応答が届いた瞬間、まだ完了トーストを出していなければ鳴らす
+      if (!first && prevState && prevState.id === s.id) {
+        const wasWaiting = (prevState.messages || []).some((m) => m.role === "user" && (m.status === "pending" || m.status === "processing"));
+        const nowWaiting = (s.messages || []).some((m) => m.role === "user" && (m.status === "pending" || m.status === "processing"));
+        const prevIds = new Set((prevState.messages || []).map((m) => m.id));
+        const newAsst = (s.messages || []).slice().reverse().find((m) => m.role === "assistant" && m.id && !prevIds.has(m.id));
+        if (wasWaiting && !nowWaiting && newAsst && replyToastTurnId !== newAsst.id) {
+          replyToastTurnId = newAsst.id;
+          toast("✅ 応答ができました", { kind: "ok", ms: 4000 });
+        }
       }
       render();
       if (first) {
@@ -5825,6 +5848,43 @@ async function poll() {
 
 // 応答待ちのあいだ、担当の Antigravity 会話がしていること（ツール呼び出し）を入力中の表示の下に映す
 let progressHtml = "", progressSid = "", progressBusy = false;
+let lastStepToastKey = "", stepToastSid = "", replyToastTurnId = "";
+
+// progress_labels.js が読めていなければ素通し（画面が壊れないように）
+const PL = (typeof ProgressLabels !== "undefined") ? ProgressLabels : {
+  stepLabel: (it) => (it && it.text) || "",
+  stepDetail: (it) => (!it || it.internal || it.kind === "reply" ? "" : (it.detail || "")),
+  stepRaw: (it) => (!it || it.internal ? "" : (it.detail || it.text || "")),
+};
+const { stepLabel, stepDetail, stepRaw } = PL;
+
+// トーストは主要なステップだけ（送信・読み込み・書き込み・完了・エラー）。新しい行が出た瞬間に1回だけ
+const STEP_TOAST_KINDS = new Set(["read", "write"]);
+function notifyProgressStep(items) {
+  const s = state;
+  if (!s) return;
+  if (s.id !== stepToastSid) { stepToastSid = s.id; lastStepToastKey = ""; }
+  const it = [...items].reverse().find((x) =>
+    x.kind === "reply" || x.kind === "error" ||
+    (STEP_TOAST_KINDS.has(x.tool_kind) && !x.internal));
+  if (!it) return;
+  // 0.8秒ごとの再描画で同じ行を出し直さない（step/call は会話の絶対位置なので安定）
+  const key = `${it.step ?? ""}:${it.call ?? ""}:${it.kind}:${it.tool_kind || ""}:${it.filter_name || ""}`;
+  if (key === lastStepToastKey) return;
+  lastStepToastKey = key;
+  const d = stepDetail(it);
+  if (it.kind === "error")
+    return toast(it.filter_name ? `⛔ ${it.filter_name}で止まりました` : `⚠️ エラー${d ? ": " + d : ""}`,
+                 { kind: "err", ms: 8000 });
+  if (it.kind === "reply") {
+    const lastAsst = (s.messages || []).slice().reverse().find((m) => m.role === "assistant" && m.id);
+    if (lastAsst) replyToastTurnId = lastAsst.id;
+    return toast("✅ 応答ができました", { kind: "ok", ms: 4000 });
+  }
+  if (it.tool_kind === "read") return toast(`📖 ${d || "ファイル"}を読み込んでいます`, { kind: "info", ms: 3000 });
+  if (it.tool_kind === "write") return toast(`✍️ ${d || "応答"}を書き込んでいます`, { kind: "info", ms: 3000 });
+}
+
 async function pollProgress() {
   const s = state;
   if ((typeof document !== "undefined" && document.hidden) || progressBusy || !s || s.id !== sid || !(s.setting?.ide_session || s.setting?.choices_ide_session || ["google", "vertex"].includes(s.setting?.ai_provider)) || !$("progress")) return;
@@ -5833,19 +5893,34 @@ async function pollProgress() {
     const r = await api("/api/ide/progress?sid=" + encodeURIComponent(s.id));
     if (s.id !== sid) return;
     const items = r.items || [];
-    const rows = items.map((it, i) => {
-      const last = i === items.length - 1;
+    // 同一カスケード内で複数ターン進んだ場合、最後の wait_input.py (internal) より前の過去ターンのステップは除外する
+    let lastWaitIdx = -1;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i] && items[i].internal) { lastWaitIdx = i; break; }
+    }
+    const turnItems = lastWaitIdx >= 0 ? items.slice(lastWaitIdx + 1) : items;
+    const shown = turnItems.filter((it) => !it.internal);   // wait_input.py の行は画面に出さない
+    const rows = shown.map((it, i) => {
+      const last = i === shown.length - 1;
       const now = !it.done && last;
-      const mark = it.kind === "error" ? "✕" : it.kind === "think" ? "…" : it.done ? "✓" : now ? "●" : "・";
-      const cls = "p-row" + (now ? " now" : "") + (it.kind === "error" ? " error" : "");
-      return `<div class="${cls}"><span class="p-mark">${mark}</span><span class="p-text">${esc(it.text)}</span>`
-        + (it.detail ? `<span class="p-detail" title="${esc(it.detail)}">${esc(it.detail)}</span>` : "") + "</div>";
+      const bad = it.kind === "error";
+      const mark = bad ? "✕" : it.kind === "think" ? "…" : it.done ? "✓" : now ? "●" : "・";
+      const cls = "p-row" + (now ? " now" : "") + (bad ? " error" : "") + (it.filter_name ? " filter" : "");
+      const d = stepDetail(it), raw = stepRaw(it);
+      return `<div class="${cls}"${raw ? ` title="${esc(raw)}"` : ""}>`
+        + `<span class="p-mark">${mark}</span><span class="p-text">${esc(stepLabel(it))}</span>`
+        + (d ? `<span class="p-detail" title="${esc(raw)}">${esc(d)}</span>` : "") + "</div>";
     });
-    if (r.running && (!items.length || items[items.length - 1].done))
+    const onlyWaiting = !!items.length && !shown.length;    // 待機コマンドだけで動いている
+    const lastShown = shown[shown.length - 1];
+    if (r.running && lastShown && lastShown.done && lastShown.kind !== "reply" && lastShown.kind !== "error")
       rows.push(`<div class="p-row now"><span class="p-mark">●</span><span class="p-text">次にすることを考えている</span></div>`);
+    if (!rows.length && (onlyWaiting || (r.running && !r.note)))
+      rows.push(`<div class="p-row now"><span class="p-mark">●</span><span class="p-text">⏳ 応答を待っています</span></div>`);
     if (!rows.length && r.note) rows.push(`<div class="p-note">${esc(r.note)}</div>`);
     progressHtml = rows.join("");
     progressSid = s.id;
+    notifyProgressStep(shown);
     const box = $("progress");
     if (box && box.innerHTML !== progressHtml) {
       const nearBottom = !navHoldBottom && !topAlignHold && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
@@ -5902,6 +5977,13 @@ async function send() {
   try {
     const r = await post("/api/send", { text, files: attaching.map((a) => a.file) });
     if (r.error) return alert("送れませんでした: " + r.error);
+    {
+      const st = r.session?.setting || state?.setting || {};   // session が無い経路でも落ちない
+      const api = ["google", "vertex"].includes(st.ai_provider || "antigravity");
+      const par = !api && st.suggest_choices !== false && st.choices_ide_session && st.choices_ide_session !== st.ide_session;
+      replyToastTurnId = "";
+      toast(par ? "✅ 選択肢のAIに送信しました" : "✅ AIに送信しました", { kind: "ok", ms: 2500 });
+    }
     ta.value = "";
     autoResizeInput();
     lastSelectedChoiceText = "";
@@ -6106,9 +6188,10 @@ function closeChoicesAccordions() {
 
 function choicesNoticeText(n) {
   const ic = (n && n.slot === "normal") ? "💬" : "🔞";
+  const f = (n && n.filter_name) || "フィルタ";
   switch (n && n.kind) {
-    case "filter": return `${ic} フィルタで1回停止 → 自動で回避して出力`;
-    case "suspect": return `${ic} の候補: 健全な内容に差し替わった可能性あり`;
+    case "filter": return `${ic} ${f}で1回停止 → 自動で回避して出力`;
+    case "suspect": return `${ic} の候補: 健全な内容に差し替わった可能性あり${n && n.filter_name ? "（" + n.filter_name + "）" : ""}`;
     case "placeholder": return `${ic} の候補: プレースホルダーを一部自動置換しました`;
     case "timeout": return `${ic} の候補: 生成がタイムアウト（応答が届いていません）`;
     case "rescued": return `${ic} の候補: 生成結果を回収しました（.tmp から復元）`;
@@ -6162,6 +6245,14 @@ function choicesBox(m, targetContainer) {
   if (notice) {
     const txt = choicesNoticeText(notice);
     if (txt) {
+      const nk = `${msgKey}|${notice.kind}|${notice.filter_name || ""}|${notice.ts || notice.task || ""}`;
+      const toastedSet = (typeof choicesNoticeToasted !== "undefined") ? choicesNoticeToasted : null;
+      if (toastedSet && !toastedSet.has(nk)) {
+        toastedSet.add(nk);
+        if (typeof toast === "function") {
+          toast(txt, { kind: notice.kind === "filter" ? "err" : "info", ms: 8000 });
+        }
+      }
       const el = document.createElement("div");
       el.className = "choices-notice" + (notice.kind === "suspect" ? " is-warn" : "");
       el.textContent = txt;

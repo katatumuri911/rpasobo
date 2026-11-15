@@ -803,27 +803,85 @@ def _short(text, n=110):
     return line if len(line) <= n else line[:n - 1] + "…"
 
 
+# 進捗の1行を分類する（画面の言い換えとトーストに使う）
+TOOL_KINDS = (
+    (("write_to_file", "write_file", "edit_file", "create_file",
+      "replace_file_content", "multi_replace_file_content"), "write"),
+    (("view_file", "read_file", "open_file", "read_text_file", "view_file_content"), "read"),
+    (("grep_search", "find_by_name", "codebase_search", "search"), "search"),
+    (("list_dir", "list_directory"), "list"),
+    (("update_plan", "task_boundary"), "plan"),
+    (("run_command", "execute_command", "command"), "command"),
+)
+
+
+def tool_kind_of(name):
+    """Antigravity のツール名 → read / write / search / list / plan / command / tool"""
+    low = str(name or "").lower()
+    for keys, kind in TOOL_KINDS:
+        if any(k in low for k in keys):
+            return kind
+    return "tool"
+
+
+# フィルタの表示名（server.py の API 側エラーと語彙をそろえる）
+FILTER_LABELS = (
+    ("stop_reason_content_filter", "コンテンツフィルタ（生成停止）"),
+    ("prohibited_content", "禁止コンテンツ（解除不可）"),
+    ("prohibited use", "禁止コンテンツ（解除不可）"),
+    ("content safety", "コンテンツ安全フィルタ"),
+    ("model output error", "モデル出力エラー"),
+    ("retries remaining", "モデル出力エラー"),
+    ("recitation", "引用（著作権）フィルタ"),
+    ("blocklist", "ブロックリスト"),
+    ("spii", "個人情報フィルタ"),
+    ("image_safety", "画像の安全フィルタ"),
+    ("model_armor", "Model Armor"),
+    ("pup_limited_disabled", "モデルの利用制限"),
+    ("safety", "安全性フィルタ"),
+)
+
+
+def filter_label(text):
+    """エラー文からフィルタの種類を1つ返す（分からなければ ""）"""
+    low = str(text or "").lower()
+    for key, label in FILTER_LABELS:
+        if key in low:
+            return label
+    return ""
+
+
 def _tool_line(tc):
-    """ツール呼び出し1つを {tool, text, detail} にする（Antigravity の画面のツール行と同じ toolAction を使う）"""
+    """ツール呼び出し1つを {tool, tool_kind, text, detail, internal} にする"""
+    raw = tc.get("argumentsJson") or "{}"
     try:
-        a = json.loads(tc.get("argumentsJson") or "{}")
+        a = json.loads(raw)
     except ValueError:
         a = {}
     a = a if isinstance(a, dict) else {}
+    name = tc.get("name") or ""
     detail = ""
-    for k in ("CommandLine", "AbsolutePath", "TargetFile", "Url", "query", "Query", "SearchPath", "DirectoryPath", "TaskId"):
+    for k in ("CommandLine", "AbsolutePath", "TargetFile", "Path", "Url", "query", "Query",
+              "SearchPath", "DirectoryPath", "TaskId"):
         if a.get(k):
             v = str(a[k])
-            # パスは名前だけ（長いパスは画面に収まらない）
-            detail = _short(v) if k in ("CommandLine", "Url", "query", "Query", "TaskId") else re.split(r"[\\/]", v.rstrip("\\/"))[-1]
+            detail = _short(v) if k in ("CommandLine", "Url", "query", "Query", "TaskId") \
+                else re.split(r"[\\/]", v.rstrip("\\/"))[-1]
             break
-    return {"tool": tc.get("name") or "", "text": _short(a.get("toolAction") or a.get("toolSummary") or tc.get("name"), 80),
+    kind = tool_kind_of(name)
+    # 入力待ちの wait_input.py 実行は、ユーザーが読んでも意味がないので印を付ける（画面側で捨てる）
+    internal = "wait_input.py" in raw          # 引数キー名が違っても取りこぼさない
+    # outbox への書き込みは「応答を書き込み」で足りる（パスは画面に出さない）
+    if internal or (kind == "write" and "outbox" in raw.lower()):
+        detail = ""
+    return {"tool": name, "tool_kind": kind, "internal": internal,
+            "text": _short(a.get("toolAction") or a.get("toolSummary") or name, 80),
             "detail": detail}
 
 
 def progress(cid, limit=10):
     """会話のいまのターン（最後のユーザー入力から後）で何をしているか。読むだけ。
-    ({running, user_time, steps, items: [{kind, tool, text, detail, done}]}, None) か (None, 説明)。
+    ({running, user_time, steps, items: [{kind, tool, tool_kind, text, detail, internal, done, step, call}]}, None)
     kind は tool（ツール）/ think（考えている）/ reply（返事を書いた）/ error"""
     port, tok, s = locate(cid)
     if not port:
@@ -835,23 +893,36 @@ def progress(cid, limit=10):
     if code != 200:
         return None, f"会話を読めなかった（{code}）"
     items = []
-    for x in d.get("steps") or []:
+    for j, x in enumerate(d.get("steps") or []):
+        at = start + j
         t = (x.get("type") or "").replace("CORTEX_STEP_TYPE_", "")
         done = (x.get("status") or "").endswith("_DONE")
         if t == "PLANNER_RESPONSE":
             pr = x.get("plannerResponse") or {}
             calls = pr.get("toolCalls") or []
-            for tc in calls:
-                items.append(dict(_tool_line(tc), kind="tool", done=False))  # 終わったかは次の実行ステップで決める
-            if not calls:
+            for k, tc in enumerate(calls):
+                items.append(dict(_tool_line(tc), kind="tool", done=False, step=at, call=k))
+            if pr.get("stopReason") == "STOP_REASON_CONTENT_FILTER":
+                items.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
+                              "filter_name": filter_label("STOP_REASON_CONTENT_FILTER"),
+                              "text": "エラー", "detail": "STOP_REASON_CONTENT_FILTER",
+                              "done": True, "step": at, "call": len(calls)})
+            elif not calls:
                 if pr.get("response", "").strip():
-                    items.append({"kind": "reply", "tool": "", "text": "返事を書いた", "detail": _short(pr["response"]), "done": True})
+                    items.append({"kind": "reply", "tool": "", "tool_kind": "", "internal": False,
+                                  "text": "返事を書いた", "detail": _short(pr["response"]),
+                                  "done": True, "step": at, "call": 0})
                 elif not done:
                     heads = re.findall(r"\*\*(.+?)\*\*", pr.get("thinking") or "")
-                    items.append({"kind": "think", "tool": "", "text": "考えている", "detail": _short(heads[-1] if heads else ""), "done": False})
+                    items.append({"kind": "think", "tool": "", "tool_kind": "", "internal": False,
+                                  "text": "考えている", "detail": _short(heads[-1] if heads else ""),
+                                  "done": False, "step": at, "call": 0})
         elif t == "ERROR_MESSAGE":
             e = (x.get("errorMessage") or {}).get("error") or {}
-            items.append({"kind": "error", "tool": "", "text": "エラー", "detail": _short(e.get("shortError") or e.get("userErrorMessage")), "done": True})
+            msg = e.get("shortError") or e.get("userErrorMessage") or ""
+            items.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
+                          "filter_name": filter_label(msg),      # ★ どのフィルタか
+                          "text": "エラー", "detail": _short(msg), "done": True, "step": at, "call": 0})
         elif t not in ("USER_INPUT", "CHECKPOINT", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE"):
             # ツールを実行したステップ（RUN_COMMAND / VIEW_FILE / CODE_ACTION など）。まだ終わっていない最初のツール行に当てる
             tool = next((it for it in items if it["kind"] == "tool" and not it.get("ran")), None)
@@ -863,7 +934,8 @@ def progress(cid, limit=10):
     if not running:
         for it in items:
             it["done"] = True  # 止まった会話に「実行中」は残さない
-    return {"running": running, "user_time": s.get("lastUserInputTime") or "", "steps": n, "items": items[-limit:]}, None
+    return {"running": running, "user_time": s.get("lastUserInputTime") or "",
+            "steps": n, "items": items[-limit:]}, None
 
 
 READ_TOOL_NAMES = {"view_file", "read_file", "open_file", "read_text_file", "view_file_content"}

@@ -856,6 +856,32 @@ def _is_filter_error_msg(msg):
     ))
 
 
+FILTER_NAME_WORDS = (
+    ("stop_reason_content_filter", "コンテンツフィルタ（生成停止）"),
+    ("prohibited_content", "禁止コンテンツ（解除不可）"),
+    ("prohibited", "禁止コンテンツ（解除不可）"),
+    ("content safety", "コンテンツ安全フィルタ"),
+    ("model output error", "モデル出力エラー"),
+    ("retries remaining", "モデル出力エラー"),
+    ("recitation", "引用（著作権）フィルタ"),
+    ("blocklist", "ブロックリスト"),
+    ("spii", "個人情報フィルタ"),
+    ("image_safety", "画像の安全フィルタ"),
+    ("model_armor", "Model Armor"),
+    ("pup_limited_disabled", "モデルの利用制限"),
+    ("safety", "安全性フィルタ"),
+)
+
+
+def filter_name_of(msg):
+    """API / IDE のエラー文からフィルタの種類を返す（分からなければ ""）"""
+    low = str(msg or "").lower()
+    for w, label in FILTER_NAME_WORDS:
+        if w in low:
+            return label
+    return ""
+
+
 def _google_inflight_key(sid, task_type, m):
     """F-1: _google_pick_tasks と完全一致する inflight キーを作る唯一の関数"""
     m = m or {}
@@ -7545,9 +7571,13 @@ def _process_choices_notice(job):
 
     # 2) フィルタ被弾の調査（best-effort）
     filtered = False
+    filter_name = ""
     if job.get("ide") and task and ide_poke is not None:
         try:
-            filtered = bool(ide_poke.errors_since(job["ide"], task, kinds=("filter",)))
+            hits = ide_poke.errors_since(job["ide"], task, kinds=("filter",))
+            filtered = bool(hits)
+            if hits and isinstance(hits[-1], dict):
+                filter_name = filter_name_of(hits[-1].get("text") or "")
         except Exception as e:
             print(f"[choices notice] ide read error: {e}")
 
@@ -7558,11 +7588,12 @@ def _process_choices_notice(job):
 
     explicit_hits = job.get("explicit_hits")
     if filtered:
+        extra = {"filter_name": filter_name} if filter_name else None
         # 露骨語ゼロ（日和り健全化）の場合は filter に昇格させず suspect を確定
         if explicit_hits is not None and explicit_hits == 0 and slot == "erotic":
-            _set_choices_notice(sid, mid, "suspect", slot, task)
+            _set_choices_notice(sid, mid, "suspect", slot, task, extra=extra)
         else:
-            _set_choices_notice(sid, mid, "filter", slot, task)
+            _set_choices_notice(sid, mid, "filter", slot, task, extra=extra)
     elif job.get("timeout") and not has_set:
         _set_choices_notice(sid, mid, "timeout", slot, task)
 
@@ -8840,6 +8871,7 @@ def _google_claim(sid, task_type, mid):
 def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
     filter_slot = None
     filter_task_ts = ""
+    filter_name = ""
     target_mid = ""
     attempts = 0
     with lock:
@@ -8877,6 +8909,7 @@ def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
                     slot = str(m.get("choices_slot") or m.get("choices_type") or "normal").lower()
                     filter_slot = slot if slot in ("normal", "erotic") else "normal"
                     filter_task_ts = claimed_ts or m.get("choices_ts") or now()
+                    filter_name = filter_name_of(msg)
                     if m.get("role") == "assistant":
                         target_mid = m["id"]
                     else:
@@ -8888,8 +8921,11 @@ def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
                         if ans and ans.get("id"):
                             target_mid = ans["id"]
                         elif m.get("status") in ("pending", "processing"):
-                            m["staged_choices_notice"] = {"kind": "filter", "slot": filter_slot,
-                                                          "task": filter_task_ts, "ts": now()}
+                            staged_notice = {"kind": "filter", "slot": filter_slot,
+                                             "task": filter_task_ts, "ts": now()}
+                            if filter_name:
+                                staged_notice["filter_name"] = filter_name
+                            m["staged_choices_notice"] = staged_notice
             elif task_type == "image_refine":
                 m["image_refine_status"] = "error"; m["image_refine_error"] = msg
                 m.pop("image_refine_claimed_ts", None)
@@ -8900,7 +8936,8 @@ def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
             m.pop("google_retry", None)
         save(s)
     if filter_slot and target_mid:
-        _set_choices_notice(sid, target_mid, "filter", filter_slot, filter_task_ts)
+        _set_choices_notice(sid, target_mid, "filter", filter_slot, filter_task_ts,
+                            extra={"filter_name": filter_name} if filter_name else None)
     _set_google_status(sid, task_type, "retry" if retryable and attempts < 2 else "error", error=msg)
 
 
