@@ -169,7 +169,7 @@ assert(boxEmpty.isFragment || boxEmpty.children.length === 0, "通知も選択�
 console.log("  PASS: choicesBox ゼロ件表示・早期 return");
 
 console.log("--- 3. choicesBox: 婉曲表現の自動復元 (#decensor) ---");
-// 3-1: 復元したことを知らせる行と「戻す」ボタン
+// 3-1: choices_decensor があっても復元行・戻すボタンが出ず、候補パネル本体は出ること
 const mDec = {
   id: "msg_dec_1",
   role: "assistant",
@@ -185,132 +185,23 @@ const mDec = {
   },
 };
 const boxDec = choicesBox(mDec);
-const decEl = boxDec.querySelector(".choices-notice");
-assert(decEl, "復元の .choices-notice 要素が存在すること");
-assert(decEl.classList.contains("is-ok"), "復元の行は is-ok クラスを持つこと");
-assert.strictEqual(decEl.textContent, "💬 の候補: 婉曲表現を3か所 自動で戻しました");
-assert(decEl.title.includes("秘所 → おまんこ"), "内訳は title に入ること");
-assert(boxDec.querySelector(".choices-undo-btn"), "「戻す」ボタンが付くこと");
+assert.strictEqual(boxDec.querySelector(".choices-notice"), null, "choices_decensor があっても .choices-notice は出ないこと");
+assert.strictEqual(boxDec.querySelector(".choices-undo-btn"), null, ".choices-undo-btn は出ないこと");
+assert(boxDec.querySelector(".choices-panel"), "候補本体（.choices-panel）は従来どおり出ること");
 
-// 3-2: スロットが違うときは出さない（🔞側を見ているのに💬の復元記録を出さない）
-const mDecOther = { ...mDec, id: "msg_dec_2", choices_decensor: { ...mDec.choices_decensor, slot: "erotic" } };
-const boxDecOther = choicesBox(mDecOther);
-assert(!boxDecOther.querySelector(".choices-notice"), "別スロットの復元記録は表示しない");
-console.log("  PASS: 復元の通知行と戻すボタン");
+// 3-2: choices: [] で choices_decensor だけのメッセージでは空フラグメントを返すこと
+const mDecOnly = {
+  id: "msg_dec_only",
+  role: "assistant",
+  choices: [],
+  choices_erotic: [],
+  choices_decensor: {
+    slot: "normal",
+    applied: [{ from: "秘所", to: "おまんこ", count: 1 }],
+  },
+};
+const boxDecOnly = choicesBox(mDecOnly);
+assert(boxDecOnly.isFragment || boxDecOnly.children.length === 0, "choices: [] で choices_decensor だけなら空フラグメントを返すこと");
+console.log("  PASS: 復元行・戻すボタンが出ない");
 
-console.log("--- 4. textDecensorLine: 本文復元の通知行と戻すボタン ---");
-const sDec0 = src.indexOf("function textDecensorLine(");
-const sDec1 = src.indexOf("function createMessageWrap(");
-if (sDec0 < 0 || sDec1 < 0 || sDec1 <= sDec0) {
-  throw new Error("textDecensorLine モジュールを抽出できません");
-}
-
-(async () => {
-  const decSrc = src.slice(sDec0, sDec1);
-  let apiCalls = [];
-  let pollCalled = false;
-  let alertMessages = [];
-
-  const context = {
-    document: {
-      createElement: (tag) => new StubEl(tag),
-    },
-    api: async (path, body) => {
-      apiCalls.push({ path, body });
-      return { ok: true };
-    },
-    poll: async () => {
-      pollCalled = true;
-    },
-    alert: (msg) => {
-      alertMessages.push(msg);
-    },
-  };
-  vm.runInNewContext(decSrc, context);
-
-  // 4-1: DOM 生成と件数集計
-  const m1 = {
-    id: "msg_body_1",
-    role: "assistant",
-    text_decensor: {
-      applied: [
-        { from: "突起", to: "乳首", count: 2 },
-        { from: "尻肉", to: "尻たぶ", count: 1 },
-      ],
-    },
-  };
-  const wrap = new StubEl("div");
-  const el1 = context.textDecensorLine(m1, { id: "s1" });
-  wrap.appendChild(el1);
-
-  assert.strictEqual(el1.className, "msg-notice");
-  assert.strictEqual(el1.textContent, "婉曲表現を3か所 自動で戻しました");
-  assert(el1.title.includes("突起 → 乳首（2）"));
-  const btn1 = el1.querySelector(".choices-undo-btn");
-  assert(btn1, "「戻す」ボタンが付くこと");
-  assert.strictEqual(btn1.textContent, "戻す");
-  assert(btn1.title.includes("戻します"), "ボタンに説明ツールチップが付くこと");
-
-  // 4-2: 成功時のクリック（API送信・ローカル即時反映・poll同期）
-  await btn1.onclick({ stopPropagation: () => {} });
-  assert.strictEqual(btn1.disabled, true, "クリック時に disabled 化されること");
-  assert.strictEqual(apiCalls.length, 1);
-  assert.strictEqual(apiCalls[0].path, "/api/message/undo-decensor");
-  assert.strictEqual(apiCalls[0].body.sid, "s1");
-  assert.strictEqual(apiCalls[0].body.id, "msg_body_1");
-  assert.strictEqual(apiCalls[0].body.kind, "text");
-  assert.strictEqual(m1.text_decensor, null, "成功時にローカルの text_decensor がクリアされること");
-  assert.strictEqual(el1.parentNode, null, "成功時に通知行が wrap から削除されること");
-  assert.strictEqual(pollCalled, true, "成功時に poll() が呼ばれること");
-
-  // 4-3: 404時（記録切れ・ゾンビボタン）: 静かにボタンのみ消去、alert なし
-  context.api = async () => ({ error: "戻せる置換がありません" });
-  const m2 = {
-    id: "msg_body_2",
-    role: "assistant",
-    text_decensor: { applied: [{ from: "突起", to: "乳首", count: 1 }] },
-  };
-  const el2 = context.textDecensorLine(m2, { id: "s1" });
-  wrap.appendChild(el2);
-  const btn2 = el2.querySelector(".choices-undo-btn");
-  alertMessages = [];
-  await btn2.onclick();
-  assert.strictEqual(btn2.parentNode, null, "404時にボタンが DOM から消去されること");
-  assert.strictEqual(el2.parentNode, wrap, "404時も通知行自体は残ること");
-  assert.strictEqual(alertMessages.length, 0, "404時に alert は抑制されること");
-
-  // 4-4: 409時（編集済み競合）: ボタン消去 ＋ alert 表示
-  context.api = async () => ({ error: "本文が編集されているので戻せません" });
-  const m3 = {
-    id: "msg_body_3",
-    role: "assistant",
-    text_decensor: { applied: [{ from: "突起", to: "乳首", count: 1 }] },
-  };
-  const el3 = context.textDecensorLine(m3, { id: "s1" });
-  wrap.appendChild(el3);
-  const btn3 = el3.querySelector(".choices-undo-btn");
-  alertMessages = [];
-  await btn3.onclick();
-  assert.strictEqual(btn3.parentNode, null, "409時にボタンが DOM から消去されること");
-  assert.strictEqual(alertMessages.length, 1, "409時は alert が出ること");
-  assert(alertMessages[0].includes("本文が編集されているので戻せません"));
-
-  // 4-5: 通信例外発生時: クラッシュせず安全にボタン消去
-  context.api = async () => { throw new Error("fetch failed"); };
-  const m4 = {
-    id: "msg_body_4",
-    role: "assistant",
-    text_decensor: { applied: [{ from: "突起", to: "乳首", count: 1 }] },
-  };
-  const el4 = context.textDecensorLine(m4, { id: "s1" });
-  wrap.appendChild(el4);
-  const btn4 = el4.querySelector(".choices-undo-btn");
-  await btn4.onclick();
-  assert.strictEqual(btn4.parentNode, null, "例外時にボタンが安全に消去されること");
-
-  console.log("  PASS: textDecensorLine 通知行生成・件数集計・undo実行・ゾンビ対策・例外保護");
-  console.log("ALL choices UI tests PASSED!");
-})().catch((err) => {
-  console.error("FAIL:", err);
-  process.exit(1);
-});
+console.log("ALL choices UI tests PASSED!");

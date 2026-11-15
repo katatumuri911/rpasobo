@@ -534,7 +534,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // 2. initUserMsgLongPress の抽出と実行検証
     const sInit0 = appSrc.indexOf("let userMsgLongPressInitialized = false;");
-    const sInit1 = appSrc.indexOf("function textDecensorLine(");
+    const sInit1 = appSrc.indexOf("function createMessageWrap(");
     if (sInit0 < 0 || sInit1 <= sInit0) throw new Error("initUserMsgLongPress を抽出できません");
     const initSrc = appSrc.slice(sInit0, sInit1);
 

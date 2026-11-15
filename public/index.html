@@ -6,7 +6,7 @@
 <title>RP Image Chat {{PORT}}</title>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="apple-touch-icon" href="icon-maskable-512.png">
-<link rel="stylesheet" href="style.css?v=138">
+<link rel="stylesheet" href="style.css?v=139">
 </head>
 <body>
 <aside id="sidebar">
@@ -345,7 +345,10 @@
 </div>
 <!-- スマホでチャンネル一覧を開いているとき、右側（一覧の外）をタップすると閉じる -->
 <div id="sideBackdrop"></div>
-<div id="toast" class="hidden"></div>
+<div id="toast" class="hidden" data-kind="info" role="status" aria-live="polite" aria-atomic="true">
+  <span id="toastIcon" class="toast-icon" aria-hidden="true"></span>
+  <span id="toastMsg" class="toast-msg"></span>
+</div>
 
 <div id="lightbox" class="hidden"><img id="lightboxImg" alt=""></div>
 
@@ -945,6 +948,6 @@
   </div>
 </div>
 <script src="prompt_toolbar.js"></script>
-<script src="app.js?v=118"></script>
+<script src="app.js?v=119"></script>
 </body>
 </html>

@@ -42,9 +42,107 @@ header h1#title { cursor: pointer; }
 .side-top-section { display: none; }
 .mobile-fab { display: none; }
 .settings-top-bar { display: none; }
-#toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); z-index: 60; max-width: min(560px, calc(100vw - 32px));
-  background: #26283a; color: #e6e6e6; border: 1px solid #44444c; border-radius: 8px; padding: 8px 12px; font-size: 13px;
-  line-height: 1.5; box-shadow: 0 4px 16px rgba(0,0,0,.4); white-space: pre-wrap; cursor: pointer; }
+/* --- 上部中央トースト --- */
+#toast {
+  position: fixed;
+  left: 50%;
+  /* 上部チップ（35px）のすぐ下 */
+  top: calc(max(10px, env(safe-area-inset-top)) + 46px);
+  z-index: 68;
+  transform: translateX(-50%) scale(1);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 8px 16px 8px 14px;
+  border-radius: 9999px;
+
+  background: rgba(28, 30, 42, .94);
+  color: #f0f0f5;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid rgba(255, 255, 255, .14);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  animation: toastPopIn .2s cubic-bezier(.16, 1, .3, 1) forwards;
+}
+#toast.hidden { display: none; }
+#toast.fade-out {
+  animation: toastFadeOut .28s cubic-bezier(.16, 1, .3, 1) forwards;
+  pointer-events: none;
+}
+
+#toast .toast-icon {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 13px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 700;
+}
+#toast .toast-msg { min-width: 0; }
+#toast[data-kind="info"] { padding-left: 16px; }
+#toast[data-kind="info"] .toast-icon { display: none; }
+#toast[data-kind="ok"] .toast-icon { color: #8fd6a0; }
+#toast[data-kind="warn"] .toast-icon { color: #ffd98f; }
+#toast[data-kind="err"] .toast-icon { color: #ffb8b8; }
+#toast[data-kind="warn"] { border-color: rgba(255, 210, 122, .30); }
+#toast[data-kind="err"] { border-color: rgba(255, 153, 153, .34); }
+
+/* 既存の長文エラーは上部ピルに収まらないので、従来どおり下部に出す */
+#toast[data-long="1"] {
+  top: auto;
+  bottom: 90px;
+  z-index: 61;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 12px;
+  align-items: flex-start;
+  text-align: left;
+}
+#toast[data-long="1"] .toast-icon {
+  margin-top: 2px;
+}
+
+/* 進捗: 小さなスピナー */
+#toast[data-kind="progress"] .toast-icon {
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(255, 255, 255, .28);
+  border-top-color: #cfd3ff;
+  border-radius: 50%;
+  font-size: 0;
+  animation: toastSpin .8s linear infinite;
+}
+
+@keyframes toastPopIn {
+  0% { opacity: 0; transform: translateX(-50%) scale(.92); }
+  100% { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+@keyframes toastFadeOut {
+  0% { opacity: 1; transform: translateX(-50%) scale(1); }
+  100% { opacity: 0; transform: translateX(-50%) scale(.96); }
+}
+@keyframes toastSpin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  #toast { animation: none; }
+  #toast.fade-out { animation: none; opacity: 0; }
+  #toast[data-kind="progress"] .toast-icon { animation: none; }
+}
 @media (max-width: 768px) {
   header { display: none !important; }
   /* ドロワー幅。狭い端末では 78vw で頭打ち（left は必ず幅より大きくして隠す） */
@@ -517,8 +615,10 @@ footer textarea {
 }
 footer textarea::placeholder { color: #7d7d8c; }
 footer textarea:focus { outline: none; }
-/* 入力中はテキストが上段いっぱいに広がる（ボタンは下段へ） */
-.foot-input.is-expanded #messageInput { min-height: 64px; }
+/* 入力中はテキストが上段いっぱいに広がる（ボタンは下段へ）。
+   高さの上限は入力中／未入力中で共通にする（フォーカスで見える行数が変わらないように）。
+   上限を超える長文だけスクロールする */
+.foot-input.is-expanded #messageInput { min-height: 64px; max-height: min(40dvh, 260px); }
 /* PC（幅 769px 以上）は入力欄のカードだけを見せる。
    上のモデル行（セレクトの四角い枠）は出さない（モデルの変更は 設定 →「AI・モデル・認証設定」）。
    PC は入力する文字（プレースホルダも）を 1.3 倍ほど大きくする。 */
@@ -1207,14 +1307,14 @@ footer textarea:focus { outline: none; }
 
 /* ---- 重ねて開くモーダル（名前・ピッカー・削除確認） ---- */
 .modal.fav-submodal {
-  z-index: 70;
+  z-index: 61;
   background: rgba(6, 6, 10, .68);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
 }
 /* ピッカーの上に名前の入力欄を重ねるときがある */
 #favNameModal.fav-submodal {
-  z-index: 80;
+  z-index: 62;
 }
 #favNameModal .modal-content,
 #favPickerModal .modal-content,
@@ -3879,35 +3979,8 @@ button.rag-entry-pin.is-pinned {
   }
 }
 
-/* 婉曲表現を戻したことを知らせる行と「戻す」 */
-.choices-notice.is-ok { color: #8fd6a0; }
-.choices-undo-btn {
-  margin-left: 8px;
-  padding: 0 6px;
-  font-size: 10px;
-  line-height: 16px;
-  border: 1px solid currentColor;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.choices-undo-btn:disabled {
-  opacity: .5;
-  cursor: default;
-}
-
-.msg-notice {
-  margin-top: 4px;
-  padding-left: 2px;
-  font-size: 11px;
-  line-height: 1.35;
-  color: #8fd6a0;
-  align-self: stretch;   /* 縦flexなので flex-basis ではなくこちら */
-}
-
-/* RPモードで背景画像があるときも読みやすいよう黒縁取りを付与（候補通知と共通化） */
-#chatLog.rp :is(.msg-notice, .choices-notice) {
+/* RPモードで背景画像があるときも読みやすいよう黒縁取りを付与 */
+#chatLog.rp .choices-notice {
   text-shadow: var(--rp-outline);
 }
 
@@ -4052,7 +4125,7 @@ button.rag-entry-pin.is-pinned {
 
 /* 索引記憶ランキングモーダル（#textModal の z-index: 60 より前面に表示） */
 #ragHitsModal {
-  z-index: 70;
+  z-index: 61;
 }
 .rag-hits-modal-content {
   position: relative;

@@ -55,6 +55,8 @@ const _initParams = typeof window !== "undefined" ? new URLSearchParams(window.l
 let sid = (_initParams && _initParams.get("sid")) || getStorage("sid") || "";
 let state = null;
 let lastRev = -1;
+let decToastCount = 0;
+let decToastTimer = 0;
 let lastRotationNotice = "";
 let formSid = "";  // 設定フォームに今入っているのはどのチャンネルの設定か
 const openChoicesSet = new Set();       // 開いているアコーディオンのメッセージIDを保持
@@ -316,6 +318,8 @@ function updateFooterHeight() {
 function autoResizeInput() {
   const ta = $("messageInput");
   if (!ta || !ta.style) return;
+  // 先にカードの広げ／畳みを決める。列の幅が変わってから測らないと行数がずれる
+  syncComposerExpanded();
   ta.style.height = "auto";
   // 最小/最大は CSS から読む（モバイルではフッターを細くするため 28/96 にしている）
   let minH = 38, maxH = 120;
@@ -509,8 +513,7 @@ function cancelInputOnFirstTap() {
     try { ae.blur(); } catch (e) {}
   }
   setTypingInput(false);
-  setComposerExpanded(false);
-  autoResizeInput();
+  setComposerExpanded();
   updateFabState();
   return true;
 }
@@ -727,6 +730,7 @@ async function refreshSessions() {
 }
 
 async function switchTo(id) {
+  resetDecensorToast();
   sid = id;
   setStorage("sid", sid);
   lastRev = -1;
@@ -3263,7 +3267,16 @@ const ThinkingUI = {
       this.render(state?.setting);
       if (typeof syncComposerModelChip === "function") syncComposerModelChip();
       if (typeof renderFavSaveControls === "function") renderFavSaveControls();
-      if (typeof toast === "function") toast("思考レベルを変更しました", 1600);
+      const TOAST_LABELS = { auto: "自動", minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "最大", same: "本文と同じ" };
+      const hasM = body.thinking_level !== undefined;
+      const hasC = body.choices_thinking_level !== undefined;
+      const mLbl = TOAST_LABELS[state?.setting?.thinking_level] || state?.setting?.thinking_level || "";
+      const cLbl = TOAST_LABELS[state?.setting?.choices_thinking_level] || state?.setting?.choices_thinking_level || "";
+      const msg = (hasM && hasC) ? `思考: ${mLbl} / 候補: ${cLbl}`
+        : hasM ? `思考: ${mLbl}`
+        : hasC ? `候補の思考: ${cLbl}`
+        : "思考レベルを変更しました";
+      if (typeof toast === "function") toast(msg, { kind: "ok" });
     } catch (e) {
       console.warn("failed to save thinking level:", e);
       if (state && state.setting) {
@@ -3274,7 +3287,7 @@ const ThinkingUI = {
       if (typeof syncComposerModelChip === "function") syncComposerModelChip();
       if (typeof renderFavSaveControls === "function") renderFavSaveControls();
       if (typeof toast === "function") {
-        toast(e?.message || "思考レベルを保存できませんでした", 3500);
+        toast(e?.message || "思考レベルを保存できませんでした", { kind: "err", ms: 3500 });
       }
     }
   },
@@ -4678,7 +4691,7 @@ async function copyText(text) {
 
 async function copyMessageText(m) {
   const ok = await copyText(m && m.text ? m.text : "");
-  toast(ok ? "コピーしました" : "コピーできませんでした", ok ? 1800 : 4000);
+  toast(ok ? "コピーしました" : "コピーできませんでした", ok ? { kind: "ok" } : { kind: "err", ms: 4000 });
 }
 
 function makeMoreButton(m, isLast, s) {
@@ -5002,49 +5015,6 @@ function initUserMsgLongPress() {
   });
 }
 
-function textDecensorLine(m, s) {
-  const dec = m.text_decensor || {};
-  const applied = dec.applied || [];
-  const total = applied.reduce((n, a) => n + (a.count || 0), 0);
-  const el = document.createElement("div");
-  el.className = "msg-notice";
-  el.textContent = `婉曲表現を${total}か所 自動で戻しました`;
-  el.title = applied.map((a) => `${a.from} → ${a.to}（${a.count}）`).join("\n")
-    + "\n\n「戻す」でAIが書いた元の文面に戻せます";
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "choices-undo-btn";
-  btn.textContent = "戻す";
-  btn.title = "自動置換を取り消して、AIが書いた元の文面に戻します";
-  btn.onclick = async (e) => {
-    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-    btn.disabled = true;
-    try {
-      const r = await api("/api/message/undo-decensor", {
-        sid: s?.id || (typeof sid !== "undefined" ? sid : ""),
-        id: m.id,
-        kind: "text",
-      });
-      if (r && r.error) {
-        // 再起動・別枝分岐・20件超過などで記録が無い（404）場合はボタンを静かに消す（ゾンビ防止）
-        btn.remove();
-        const is404 = r.error === "戻せる置換がありません" || r.error === "no such assistant message" || r.error === "no such message" || r.error === "no such session";
-        if (!is404) {
-          alert("戻せませんでした: " + r.error);
-        }
-        return;
-      }
-      m.text_decensor = null;
-      el.remove();
-      if (typeof poll === "function") await poll();
-    } catch (err) {
-      btn.remove();
-    }
-  };
-  el.appendChild(btn);
-  return el;
-}
-
 function createMessageWrap(m, isLast, s) {
   const wrap = document.createElement("div");
   wrap.className = "msg-wrap " + m.role;
@@ -5078,9 +5048,6 @@ function createMessageWrap(m, isLast, s) {
     tag.className = "edited-label";
     tag.textContent = "改変済";
     wrap.appendChild(tag);
-  }
-  if (m.role === "assistant" && m.text_decensor?.applied?.length) {
-    wrap.appendChild(textDecensorLine(m, s));
   }
 
   const hasImage = !!m.image;
@@ -5806,7 +5773,7 @@ async function poll() {
     // 待っている間にチャンネルを切り替えていたら、前のチャンネルの結果は捨てる
     // （捨てないと前のチャンネルの設定が今のチャンネルの画面に出て、保存すると上書きしてしまう）
     if (want !== sid) return;
-    if (s.error) { sid = ""; return refreshSessions(); }
+    if (s.error) { sid = ""; resetDecensorToast(); return refreshSessions(); }
     if (s.unchanged) {
       if (!state) {
         lastRev = -1;
@@ -5823,6 +5790,7 @@ async function poll() {
     const key = s.id + ":" + s.rev;  // rev はチャンネルごとの番号なので id と組にして比べる
     if (key !== lastRev) {
       const first = lastRev === -1;
+      const prevState = state;
       lastRev = key;
       state = s;
       window.currentSession = s;
@@ -5852,6 +5820,7 @@ async function poll() {
       fillForm(s.setting, first || !formDirty); formSid = s.id;
       renderChars();
       checkPromptModalRefine(s);
+      checkDecensorDiff(prevState, s, first);
     }
     markSeen();
   } catch (e) {
@@ -5947,6 +5916,7 @@ async function send() {
     attaching = [];
     renderAttach();
     if (r.session && r.session.id === sid) {
+      checkDecensorDiff(state, r.session, lastRev === -1);
       lastRev = r.session.id + ":" + r.session.rev;
       state = r.session;
       render();
@@ -6012,6 +5982,7 @@ async function stopTurn(id = "") {
     }
     // 通信が不安定でも止めた直後に画面から消えるよう、まず返ってきた状態を反映する
     if (r.session && r.session.id === sid) {
+      checkDecensorDiff(state, r.session, lastRev === -1);
       lastRev = r.session.id + ":" + r.session.rev;
       state = r.session;
       render();
@@ -6152,23 +6123,13 @@ function choicesNoticeText(n) {
   }
 }
 
-function choicesDecensorLine(dec, mode) {
-  if (!dec || dec.slot !== mode || !(dec.applied || []).length) return null;
-  const total = dec.applied.reduce((n, a) => n + (a.count || 0), 0);
-  const el = document.createElement("div");
-  el.className = "choices-notice is-ok";
-  el.textContent = `${mode === "normal" ? "💬" : "🔞"} の候補: 婉曲表現を${total}か所 自動で戻しました`;
-  el.title = dec.applied.map((a) => `${a.from} → ${a.to}（${a.count}）`).join("\n") + "\n\n「戻す」でAIが書いた元の文面に戻せます";
-  return el;
-}
-
 function choicesBox(m, targetContainer) {
   const norm = (arr) => (arr || []).filter((c) => c && typeof c === "object" && typeof c.text === "string" && c.text.trim());
   const normalChoices = norm(m.choices);
   const eroticChoices = norm(m.choices_erotic);
   const hasErotic = eroticChoices.length > 0;
   const autoErotic = !!(typeof state !== "undefined" && state && state.setting && state.setting.choices_erotic_auto);
-  if (!normalChoices.length && !hasErotic && !m.choices_status && !m.choices_notice && !m.choices_decensor && !m.choices_timeout && !autoErotic) {
+  if (!normalChoices.length && !hasErotic && !m.choices_status && !m.choices_notice && !m.choices_timeout && !autoErotic) {
     return targetContainer || document.createDocumentFragment();
   }
 
@@ -6216,28 +6177,6 @@ function choicesBox(m, targetContainer) {
         : "生成結果についての注意です（候補はそのまま使えます）";
       wrap.appendChild(el);
     }
-  }
-  // 婉曲表現を戻した記録（通知とは別枠。ここだけ「戻す」できる）
-  const decEl = choicesDecensorLine(m.choices_decensor, mode);
-  if (decEl) {
-    const undoBtn = document.createElement("button");
-    undoBtn.type = "button";
-    undoBtn.className = "choices-undo-btn";
-    undoBtn.textContent = "戻す";
-    undoBtn.title = "自動置換を取り消して、AIが書いた元の文面に戻します";
-    undoBtn.addEventListener("click", async (e) => {
-      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-      try {
-        const r = await checked("/api/message/undo-decensor", { sid: (typeof sid !== "undefined" ? sid : ""), id: m.id });
-        if (r && r.error) return alert(r.error);
-        m.choices_decensor = null;
-        if (typeof poll === "function") await poll();
-      } catch (err) {
-        alert("戻せませんでした: " + err.message);
-      }
-    });
-    decEl.appendChild(undoBtn);
-    wrap.appendChild(decEl);
   }
 
   // 一覧パネル（左上に ↻、右上にモードスイッチ）
@@ -6316,7 +6255,6 @@ function choicesBox(m, targetContainer) {
     m.choices_status = "pending";
     m.choices_type = type;
     m.choices_notice = null;
-    m.choices_decensor = null;
     delete m.choices_timeout;
     sw.disabled = true;
     rerollBtn.disabled = true;
@@ -6330,6 +6268,7 @@ function choicesBox(m, targetContainer) {
       const curSid = (typeof state !== "undefined" && state && state.id) ? state.id : (typeof sid !== "undefined" ? sid : "");
       const res = await api("/api/message/regenerate-choices", { sid: curSid, id: m.id, type });
       if (res && res.error) alert("再生成エラー: " + res.error);
+      if (!res || !res.error) m.choices_decensor = null;
       if (typeof poll === "function") await poll();
       if (typeof wakePoll === "function") wakePoll();
     } catch (err) {
@@ -6850,25 +6789,139 @@ function flash(msg) {
   setTimeout(() => ($("settingMsg").textContent = ""), 3000);
 }
 // 設定パネルを閉じていても見える知らせ（タップで閉じる。ms = 0 なら次の知らせまで出したまま）
-let toastTimer = null;
-function toast(msg, ms = 6000) {
+const TOAST_MS = { ok: 2000, info: 2400, warn: 3600, err: 6000, progress: 0 };
+const TOAST_ICON = { ok: "✓", info: "", warn: "!", err: "×", progress: "" };
+let toastHideTimer = 0;
+let toastFadeTimer = 0;
+let toastLastMsg = "";
+let toastLastKind = "";
+let toastLastAt = 0;
+
+function toast(msg, opts = {}) {
   const el = $("toast");
-  el.textContent = msg;
-  el.classList.remove("hidden");
-  clearTimeout(toastTimer);
-  if (ms) toastTimer = setTimeout(() => el.classList.add("hidden"), ms);
+  if (!el) return;
+  const o = (typeof opts === "number") ? { ms: opts } : (opts || {});
+  const hasKind = !!(o.kind && TOAST_MS[o.kind] !== undefined);
+  const kind = hasKind ? o.kind : "info";
+  // 既存の toast(msg) / toast(msg, 4000) は従来どおり6秒。
+  // kind を渡したときだけ種別ごとの既定時間を使う。
+  const ms = (o.ms !== undefined) ? o.ms : (hasKind ? TOAST_MS[kind] : 6000);
+  const text = String(msg == null ? "" : msg);
+  const isLong = text.includes("\n") || text.length > 48;
+
+  const now = Date.now();
+  // dedupe:false は「同じ文言でも別イベントとして必ず鳴らす」とき（婉曲の集約など）
+  // 退場中（fade-out）は非表示扱いとし、再要求時は新規表示として本文・属性を更新する
+  const same = o.dedupe !== false
+    && text === toastLastMsg
+    && kind === toastLastKind
+    && (now - toastLastAt < 1200)
+    && !el.classList.contains("hidden")
+    && !el.classList.contains("fade-out");
+
+  clearTimeout(toastHideTimer);
+  clearTimeout(toastFadeTimer);
+  toastHideTimer = 0;
+  toastFadeTimer = 0;
+
+  // 先に表示してから本文を入れる（live region を可視にしてから更新する）
+  el.classList.remove("hidden", "fade-out");
+  if (!same) {
+    const msgEl = $("toastMsg");
+    const iconEl = $("toastIcon");
+    if (msgEl) msgEl.textContent = text;
+    else el.textContent = text;
+    if (iconEl) iconEl.textContent = TOAST_ICON[kind] || "";
+    el.dataset.kind = kind;
+    el.dataset.long = isLong ? "1" : "0";
+  }
+  toastLastMsg = text;
+  toastLastKind = kind;
+  toastLastAt = now;
+
+  if (ms > 0) {
+    toastHideTimer = setTimeout(() => {
+      el.classList.add("fade-out");
+      toastFadeTimer = setTimeout(() => {
+        el.classList.add("hidden");
+        el.classList.remove("fade-out");
+        toastFadeTimer = 0;
+      }, 280);
+    }, ms);
+  }
 }
-$("toast").onclick = () => $("toast").classList.add("hidden");
+
+function dismissToast() {
+  const el = $("toast");
+  if (!el || el.classList.contains("hidden")) return;
+  clearTimeout(toastHideTimer);
+  clearTimeout(toastFadeTimer);
+  toastHideTimer = 0;
+  toastLastAt = 0;
+  el.classList.add("fade-out");
+  toastFadeTimer = setTimeout(() => {
+    el.classList.add("hidden");
+    el.classList.remove("fade-out");
+    toastFadeTimer = 0;
+  }, 280);
+}
+$("toast").onclick = dismissToast;
+
+function resetDecensorToast() {
+  clearTimeout(decToastTimer);
+  decToastCount = 0;
+  decToastTimer = 0;
+  if (typeof dismissToast === "function") dismissToast();
+}
+
+function announceDecensor(dec) {
+  const n = (dec?.applied || []).reduce((sum, a) => sum + (a.count || 0), 0);
+  if (!n) return;
+  decToastCount += n;
+  clearTimeout(decToastTimer);
+  decToastTimer = setTimeout(() => {
+    const total = decToastCount;
+    decToastCount = 0;
+    decToastTimer = 0;
+    // 同じ件数が続いても、800ms を超えた別イベントなら鳴らす
+    toast(
+      total === 1 ? "婉曲表現を戻しました" : `婉曲表現を${total}か所 戻しました`,
+      { kind: "ok", ms: 2200, dedupe: false }
+    );
+  }, 800);
+}
+
+function decensorSig(dec) {
+  if (!dec || !Array.isArray(dec.applied) || !dec.applied.length) return "";
+  return `${dec.slot || ""}:${dec.ts || ""}:${dec.target_ts || ""}:${JSON.stringify(dec.applied)}`;
+}
+
+function checkDecensorDiff(prevState, nextState, isFirst) {
+  if (isFirst || !nextState || !Array.isArray(nextState.messages)) return;
+  const prevById = new Map((prevState?.messages || []).map((x) => [x.id, x]));
+  for (const m of nextState.messages) {
+    if (!m || m.role !== "assistant") continue;
+    const p = prevById.get(m.id);
+    const tdSig = decensorSig(m.text_decensor);
+    if (tdSig && tdSig !== decensorSig(p?.text_decensor)) announceDecensor(m.text_decensor);
+    const cdSig = decensorSig(m.choices_decensor);
+    if (cdSig && cdSig !== decensorSig(p?.choices_decensor)) announceDecensor(m.choices_decensor);
+  }
+}
 
 // 発言を書き換えたら、担当の Antigravity 会話も巻き戻す（チャンネルの設定がオンなら、サーバーが revert: true を返す）
 async function revertIde(r, chSid) {
   if (!r?.revert) return;
-  toast("Antigravity の会話も巻き戻しています…", 0);
+  toast("Antigravity の会話も巻き戻しています…", { kind: "progress" });
   try {
     const v = await checked("/api/ide/revert", { sid: chSid });
-    toast(v.skipped ? "Antigravity の会話は巻き戻していません: " + v.skipped : v.msg + "（次の入力では設定と会話を全部送り直します）",
-      v.skipped ? 10000 : 6000);
-  } catch (e) { toast("アプリの発言は変えましたが、Antigravity の会話は巻き戻せませんでした:\n" + e.message, 15000); }
+    toast(
+      v.skipped ? "Antigravity の会話は巻き戻していません: " + v.skipped : v.msg + "（次の入力では設定と会話を全部送り直します）",
+      v.skipped ? { kind: "warn", ms: 10000 } : { kind: "ok", ms: 6000 }
+    );
+  } catch (e) {
+    toast("アプリの発言は変えましたが、Antigravity の会話は巻き戻せませんでした:\n" + e.message, { kind: "err", ms: 15000 });
+  }
 }
 
 function openEdit(m) {
@@ -6919,6 +6972,9 @@ async function saveEdit() {
   } catch (e) { alert(e.message); return; }
   finally { button.disabled = false; }
   await revertIde(r, ch);
+  if (!r?.revert) {
+    toast(m.role === "user" ? "編集して再送しました" : "本文を改変しました", { kind: "ok" });
+  }
 }
 
 // =============================================================================
@@ -8190,23 +8246,37 @@ $("messageInput").addEventListener("input", () => {
     }
   }
 });
-// 入力中はカードを広げる（テキストが上段、ボタンが下段へ）
-// 高さは CSS の min-height で変わるので、切り替えたあとに測り直す
-function setComposerExpanded(on) {
+// カードを広げる（テキストが上段、ボタンが下段へ）かどうかを毎回1箇所で決める。
+// 入力中だけでなく「下書きが残っているあいだ」も広げたままにする。
+// 1行レイアウトに戻すと、複数行の下書きが ＋・マイク・送信の下に潜り込んで崩れるため
+// （フォーカスだけを条件にすると、フォーカスが外れた瞬間に崩れる）。
+function composerExpandedWanted() {
+  const ta = $("messageInput");
+  if (!ta) return false;
+  if (typeof document !== "undefined" && document.activeElement === ta) return true;
+  return String(ta.value || "").trim() !== "";
+}
+function syncComposerExpanded() {
   const card = (typeof document !== "undefined" && typeof document.querySelector === "function")
     ? document.querySelector(".foot-input") : null;
-  if (card && card.classList) card.classList.toggle("is-expanded", !!on);
+  const on = composerExpandedWanted();
+  if (card && card.classList) card.classList.toggle("is-expanded", on);
+  return on;
+}
+// 高さは CSS の min-height で変わるので、切り替えたあとに測り直す
+function setComposerExpanded() {
+  syncComposerExpanded();
   autoResizeInput();
 }
 $("messageInput").addEventListener("focus", () => {
-  setComposerExpanded(true);
+  setComposerExpanded();
   setTypingInput(true);
   updateFabState();
 });
 $("messageInput").addEventListener("blur", () => {
   inputIsComposing = false;
   if (inputComposingTimer) { clearTimeout(inputComposingTimer); inputComposingTimer = null; }
-  setComposerExpanded(false);
+  setComposerExpanded();
   setTypingInput(false);
   updateFabState();
 });
@@ -9091,13 +9161,13 @@ $("newSession").onclick = async () => {
   flash("新しいチャンネルを作成しました");
   if (meta.app?.new_channel_ide === false) return;
   // アプリ全体の設定でオンなら、Antigravity の新規会話も作って担当にする
-  toast("Antigravity の新規会話を作っています…", 0);
+  toast("Antigravity の新規会話を作っています…", { kind: "progress" });
   try {
     const n = await checked("/api/ide/new", { sid: r.sid, target: "both" });
-    toast(`Antigravity の新規会話を作って担当にしました: ${n.title}（${String(n.ide).slice(0, 8)}）`);
+    toast(`Antigravity の新規会話を作って担当にしました: ${n.title}（${String(n.ide).slice(0, 8)}）`, { kind: "ok", ms: 6000 });
     if (sid === r.sid) await poll();
     refreshSessions(); loadIdeSessions();
-  } catch (e) { toast("チャンネルは作りましたが、Antigravity の新規会話は作れませんでした:\n" + e.message, 15000); }
+  } catch (e) { toast("チャンネルは作りましたが、Antigravity の新規会話は作れませんでした:\n" + e.message, { kind: "err", ms: 15000 }); }
 };
 $("dupBtn").onclick = async () => {
   const r = await api("/api/session/new", { copy_from: sid });
@@ -9111,6 +9181,7 @@ $("deleteSession").onclick = async () => {
   if (!confirm(`チャンネル「${state?.setting?.title}」を削除？（data/trash に移動）`)) return;
   await post("/api/session/delete");
   sid = "";
+  resetDecensorToast();
   await refreshSessions();
 };
 $("lightbox").onclick = () => closeLightbox();
