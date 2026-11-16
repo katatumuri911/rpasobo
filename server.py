@@ -9590,16 +9590,87 @@ class H(BaseHTTPRequestHandler):
                 if (cached_rev is not None
                         and client_rev == f"{sid}:{cached_rev}"
                         and not (cached_entry and _has_expired_subtasks(cached_entry.get("s")))):
-                    return self.send_json({"unchanged": True, "id": sid, "rev": cached_rev})
+                    has_hist = bool(
+                        os.path.isdir(ARCHIVE_DIR)
+                        and any(
+                            f.startswith(f"{sid}_rot") and f.endswith(".json") and re.search(r"_rot\d+_turn\d+\.json$", f)
+                            for f in os.listdir(ARCHIVE_DIR)
+                        )
+                    )
+                    return self.send_json({"unchanged": True, "id": sid, "rev": cached_rev, "has_history": has_hist})
                 try:
                     s = load(sid, readonly=True)
                 except (FileNotFoundError, ValueError):
                     session_revs.pop(sid, None)
                     return self.send_json({"error": "no such session"}, 404)
                 session_revs[sid] = s.get("rev", 0)
+                s["has_history"] = bool(
+                    os.path.isdir(ARCHIVE_DIR)
+                    and any(
+                        f.startswith(f"{s['id']}_rot") and f.endswith(".json") and re.search(r"_rot\d+_turn\d+\.json$", f)
+                        for f in os.listdir(ARCHIVE_DIR)
+                    )
+                )
                 if client_rev and f"{s['id']}:{s.get('rev')}" == client_rev:
-                    return self.send_json({"unchanged": True, "id": s["id"], "rev": s.get("rev")})
+                    return self.send_json({"unchanged": True, "id": s["id"], "rev": s.get("rev"), "has_history": s["has_history"]})
                 return self.send_json(s)
+            if p == "/api/session/history":
+                sid = q.get("sid", [""])[0]
+                if not sid or not re.match(r"^[a-zA-Z0-9_-]+$", sid):
+                    return self.send_json({"error": "sid is required"}, 400)
+                before_rot_str = q.get("before_rot", [""])[0]
+                before_rot = int(before_rot_str) if before_rot_str.isdigit() else None
+                if not os.path.isdir(ARCHIVE_DIR):
+                    return self.send_json({"ok": True, "sid": sid, "messages": [], "has_more": False, "next_cursor": None})
+                rot_map = {}
+                for fname in os.listdir(ARCHIVE_DIR):
+                    if not (fname.startswith(f"{sid}_rot") and fname.endswith(".json")):
+                        continue
+                    m = re.search(r"_rot(\d+)_turn(\d+)\.json$", fname)
+                    if not m:
+                        continue
+                    rot_no = int(m.group(1))
+                    turn_no = int(m.group(2))
+                    if rot_no not in rot_map or turn_no > rot_map[rot_no][0]:
+                        rot_map[rot_no] = (turn_no, fname)
+                sorted_rots = sorted(rot_map.keys())
+                if not sorted_rots:
+                    return self.send_json({"ok": True, "sid": sid, "messages": [], "has_more": False, "next_cursor": None})
+                if before_rot is not None:
+                    target_rots = [r for r in sorted_rots if r < before_rot]
+                else:
+                    target_rots = sorted_rots
+                if not target_rots:
+                    return self.send_json({"ok": True, "sid": sid, "messages": [], "has_more": False, "next_cursor": None})
+                target_rot = target_rots[-1]
+                turn_no, fname = rot_map[target_rot]
+                try:
+                    with open(os.path.join(ARCHIVE_DIR, fname), "r", encoding="utf-8") as f:
+                        arc_data = json.load(f)
+                except Exception as e:
+                    return self.send_json({"error": f"could not read archive: {e}"}, 500)
+                msgs = arc_data.get("messages", [])
+                states_data = load_states_data(sid, readonly=True)
+                images_data = load_images_data(sid, readonly=True)
+                for m in msgs:
+                    mid = m.get("id")
+                    if mid:
+                        if mid in states_data:
+                            m["state"] = copy.deepcopy(states_data[mid])
+                        if mid in images_data:
+                            im = m.setdefault("image", {})
+                            for k, v in images_data[mid].items():
+                                im[k] = copy.deepcopy(v)
+                has_more = any(r < target_rot for r in sorted_rots)
+                return self.send_json({
+                    "ok": True,
+                    "sid": sid,
+                    "rot": target_rot,
+                    "turn": turn_no,
+                    "messages": msgs,
+                    "has_more": has_more,
+                    "next_cursor": target_rot if has_more else None
+                })
             if p == "/api/session/export":
                 s = load(q.get("sid", [""])[0])
                 export_s = clone_session(s)
@@ -11296,6 +11367,34 @@ class H(BaseHTTPRequestHandler):
                         memory_store.delete_after_turn(n["id"], mem_turn)
                 except Exception as e:
                     print(f"[branch] error copying memories: {e}")
+
+                # 分岐元から新セッションIDへローテーション退避ファイル（archive）を複製
+                try:
+                    max_rot = _as_int(n["setting"].get("rotation_count"), _as_int(s["setting"].get("rotation_count"), 0))
+                    if os.path.isdir(ARCHIVE_DIR) and max_rot > 0:
+                        for fname in os.listdir(ARCHIVE_DIR):
+                            if not (fname.startswith(f"{s['id']}_rot") and fname.endswith(".json")):
+                                continue
+                            m = re.search(r"_rot(\d+)_turn(\d+)\.json$", fname)
+                            if not m:
+                                continue
+                            rot_no = int(m.group(1))
+                            turn_no = int(m.group(2))
+                            if rot_no > max_rot:
+                                continue
+                            src_path = os.path.join(ARCHIVE_DIR, fname)
+                            dst_fname = f"{n['id']}_rot{rot_no}_turn{turn_no}.json"
+                            dst_path = os.path.join(ARCHIVE_DIR, dst_fname)
+                            try:
+                                with open(src_path, "r", encoding="utf-8") as sf:
+                                    arc_data = json.load(sf)
+                                arc_data["id"] = n["id"]
+                                write_json(dst_path, arc_data)
+                            except Exception as arc_e:
+                                print(f"[branch] error copying archive file {fname}: {arc_e}")
+                except Exception as e:
+                    print(f"[branch] error copying archives: {e}")
+
                 return self.send_json({"ok": True, "sid": n["id"]})
             if p == "/api/session/raw":
                 try:

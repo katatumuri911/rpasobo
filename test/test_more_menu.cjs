@@ -136,6 +136,14 @@ const reset = () => { T.close(); body.children.length = 0; delete docL.click; de
 const mkMsg = (over = {}) => ({ id: "m1", role: "assistant", text: "hello", ...over });
 const mkState = (msgs, over = {}) => ({ messages: msgs, setting: { ...(over.setting || {}) } });
 
+console.log("\n[0] シートは本当に画面幅いっぱいか（左下に 260px の箱で貼り付かない）");
+{
+  const css = fs.readFileSync(path.join(__dirname, "..", "public", "style.css"), "utf8");
+  const sheet = (css.match(/\.more-sheet\s*\{[^}]*\}/) || [""])[0];
+  ok(/max-width:\s*none/.test(sheet), ".more-sheet が .more-menu の max-width を打ち消す", sheet.slice(0, 120));
+  ok(/(^|;|\s)width:\s*100%/.test(sheet), ".more-sheet は width:100%", sheet.slice(0, 120));
+}
+
 console.log("\n[1] ⋯ メニューの中身（状態ごとの項目）");
 {
   const user = { id: "u1", role: "user", text: "hi" };
@@ -181,7 +189,7 @@ console.log("\n[1] ⋯ メニューの中身（状態ごとの項目）");
   ok(labelsOf(f).includes("🧑 キャラの状態"), "F: m.state があれば キャラの状態 を出す", labelsOf(f));
 }
 
-console.log("\n[2] PC 幅ではポップオーバー、狭い幅ではシート");
+console.log("\n[2] 基本は ⋯ のそば、入らないときだけシート");
 {
   const user = { id: "u1", role: "user", text: "hi" };
   const asst = mkMsg();
@@ -198,15 +206,28 @@ console.log("\n[2] PC 幅ではポップオーバー、狭い幅ではシート"
   ok(btn.attrs["aria-expanded"] === "true", "PC: aria-expanded=true");
   ok(menusInBody()[0].style.visibility === "", "PC: 位置決め後に表示される");
 
+  // 狭い幅でも、⋯ の上下に余地があるなら「その場」に出す（左下に貼り付かせない）
   reset();
   sandbox.innerWidth = 400;
+  sandbox.innerHeight = 800;
   T.toggle(btn, asst, true, st);
-  ok(menusInBody().length === 1 && menusInBody()[0].classList.contains("more-sheet"), "狭い幅: シートが出る");
-  ok(backdropsInBody().length === 1, "狭い幅: 背景が出る");
+  ok(menusInBody().length === 1 && menusInBody()[0].classList.contains("more-popup"), "狭い幅でも余地があればポップアップ", menusInBody().map((x) => x.className));
+  ok(backdropsInBody().length === 0, "狭い幅: 背景は出さない（発言が見えたまま）");
 
-  // PC 幅でも { sheet: true } を指定するとシートが出る
+  // 画面が低くて上下どちらにも入らないときだけシート
+  reset();
+  sandbox.innerWidth = 400;
+  sandbox.innerHeight = 360;
+  const btnMid = new El("button");
+  btnMid._rect = { top: 150, right: 60, bottom: 180, left: 20, width: 40, height: 30 };
+  T.toggle(btnMid, asst, true, st);
+  ok(menusInBody().length === 1 && menusInBody()[0].classList.contains("more-sheet"), "入らない高さ: シートに逃げる", menusInBody().map((x) => x.className));
+  ok(backdropsInBody().length === 1, "入らない高さ: 背景が出る");
+
+  // PC 幅でも { sheet: true } を指定するとシートが出る（長押しの経路）
   reset();
   sandbox.innerWidth = 1200;
+  sandbox.innerHeight = 800;
   T.toggle(btn, asst, true, st, { sheet: true });
   ok(menusInBody().length === 1 && menusInBody()[0].classList.contains("more-sheet"), "opts.sheet=true: PC幅でもシートが出る");
   ok(backdropsInBody().length === 1, "opts.sheet=true: 背景が出る");
@@ -221,6 +242,45 @@ console.log("\n[2] PC 幅ではポップオーバー、狭い幅ではシート"
   // 既定のメニュー高さ 220 想定 -> 740 - 220 - 6 = 514
   ok(menusInBody()[0].style.top === "514px", "下端では上にフリップ", menusInBody()[0].style.top);
   sandbox.innerHeight = 800;
+}
+
+console.log("\n[2b] 左右の寄せ（押したボタン側の端を揃え、画面内向きに開く）");
+{
+  const asst = mkMsg();
+  const st = mkState([{ id: "u1", role: "user", text: "hi" }, asst]);
+
+  // AI 発言: ⋯ は左端にある -> メニューの左端を ⋯ の左端に揃える
+  const left = new El("button");
+  left._rect = { top: 300, right: 46, bottom: 330, left: 12, width: 34, height: 30 };
+  reset();
+  sandbox.innerWidth = 400;
+  sandbox.innerHeight = 800;
+  T.toggle(left, asst, true, st);
+  ok(menusInBody()[0].style.left === "12px", "左寄せの ⋯ : 左端を揃える", menusInBody()[0].style.left);
+  ok(menusInBody()[0].style.transformOrigin === "top left", "左寄せの ⋯ : 出現の起点は左上", menusInBody()[0].style.transformOrigin);
+
+  // ユーザー発言: ⋯ は右端にある -> メニューの右端を ⋯ の右端に揃える
+  const right = new El("button");
+  right._rect = { top: 300, right: 364, bottom: 330, left: 330, width: 34, height: 30 };
+  reset();
+  T.toggle(right, asst, true, st);
+  ok(menusInBody()[0].style.left === "188px", "右寄せの ⋯ : 右端を揃える（364 - 176）", menusInBody()[0].style.left);
+  ok(menusInBody()[0].style.transformOrigin === "top right", "右寄せの ⋯ : 出現の起点は右上", menusInBody()[0].style.transformOrigin);
+
+  // 画面外へはみ出さない（左端 8px クランプ）
+  const edge = new El("button");
+  edge._rect = { top: 300, right: 20, bottom: 330, left: 4, width: 16, height: 30 };
+  reset();
+  T.toggle(edge, asst, true, st);
+  ok(menusInBody()[0].style.left === "8px", "画面左端でクランプ", menusInBody()[0].style.left);
+
+  // 上に逃げたときの起点は左下
+  const low = new El("button");
+  low._rect = { top: 740, right: 46, bottom: 770, left: 12, width: 34, height: 30 };
+  reset();
+  sandbox.innerWidth = 400;
+  T.toggle(low, asst, true, st);
+  ok(menusInBody()[0].style.transformOrigin === "bottom left", "上に開くときの起点は左下", menusInBody()[0].style.transformOrigin);
 }
 
 console.log("\n[3] 開閉");

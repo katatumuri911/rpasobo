@@ -209,59 +209,6 @@ header h1#title { cursor: pointer; }
   .side-title { font-size: 14px; font-weight: bold; color: #e6e6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .side-actions-row { display: flex; gap: 6px; }
   .side-action-btn { flex: 1; padding: 6px 0; font-size: 12px; text-align: center; }
-  .side-model-slot { margin-top: 0; }
-  .side-model-slot .foot-bar {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    align-items: stretch;
-    font-size: 12px;
-    color: #aaa;
-    background: #151518;
-    padding: 6px 8px;
-    border-radius: 6px;
-    border: 1px solid #34343d;
-  }
-  .side-model-slot .foot-bar label.ide-model {
-    width: 100%;
-    margin: 0;
-    display: flex;
-  }
-  .side-model-slot .foot-bar label.ide-model select {
-    width: 100%;
-    flex: 1;
-    min-width: 0;
-  }
-  .side-model-slot .ide-model-label {
-    display: none;
-  }
-  .side-model-slot .foot-model-sub-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-  }
-  .side-model-slot .foot-model-sub-info {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-  }
-  .side-model-slot .foot-model-sub-row button {
-    padding: 1px 6px;
-    font-size: 11px;
-    line-height: 1.2;
-    flex-shrink: 0;
-  }
-  .side-model-slot .foot-bar.hidden { display: none !important; }
-  .side-model-slot:empty,
-  .side-model-slot:has(.foot-bar.hidden) {
-    display: none !important;
-    margin-top: 0;
-  }
 
   .mobile-fab {
     display: flex;
@@ -273,25 +220,34 @@ header h1#title { cursor: pointer; }
        + 数値px で上に、- 数値px でフッターに重なる。
        8px にして「ツール」クラスタと同じ行の下端に揃える */
     bottom: calc(var(--footer-h, 56px) + 8px);
-    width: 44px;
-    height: 44px;
+    width: 38px;
+    height: 38px;
     border-radius: 50%;
     /* 見た目は「ツール」クラスタ（↓ ツール ↑）に合わせる:
-       背景 rgba(38,40,56,.62) / 枠 rgba(255,255,255,.18) / opacity .72 */
+       背景 rgba(38,40,56,.62) / 枠 rgba(255,255,255,.18) / opacity .62 */
     background: rgba(38, 40, 56, 0.62);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     color: #f0f0f5;
-    font-size: 20px;
+    font-size: 17px;
     line-height: 1;
     border: 1px solid rgba(255, 255, 255, 0.18);
-    opacity: .72;
+    opacity: .62;
     box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
     z-index: 65;
     cursor: pointer;
     user-select: none;
     touch-action: manipulation;
     transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+  }
+  /* 見た目は小さくても、指の当たり判定は 44px 残す */
+  .mobile-fab::before {
+    content: "";
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
   }
   .mobile-fab:active {
     transform: scale(0.92);
@@ -300,7 +256,7 @@ header h1#title { cursor: pointer; }
     background: rgba(85, 34, 42, 0.88);
     border-color: rgba(255, 120, 130, 0.45);
     color: #ffb8b8;
-    font-size: 18px;
+    font-size: 16px;
   }
   .mobile-fab.fab-hidden {
     opacity: 0 !important;
@@ -452,6 +408,102 @@ footer { flex-shrink: 0; }
 .modal-textarea.mono { font: 12px Consolas, monospace; flex: 1; min-height: 50vh; }
 .summary-card { align-self: center; max-width: 90%; font-size: 12px; color: #9aa3c0; background: #22252f; border: 1px solid #333849; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
 
+.history-header {
+  align-self: center;
+  width: 100%;
+  max-width: 90%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 6px 0;
+  min-height: 36px;
+}
+.history-header .load-earlier-btn {
+  width: 100%;
+  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: #cfd3e0;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+.history-header .load-earlier-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.history-header .history-beginning {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+  padding: 4px 0;
+}
+.history-header .history-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #9aa0ad;
+}
+.history-header .history-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #5c7cfa;
+  border-radius: 50%;
+  animation: history-spin 0.8s linear infinite;
+}
+@keyframes history-spin {
+  to { transform: rotate(360deg); }
+}
+.history-header .history-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #ff9999;
+}
+.history-header .history-retry-btn {
+  background: transparent;
+  border: none;
+  color: #748ffc;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+#chatLog.rp .history-header .load-earlier-btn {
+  background: rgba(20, 22, 30, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #e2e5f0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+#chatLog.rp .history-header .load-earlier-btn:hover {
+  background: rgba(35, 38, 52, 0.9);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+#chatLog.rp .history-header .history-beginning {
+  color: rgba(255, 255, 255, 0.6);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+#chatLog.rp .history-header .history-loading,
+#chatLog.rp .history-header .history-error {
+  background: rgba(20, 22, 30, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 4px 12px;
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
 #chatLog { flex: 1; overflow-y: auto; padding: 14px; padding-bottom: calc(var(--footer-h, 84px) + 10px); display: flex; flex-direction: column; gap: 12px; }
 .msg-wrap { position: relative; display: flex; flex-direction: column; max-width: 88%; }
 .msg-wrap.user { align-self: flex-end; align-items: flex-end; }
@@ -474,8 +526,8 @@ footer { flex-shrink: 0; }
 .msg.md ul, .msg.md ol { margin: 0 0 .7em; padding-left: 1.5em; }
 .msg.md li > ul, .msg.md li > ol { margin: 0; }
 .msg.md blockquote { margin: 0 0 .7em; padding: 2px 10px; border-left: 3px solid rgba(255,255,255,.3); opacity: .9; }
-.msg.md code { font-family: Consolas, monospace; font-size: .9em; background: rgba(0,0,0,.3); padding: 1px 5px; border-radius: 4px; }
-.msg.md pre { margin: 0 0 .7em; padding: 8px 10px; background: rgba(0,0,0,.35); border-radius: 6px; overflow: auto; white-space: pre;
+.msg.md code { font-family: Consolas, monospace; font-size: .9em; background: var(--rp-bg-inline, rgba(0, 0, 0, .3)); padding: 1px 5px; border-radius: 4px; }
+.msg.md pre { margin: 0 0 .7em; padding: 8px 10px; background: var(--rp-bg-code, rgba(0, 0, 0, .35)); border-radius: 6px; overflow: auto; white-space: pre;
   max-width: 100%; max-height: min(50vh, 420px); box-sizing: border-box; line-height: 1.45; text-shadow: none; }
 .msg.md pre code { background: none; padding: 0; }
 .msg.md table { border-collapse: collapse; margin: 0 0 .7em; display: block; overflow-x: auto; max-width: 100%; }
@@ -540,12 +592,12 @@ footer > * { pointer-events: auto; }
    入力中（.is-expanded）はテキストが上段へ広がり、ボタンが下段に回る。 */
 .foot-input {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
-  grid-template-areas: "plus text chip mic stop send";
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
+  grid-template-areas: "plus text chip quota mic stop send";
   align-items: end;
   gap: 5px 6px;
   padding: 6px 12px;
-  background: #2b2b33;
+  background: var(--rp-bg-input, #2b2b33);
   border: 1px solid #3e3e49;
   border-radius: 9999px;
   transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, border-radius .18s ease;
@@ -553,13 +605,13 @@ footer > * { pointer-events: auto; }
 /* 入力中は上の段にテキスト、下の段にボタン（真ん中の空き列がボタンを右へ押す） */
 .foot-input.is-expanded {
   border-radius: 22px;
-  grid-template-columns: auto minmax(8px, 1fr) auto auto auto auto;
+  grid-template-columns: auto minmax(8px, 1fr) auto auto auto auto auto;
   grid-template-areas:
-    "text text text text text text"
-    "plus .    chip mic  stop send";
+    "text text text text text text text"
+    "plus .    chip quota mic  stop send";
 }
 .foot-input:focus-within {
-  background: #30303a;
+  background: var(--rp-bg-input-focus, #30303a);
   border-color: #56567380;
   box-shadow: 0 6px 22px rgba(0, 0, 0, .38);
 }
@@ -581,7 +633,7 @@ footer > * { pointer-events: auto; }
   padding: 0 12px 0 10px;
   border: 1px solid #474754;
   border-radius: 999px;
-  background: #33333d;
+  background: var(--rp-bg-chip, #33333d);
   color: #d5d5e2;
   font: inherit;
   font-size: 12px;
@@ -598,6 +650,39 @@ footer > * { pointer-events: auto; }
 }
 .composer-chip .chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .foot-input.is-expanded .composer-chip { min-width: fit-content; max-width: 260px; }
+/* Antigravity の週の残り（入力欄の中の小さなバッジ。タップで読み直し） */
+.ag-quota {
+  grid-area: quota;
+  /* 行は align-items: end。バッジはボタンより 10px 低いので、下から 5px 上げると
+     高さの違うボタン（＋・マイク・送信）と縦の中心が揃う */
+  align-self: end;
+  margin-bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(var(--composer-h) - 10px);
+  padding: 0 8px;
+  border: 1px solid rgba(52, 211, 153, .28);
+  border-radius: 999px;
+  background: rgba(52, 211, 153, .12);
+  color: #34d399;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.ag-quota:hover { background: rgba(52, 211, 153, .2); border-color: rgba(52, 211, 153, .45); }
+.ag-quota:active { transform: scale(.96); }
+.ag-quota:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
+.ag-quota.is-low {
+  background: rgba(248, 113, 113, .12);
+  border-color: rgba(248, 113, 113, .28);
+  color: #f87171;
+}
+.ag-quota.is-loading { opacity: .55; }
 /* マイク（音声入力はこれから。今は押すと準備中と出すだけ） */
 #micBtn {
   grid-area: mic;
@@ -619,12 +704,14 @@ footer > * { pointer-events: auto; }
 #micBtn:hover { background: transparent; color: #fff; }
 #micBtn:active { transform: scale(.92); }
 #micBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; border-radius: 8px; }
-/* 送信に使うモデル（担当の会話があるチャンネルだけ） */
+/* 送信に使うモデル（担当の会話があるチャンネルだけ）
+   モデルの切り替えは入力欄のお気に入りチップと AI 設定に任せるので、
+   セレクトと残量バッジの行は出さない（残量は入力欄の「残り x%」に出す）。 */
 .foot-bar { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #aaa; }
-.foot-bar label.ide-model { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; margin: 0; }
-.foot-bar select { flex: 1; min-width: 0; background: #1a1a1e; color: #e6e6e6; border: 1px solid #44444c; border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px; }
-.foot-model-sub-row { display: flex; align-items: center; gap: 6px; }
-.foot-model-sub-info { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+footer > .foot-bar label.ide-model,
+footer > .foot-bar .foot-model-sub-row { display: none !important; }
+/* 中身（思考の深さ）が無いときは行ごと消す。Antigravity はモデル名に思考が入っているので出ない */
+#footBar:has(#footThinkingSection.hidden) { display: none !important; }
 .model-badge {
   display: inline-flex;
   align-items: center;
@@ -766,11 +853,19 @@ footer textarea:focus { outline: none; }
   user-select: none;
   -webkit-user-select: none;
   z-index: 15;
+  -webkit-tap-highlight-color: transparent;
   transition: background .15s ease, color .15s ease, transform .12s ease;
 }
 #attachBtn:hover { background: #474756; color: #fff; }
 #attachBtn:active { transform: scale(.94); }
+#attachBtn .composer-icon { transition: transform .16s ease; }
+#attachBtn.is-menu-open .composer-icon { transform: rotate(45deg); }
+#attachBtn.is-menu-open .attach-flick-hint { opacity: 0; }
 #attachBtn:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
+/* タップした瞬間に外側へ青いフォーカスリングが出るのを防ぐ（タッチ端末のみ） */
+@media (hover: none), (pointer: coarse) {
+  #attachBtn:focus, #attachBtn:focus-visible { outline: none; }
+}
 .attach-flick-hint { display: none; }
 @media (max-width: 768px) {
   footer {
@@ -785,7 +880,7 @@ footer textarea:focus { outline: none; }
   }
   .foot-input.is-expanded {
     border-radius: 20px;
-    grid-template-columns: auto minmax(4px, 1fr) auto auto auto auto;
+    grid-template-columns: auto minmax(4px, 1fr) auto auto auto auto auto;
   }
   #attachBtn {
     min-width: var(--composer-h);
@@ -806,6 +901,9 @@ footer textarea:focus { outline: none; }
     flex-shrink: 0;
   }
   .foot-input.is-expanded #messageInput { min-height: 58px; }
+  /* スマホで入力中はお気に入りチップが出るので、残量は畳む（横に詰め込みすぎない）。
+     入力前はチップが隠れているので、その場所に残量だけを出す。 */
+  .foot-input.is-expanded .ag-quota { display: none; }
   /* 下フリック送信のヒント。小さい矢印をバッジにして見えるように */
   .attach-flick-hint {
     display: flex;
@@ -1842,7 +1940,7 @@ footer textarea:focus { outline: none; }
 }
 
 .attach-list.hidden { display: none; }
-.attach-chip { position: relative; display: flex; align-items: center; gap: 6px; background: #2c2c32; border: 1px solid #44444c; border-radius: 8px; padding: 3px 26px 3px 3px; font-size: 12px; color: #ccc; max-width: 220px; }
+.attach-chip { position: relative; display: flex; align-items: center; gap: 6px; background: var(--rp-bg-attach, #2c2c32); border: 1px solid #44444c; border-radius: 8px; padding: 3px 26px 3px 3px; font-size: 12px; color: #ccc; max-width: 220px; }
 .attach-chip img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; }
 .attach-chip .a-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px; }
 .attach-chip.busy { opacity: .55; }
@@ -1852,7 +1950,7 @@ footer.drag .foot-input { outline: 2px dashed #6889f5; outline-offset: 2px; }
 .msg-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; justify-content: flex-end; max-width: 100%; }
 .msg-wrap.assistant .msg-files { justify-content: flex-start; }
 .msg-files img { max-width: min(260px, 100%); max-height: 260px; border-radius: 8px; cursor: zoom-in; display: block; border: 1px solid #38383f; }
-.msg-files a.file { display: inline-flex; gap: 6px; align-items: center; background: #2c2c32; border: 1px solid #44444c; border-radius: 8px; padding: 6px 10px; color: #cfd6ff; font-size: 12px; text-decoration: none; max-width: 100%; overflow-wrap: anywhere; }
+.msg-files a.file { display: inline-flex; gap: 6px; align-items: center; background: var(--rp-bg-file, #2c2c32); border: 1px solid #44444c; border-radius: 8px; padding: 6px 10px; color: #cfd6ff; font-size: 12px; text-decoration: none; max-width: 100%; overflow-wrap: anywhere; }
 .msg-files a.file .muted { color: #888; }
 footer button:disabled { opacity: .5; cursor: default; }
 
@@ -1875,13 +1973,16 @@ footer button:disabled { opacity: .5; cursor: default; }
 /* AIの文は、背景の画像が透けて見える薄い吹き出しに載せる */
 #chatLog.rp .msg.assistant {
   cursor: zoom-in;
-  background: rgba(16, 16, 24, .38);
-  border: 1px solid rgba(255, 255, 255, .10);
+  background: var(--rp-bg-text, rgba(16, 16, 24, .38));
+  border: 1px solid var(--rp-edge, rgba(255, 255, 255, .10));
   border-radius: 18px 18px 18px 4px;
   padding: 10px 14px;
   color: #fafafa; font-weight: 500;
   text-shadow: var(--rp-outline);
   line-height: 1.9;
+}
+body.rp-crisp #chatLog.rp .msg.assistant {
+  text-shadow: none;
 }
 #chatLog.rp .msg.assistant a,
 #chatLog.rp .msg.assistant button {
@@ -1890,8 +1991,11 @@ footer button:disabled { opacity: .5; cursor: default; }
 #chatLog.rp .msg-wrap.assistant { max-width: 100%; align-self: stretch; }
 /* 自分の発言はしっかりした青い吹き出しで、AIの地の文と区別する */
 #chatLog.rp .msg.user {
-  background: rgba(59, 91, 219, .88); color: #fff;
-  border-radius: 18px 18px 4px 18px; box-shadow: 0 2px 8px rgba(0,0,0,.45);
+  background: var(--rp-bg-user, rgba(59, 91, 219, .88)); color: #fff;
+  border-radius: 18px 18px 4px 18px; box-shadow: 0 2px 8px var(--rp-shadow, rgba(0,0,0,.45));
+}
+body.rp-thin #chatLog.rp .msg.user {
+  text-shadow: var(--rp-outline);
 }
 #chatLog.rp .msg.edited { box-shadow: none; }
 #chatLog.rp .msg .thought { color: #dccfff; }
@@ -1902,7 +2006,7 @@ footer button:disabled { opacity: .5; cursor: default; }
 #chatLog.rp .gen-image img { display: none; }
 #chatLog.rp .gen-image .placeholder { width: auto; height: auto; padding: 3px 10px; display: inline-block; background: rgba(30, 30, 38, .75); animation: none; }
 #chatLog.rp .gen-image { margin-top: 4px; }
-#chatLog.rp .img-tools button { background: rgba(30, 30, 38, .75); color: #ddd; }
+#chatLog.rp .img-tools button { background: var(--rp-bg-tool, rgba(30, 30, 38, .75)); color: #ddd; }
 
 #lightbox {
   position: fixed;
@@ -3216,16 +3320,14 @@ button.rag-entry-pin.is-pinned {
 /* 背景表示モード */
 #chatLog.rp .choices-container .btn-img-refine,
 #chatLog.rp .choices-container .btn-prompt,
-#chatLog.rp .choices-container .btn-edit-resend,
-#chatLog.rp .choices-container .btn-stop-wait {
-  background: rgba(30, 30, 38, 0.85);
+#chatLog.rp .choices-container .btn-edit-resend {
+  background: var(--rp-bg-tool, rgba(30, 30, 38, 0.85));
   border-color: rgba(255, 255, 255, 0.2);
   color: #ddd;
 }
 #chatLog.rp .choices-container .btn-img-refine:hover:not(:disabled),
 #chatLog.rp .choices-container .btn-prompt:hover,
-#chatLog.rp .choices-container .btn-edit-resend:hover,
-#chatLog.rp .choices-container .btn-stop-wait:hover {
+#chatLog.rp .choices-container .btn-edit-resend:hover {
   background: rgba(59, 91, 219, 0.85);
   border-color: #5c7cfa;
   color: #fff;
@@ -3264,7 +3366,7 @@ button.rag-entry-pin.is-pinned {
 }
 /* 他のツールバーボタン（🔁 / 🎨 / ⋯）と同じ青ホバーに揃える */
 #chatLog.rp .choices-toggle-btn {
-  background: rgba(30, 30, 38, 0.70);
+  background: var(--rp-bg-tool-alt, rgba(30, 30, 38, 0.70));
   border-color: rgba(255, 255, 255, 0.18);
 }
 #chatLog.rp .choices-toggle-btn:hover,
@@ -3318,7 +3420,7 @@ button.rag-entry-pin.is-pinned {
   color: #f2f8ff;
 }
 #chatLog.rp .choice-item-btn {
-  background: rgba(30, 30, 38, 0.85);
+  background: var(--rp-bg-tool, rgba(30, 30, 38, 0.85));
   border-color: rgba(255, 255, 255, 0.2);
 }
 #chatLog.rp .choice-item-btn.is-selected {
@@ -3364,12 +3466,21 @@ button.rag-entry-pin.is-pinned {
   box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
   font-family: inherit;
 }
-/* PC: ボタンのそばに出し、入らなければ上にフリップする */
+/* PC / スマホ共通: ⋯ のそばに出す。入らなければ上にフリップする */
 .more-popup {
   position: fixed;
   z-index: 67;
   max-height: min(70vh, 420px);
   overflow-y: auto;
+  /* 押したボタン側の角から生えてくる（transform-origin は JS が合わせる） */
+  animation: morePopIn 0.14s ease-out;
+}
+@keyframes morePopIn {
+  from { opacity: 0; transform: scale(0.96) translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .more-popup { animation: none; }
 }
 .more-item {
   display: block;
@@ -3393,19 +3504,25 @@ button.rag-entry-pin.is-pinned {
 .more-ico svg { width: 17px; height: 17px; display: block; fill: currentColor; }
 .more-sep { border: none; border-top: 1px solid #3a3a44; margin: 4px 2px; }
 
-/* 狭い画面: 画面下から出すシート */
+/* シートのときだけ敷く背景（その場メニューのときは暗くしない） */
 .more-backdrop {
   position: fixed;
   inset: 0;
   z-index: 66;
   background: rgba(0, 0, 0, .45);
 }
+
+/* 画面下からのシート（長押し / 画面が低くて上下どちらにも入らないときだけ）
+   .more-menu の max-width:260px を必ず打ち消す。これを戻さないと
+   left:0;right:0 でも 260px 幅になり、左下に貼り付いた箱に見えてしまう。 */
 .more-sheet {
   position: fixed;
   left: 0;
   right: 0;
   bottom: 0;
   z-index: 67;
+  max-width: none;
+  width: 100%;
   max-height: 60vh;
   overflow-y: auto;
   border-radius: 14px 14px 0 0;
@@ -3421,7 +3538,7 @@ button.rag-entry-pin.is-pinned {
 
 /* 背景表示モード */
 #chatLog.rp .btn-more {
-  background: rgba(30, 30, 38, 0.85);
+  background: var(--rp-bg-tool, rgba(30, 30, 38, 0.85));
   border-color: rgba(255, 255, 255, 0.2);
   color: #ddd;
 }
@@ -3501,7 +3618,7 @@ button.rag-entry-pin.is-pinned {
 /* 背景表示（RP）でも読めるよう、少し濃い下地を敷く */
 #chatLog.rp .msg-hover-actions .msg-action-btn,
 #chatLog.rp .msg-hover-actions .btn-more {
-  background: rgba(16, 16, 24, .62);
+  background: var(--rp-bg-tool, rgba(16, 16, 24, .62));
   border-color: rgba(255, 255, 255, .28);
   color: #fff;
 }
@@ -3638,8 +3755,53 @@ button.rag-entry-pin.is-pinned {
 }
 
 
+/* == RP-CARD-CSS-BEGIN == */
+.side-opacity-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-top-color: #38383f;
+  background: #1c1c21;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.side-opacity-row.is-off {
+  opacity: .45;
+}
+.rop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #aaa;
+}
+.rop-label {
+  font-weight: 500;
+  color: #ccc;
+}
+.rop-val {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: #9ec1ff;
+  min-width: 32px;
+  text-align: right;
+}
+.rop-range {
+  width: 100%;
+  margin: 4px 0 0;
+  touch-action: none;
+  cursor: pointer;
+  accent-color: #5c7cfa;
+}
+.rop-range:disabled {
+  cursor: default;
+}
+/* == RP-CARD-CSS-END == */
+
 /* --- モバイル専用の小物（デスクトップでは出さない） --- */
-#mobileStatusChip, #mobileElapsedChip, #mobileTurnCluster, #mobileActionToggle, #mobileReveal, #sideBottomSection, #revealBackdrop { display: none; }
+#mobileStatusChip, #mobileElapsedChip, #mobileTurnCluster, #mobileActionToggle, #mobileScrollLatest, #mobileReveal, #sideBottomSection, #revealBackdrop { display: none; }
 
 @media (max-width: 768px) {
   #mobileStatusChip {
@@ -3697,7 +3859,7 @@ button.rag-entry-pin.is-pinned {
     padding-bottom: calc(var(--footer-h, 90px) + 62px);
   }
 
-  /* ドロワー最下段（親指ゾーン）。右は FAB(44px/right:24px) のぶん空ける */
+  /* ドロワー最下段（親指ゾーン）。右は FAB(38px/right:24px) のぶん空ける */
   #sideBottomSection {
     display: flex; flex-direction: column; gap: 8px;
     padding: 8px 38px 8px 12px;
@@ -3718,6 +3880,28 @@ button.rag-entry-pin.is-pinned {
     background: #2e7d32;
     color: #fff;
     box-shadow: inset 0 0 0 1px #4caf50;
+  }
+  /* body.rp-peek : スライダー操作中にドロワーを透明にして背景と本文を全面で見せる */
+  body.rp-peek #sidebar {
+    background: transparent;
+    border-right-color: transparent;
+    box-shadow: none;
+  }
+  body.rp-peek #sideBackdrop {
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  body.rp-peek #sidebar > :not(#sideOpacityRow) {
+    opacity: 0;
+    pointer-events: none;
+  }
+  body.rp-peek #sideOpacityRow {
+    background: rgba(16, 16, 24, 0.72);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 12px;
   }
   /* モデル行は「ドロワー下段」と「シート」で同じ見た目（.side-model-slot 側は既存ルール） */
   .foot-bar-slot .foot-bar {
@@ -3774,28 +3958,41 @@ button.rag-entry-pin.is-pinned {
      ↑↓ は z62 でスクリムの下、4ボタンと「✕ 閉じる」は z64 で上。 */
   #revealBackdrop {
     display: block; position: fixed; inset: 0; z-index: 63;
-    background: rgba(8, 10, 16, .52);
+    background: rgba(8, 10, 16, .32);
     touch-action: manipulation;
   }
   #revealBackdrop.hidden { display: none !important; }
 
-  /* 前/次 + 「ツール」の3点クラスタ。
-     フッターは厚くせず、FABと同じ44px帯に収める。
-     上の #mobileTurnCluster/#mobileActionToggle の display:none に勝つため id で指定する */
+  /* 前/次は FAB の上に縦積み（右端の親指ゾーン）。中央の「ツール／送信」とは分離する。
+     #mobileTurnCluster/#mobileActionToggle の display:none に勝つため id で指定する */
+  /* 強制スクロール中だけ出す（通常は同じ場所に FAB がいる）。
+     フェードイン/アウトし、visibility で見えない期間のタップも通さない */
   #mobileTurnCluster {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    /* 中央の「✕ 閉じる」は別要素。その幅＋左右4px分を空けて↑↓を配置する */
-    gap: 82px;
+    /* 縦積みでもタップ判定（::before 40px）が重ならない間隔 */
+    gap: 10px;
     position: fixed;
-    left: 0;
-    right: 0;
-    /* 入力欄とのあいだは 8px（キーボードを閉じても指が届く距離） */
-    bottom: calc(var(--footer-h, 56px) + 8px);
+    right: 24px;
+    /* FAB と同じ幅にして、ボタン中心を FAB の中心に揃える */
+    width: 38px;
+    /* FAB(38px / bottom: footer-h+8px) の上に 8px 空けて積む */
+    bottom: calc(var(--footer-h, 56px) + 54px);
     z-index: 62;                          /* スクリム(z63)の下 */
     pointer-events: none;                 /* 隙間がチャット面タップを奪わないように */
+    opacity: 0;
+    visibility: hidden;
+    /* 消えるのはゆっくり（↓ 最新へ → ツールの切替と同じタイミングで開始） */
+    transition: opacity .6s ease, visibility 0s linear .6s;
   }
+  #mobileTurnCluster.is-scroll-nav {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity .4s ease, visibility 0s;
+  }
+  /* 消えている間（フェードアウト途中も含む）はボタンを押させない */
+  #mobileTurnCluster:not(.is-scroll-nav) .mobile-turn-btn { pointer-events: none; }
   #mobileTurnCluster button,
   #mobileActionToggle {
     position: relative;       /* 見た目より縦に広いタップ判定を重ねる */
@@ -3836,31 +4033,102 @@ button.rag-entry-pin.is-pinned {
   #mobileTurnCluster .mobile-turn-btn {
     width: 32px;
     height: 32px;
+    padding: 0;                /* グローバル button の 6px 12px を消す（SVG が潰れるため） */
     border-radius: 50%;
-    font-size: 15px;
-    font-weight: 600;
+    font-size: 0;              /* SVG シェブロンを使う（フォント依存の上下ズレを避ける） */
     z-index: 62;              /* スクリム(z63)の下。開いている間は押せない */
   }
+  /* 32px の見た目に対して、横のタップ判定も 44px に広げる（縦は上の ::before 40px） */
+  #mobileTurnCluster .mobile-turn-btn::before { left: -6px; right: -6px; }
+  #mobileTurnCluster .mobile-turn-btn .turn-chevron {
+    display: block;
+    width: 16px;
+    height: 16px;
+    pointer-events: none;
+  }
+  #mobileTurnCluster .mobile-turn-btn .turn-chevron path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+/* 中央は入力中だけ「送信」。ツールは + のメニューに移したので、アイドル時は何も出さない。 */
   #mobileActionToggle {
     display: flex;
     position: fixed;
     left: calc(50% - 37px);    /* width 74px の中央。transformは押下アニメ用に空ける */
-    bottom: calc(var(--footer-h, 56px) + 8px);    /* #mobileTurnCluster と同じ高さ（入力欄のすぐ上） */
+    bottom: calc(var(--footer-h, 56px) + 8px);
     width: 74px;
-    height: 30px;
+    height: 32px;
     padding: 0 6px;
-    border-radius: 12px;
+    border-radius: 999px;
+    background: rgba(38, 40, 56, .78);
+    opacity: .82;
     font-size: 10.5px;
-    z-index: 64;              /* 「✕ 閉じる」はスクリムの上 */
+    z-index: 64;
   }
+  /* スクロール中に出す「最新へ」は、送信と同じ場所に置く円ボタン。
+     入力中は出ないので、送信と同時に並ぶことはない。 */
+  #mobileScrollLatest {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(var(--footer-h, 56px) + 8px);
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 50%;
+    background: rgba(38, 40, 56, .78);
+    color: #e6e6e6;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 64;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s ease, transform .2s ease;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 見た目は 34px でも、タップ判定は 40px 確保する */
+  #mobileScrollLatest::before {
+    content: "";
+    position: absolute;
+    left: -3px; right: -3px;
+    top: 50%;
+    height: 40px;
+    transform: translateY(-50%);
+  }
+  #mobileScrollLatest .latest-chevron {
+    display: block;
+    width: 16px;
+    height: 16px;
+    pointer-events: none;
+  }
+  #mobileScrollLatest .latest-chevron path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  #mobileScrollLatest.is-visible { opacity: .82; pointer-events: auto; }
+  #mobileScrollLatest:active { transform: translateX(-50%) scale(.94); opacity: 1; }
   /* タッチ端末では :hover がタップ後に残り、青いままになる。
      モバイルではホバー色を付けず、:active の押下感だけ残す。 */
   #mobileTurnCluster button:hover,
   #mobileActionToggle:hover {
-    background: rgba(38, 40, 56, .62);
+    background: rgba(38, 40, 56, .78);
     border-color: rgba(255, 255, 255, .18);
     color: #e6e6e6;
-    opacity: .72;
+    opacity: .82;
   }
   /* 押している間だけ青くする。丸ボタンの border-radius で円形に塗られる */
   #mobileTurnCluster .mobile-turn-btn:active,
@@ -3918,53 +4186,74 @@ button.rag-entry-pin.is-pinned {
     transform: scale(.7);
   }
 
-  /* 3列固定のグリッド（今は 3+2、増えたら 3+3 / 3+3+2 と自動で増える）。
-     列数を決め打ちにして、端末幅で 4+1 のように崩れないようにする。
-     幅は「3列分」で固定し、最終行の余りは justify-content で中央に揃える。
-     タイル幅は列数から計算するので、丸め誤差で 2+3 に崩れることもない。
-     （1列の広さを変えるときは --reveal-panel-w を 84px×3 + gap×2 で決める） */
+  /* 3列固定のグリッドではなく、+ の上に出す縦リスト（Gemini 風）。
+     区切り線は使わず、アイコンと行の間隔だけで読ませる。 */
   #mobileReveal {
-    --reveal-gap: 8px;
-    display: flex; flex-wrap: wrap; align-items: stretch; justify-content: center;
-    gap: var(--reveal-gap);
-    width: min(268px, calc(100vw - 12px));   /* 84px × 3 + 8px × 2 */
-    position: fixed; left: 50%; transform: translateX(-50%);
-    /* 「ツール」クラスタ（bottom: footer-h+8 / 44px）の真上に出す。
-       両方同時に見えるので押して閉じられる */
-    bottom: calc(var(--footer-h, 56px) + 62px); z-index: 64;
-    pointer-events: none;               /* gap がチャット面タップを奪わないように */
+    display: flex; flex-direction: column;
+    gap: 2px;
+    width: min(320px, calc(100vw - 24px));
+    position: fixed; left: 12px;
+    bottom: calc(var(--footer-h, 56px) + 8px);
+    padding: 6px;
+    border-radius: 16px;
+    background: rgba(28, 30, 40, .96);
+    border: 1px solid rgba(255, 255, 255, .10);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .55);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    z-index: 64;
+    pointer-events: auto;
   }
-  /* アイコンだけでは何のボタンか分からないので、大きめのタイルにアイコン＋文字を重ねる。
-     幅は 3列分を均等に割る（列数を変えるときは flex-basis の 3 を直す） */
   #mobileReveal button {
     pointer-events: auto;
-    flex: 0 0 calc((100% - var(--reveal-gap) * 2) / 3);
-    min-width: 0; min-height: 58px; padding: 7px 6px;
-    display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
-    border-radius: 15px;
-    background: rgba(38, 40, 56, .9); color: #f0f0f5;
-    border: 1px solid rgba(255, 255, 255, .22);
-    box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
-    opacity: 1;                        /* 透明にしない（「ツール」だけ薄く残す） */
-    white-space: nowrap;
-    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    display: flex; align-items: center; gap: 12px;
+    width: 100%; min-height: 44px; padding: 0 12px;
+    border: 0; border-radius: 11px;
+    background: transparent; color: #e8eaf0;
+    font-size: 13px; line-height: 1; text-align: left;
+    box-shadow: none;
     touch-action: manipulation; user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
-  #mobileReveal button .reveal-icon { font-size: 22px; line-height: 1; }
-  #mobileReveal button .reveal-label { font-size: 10px; line-height: 1; color: #cfd3e0; }
-  #mobileReveal button:active { transform: scale(.94); }
-  /* ホバーで同じ青に。緑の .on はこの後ろで上書きされるので保たれる */
-  #mobileReveal button:hover {
-    background: rgba(59, 91, 219, .85);
-    border-color: #5c7cfa;
-    color: #fff;
+  #mobileReveal button .reveal-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; flex: 0 0 20px;
+    color: #aab2c5; font-size: 0;
   }
+  #mobileReveal button .reveal-icon svg {
+    width: 20px; height: 20px; display: block;
+    fill: none; stroke: currentColor; stroke-width: 1.7;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  #mobileReveal button .reveal-label { font-size: 13px; color: #e8eaf0; }
+  #mobileReveal button:active { background: rgba(255, 255, 255, .07); }
+  #mobileReveal button:hover { background: rgba(255, 255, 255, .06); color: #fff; }
   #mobileReveal button:hover .reveal-label { color: #fff; }
-  #mobileReveal button.on { background: #2e7d32; border-color: #4caf50; }   /* 🖼️ は背景表示オンで緑 */
-  #mobileReveal button.on .reveal-label { color: #dcf6e2; }
+  /* 背景表示は、行全体のグリーンとスイッチでオン/オフが分かるようにする */
+  #revealRpToggle .reveal-switch {
+    margin-left: auto;
+    width: 30px; height: 18px; flex: 0 0 30px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .16);
+    position: relative;
+    transition: background .18s ease;
+  }
+  #revealRpToggle .reveal-switch::after {
+    content: "";
+    position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #9aa0ad;
+    transition: transform .18s ease, background .18s ease;
+  }
+  /* hover/active よりオン状態のグリーンを優先する（タッチの残りホバー対策） */
+  #mobileReveal #revealRpToggle.on { background: rgba(46, 125, 50, .20); }
+  #mobileReveal #revealRpToggle.on:hover { background: rgba(46, 125, 50, .26); }
+  #mobileReveal #revealRpToggle.on:active { background: rgba(46, 125, 50, .30); }
+  #revealRpToggle.on .reveal-icon { color: #7ee787; }
+  #revealRpToggle.on .reveal-label { color: #d7f5dd; }
+  #revealRpToggle.on .reveal-switch { background: #2e7d32; }
+  #revealRpToggle.on .reveal-switch::after { transform: translateX(12px); background: #eaffea; }
 
-  /* 入力中はメニュー（reveal）だけ畳む。トグルは入力中でも押せる（押す前に blur する） */
-  body:has(footer:focus-within) .mobile-reveal,
+  /* 入力中はメニュー（reveal）だけ畳む。+ は入力中でも押せる（押す前に blur する） */
   body.typing-input .mobile-reveal,
   body.side-open #mobileTurnCluster,
   body.side-open .mobile-reveal { display: none !important; }
@@ -3987,9 +4276,12 @@ button.rag-entry-pin.is-pinned {
 
 /* 320px 前後の端末でも FAB とぶつけないように、少しだけ縮める */
 @media (max-width: 330px) {
-  #mobileTurnCluster { gap: 76px; }
-  #mobileTurnCluster .mobile-turn-btn { width: 30px; height: 30px; font-size: 14px; }
+  #mobileTurnCluster { gap: 10px; }
+  #mobileTurnCluster .mobile-turn-btn { width: 30px; height: 30px; }
+  #mobileTurnCluster .mobile-turn-btn .turn-chevron { width: 15px; height: 15px; }
   #mobileActionToggle { left: calc(50% - 34px); width: 68px; height: 27px; padding: 0 5px; font-size: 10px; }
+  #mobileScrollLatest { width: 32px; height: 32px; }
+  #mobileScrollLatest .latest-chevron { width: 15px; height: 15px; }
 }
 
 /* タッチ端末では :hover がタップ後に残るため、選択肢系は通常色へ戻す。
@@ -4000,7 +4292,7 @@ button.rag-entry-pin.is-pinned {
     border-color: rgba(255, 255, 255, .12);
   }
   #chatLog.rp .choice-item-btn:hover:not(.is-selected) {
-    background: rgba(30, 30, 38, .85);
+    background: var(--rp-bg-tool, rgba(30, 30, 38, .85));
     border-color: rgba(255, 255, 255, .2);
   }
   .choices-toggle-btn:hover:not(.is-open):not(.is-erotic) {
@@ -4009,7 +4301,7 @@ button.rag-entry-pin.is-pinned {
     color: #ccc;
   }
   #chatLog.rp .choices-toggle-btn:hover:not(.is-open):not(.is-erotic) {
-    background: rgba(30, 30, 38, 0.85);
+    background: var(--rp-bg-tool-alt, rgba(30, 30, 38, 0.70));
     border-color: rgba(255, 255, 255, 0.2);
     color: #ccc;
   }
@@ -4024,7 +4316,7 @@ button.rag-entry-pin.is-pinned {
   #chatLog.rp .choices-container .btn-img-refine:hover:not(:disabled),
   #chatLog.rp .choices-container .btn-prompt:hover,
   #chatLog.rp .choices-container .btn-edit-resend:hover {
-    background: rgba(30, 30, 38, .85);
+    background: var(--rp-bg-tool, rgba(30, 30, 38, .85));
     border-color: rgba(255, 255, 255, .2);
     color: #ddd;
   }
@@ -4034,7 +4326,7 @@ button.rag-entry-pin.is-pinned {
     color: #ccc;
   }
   #chatLog.rp .btn-more:hover:not([aria-expanded="true"]) {
-    background: rgba(30, 30, 38, .85);
+    background: var(--rp-bg-tool, rgba(30, 30, 38, .85));
     border-color: rgba(255, 255, 255, .2);
     color: #ddd;
   }
@@ -4463,23 +4755,6 @@ button.rag-entry-pin.is-pinned {
   border: 1px solid #3f3f4e;
   border-radius: 4px;
   color: #e5e7eb;
-}
-.side-ai-summary-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 11px;
-  color: #aaa;
-  padding: 4px 6px;
-  margin-bottom: 0;
-  background: #18181f;
-  border: 1px solid #333340;
-  border-radius: 4px;
-}
-.side-ai-summary-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .side-ai-tool-btn {
   padding: 1px 6px;

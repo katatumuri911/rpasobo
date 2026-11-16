@@ -39,6 +39,19 @@ let navHoldBottom = false;
 // そのままでは「返信が届いたら本文を上端にそろえる」判定（下端付近か）が外れるので、
 // 見える高さが変わったら最下段を読み続けている間は最下段へ戻す。
 let pinnedBottom = true;
+// 指／ホイールでスクロールしている間だけ FAB を隠し、前/次（⌃⌄）を出す。
+// プログラム側の自動スクロール（送信・返信の追従）では立てない。
+// - scrollUiFabHidden: FAB を隠す（指を離して 350ms で戻す）
+// - scrollUiActive: ⌃⌄ と「↓ 最新へ」を残す（指を離して 1.2s で終了）
+let scrollUiFabHidden = false;
+let scrollUiActive = false;
+let scrollUiFabTimer = null;
+let scrollUiLingerTimer = null;
+let scrollUiFingerDown = false;
+// ⌃⌄ を触っている間（離した後もそのセッション中）は FAB を戻さない
+let scrollUiFabHold = false;
+const SCROLL_UI_FAB_MS = 350;       // スクロール停止後、FAB が戻るまで
+const SCROLL_UI_LINGER_MS = 1200;   // スクロール停止後、⌃⌄ と ↓ 最新へ を押せるように残す長さ
 // 送信した自分の発言や、届いた返信のカードを「上端合わせ」で見せているときのスクロール位置。
 // そのままの位置でいるなら、次の返信が届いた瞬間にその返信の上端へ寄せる（読んでいる途中なら動かさない）。
 let topAlignHold = null;
@@ -160,21 +173,33 @@ function hideReveal() {
   if (el) el.classList.add("hidden");
   const bd = $("revealBackdrop");
   if (bd) bd.classList.add("hidden");
+  const ab = $("attachBtn");
+  if (ab) {
+    ab.classList.remove("is-menu-open");
+    ab.setAttribute("aria-expanded", "false");
+    ab.setAttribute("aria-label", "追加・ツールを開く");
+  }
 }
-function showReveal() {
-  if (!isMobileLayout() || isOverlayOpen() || isFooterFocused()) return;
+function showReveal(force) {
+  if (!isMobileLayout() || isOverlayOpen() || (!force && isFooterFocused())) return false;
   const el = $("mobileReveal");
-  if (!el) return;
+  if (!el) return false;
   el.classList.remove("hidden");   // 時間経過では消さない（操作を選ぶか、オーバーレイ/入力で隠れるまで出す）
-  // 画面のどこかをタップしたら閉じられるように、透明な受け皿を敷く
+  // 画面のどこかをタップしたら閉じられるように、受け皿を敷く
   const bd = $("revealBackdrop");
   if (bd) bd.classList.remove("hidden");
+  const ab = $("attachBtn");
+  if (ab) {
+    ab.classList.add("is-menu-open");
+    ab.setAttribute("aria-expanded", "true");
+    ab.setAttribute("aria-label", "追加・ツールを閉じる");
+  }
+  return true;
 }
 // 中央ボタン（#mobileActionToggle）は「入力中だけ」送信になる。
-//   input 中 → send（送信） / それ以外 → tools（ツール） / メニューを開いていれば close
+//   input 中 → send（送信） / それ以外 → 非表示（ツールは + のメニューへ）
 // 下中央は左右どちらの親指でも届く位置なので、左手持ちでも送信できる。
-// 入力中でもツールを使いたいときは、入力を止めれば（キーボードを閉じれば）ツールに戻る。
-let actionToggleMode = "tools";
+let actionToggleMode = "";
 
 // 送れる中身があるか（送信ボタンの disabled と同じ条件）。
 // attaching はこの関数より後で宣言されるので、初期化前でも落ちないようにする
@@ -190,40 +215,49 @@ function isSendBlocked() {
   return Boolean(sending || stopping || waiting);
 }
 
+// 下端から離れて「読み返している」状態か（下部中央の「↓ 最新へ」を出す条件）
+function isAwayFromBottom() {
+  if (typeof log === "undefined" || !log) return false;
+  const gap = (log.scrollHeight || 0) - (log.scrollTop || 0) - (log.clientHeight || 0);
+  return gap > 120;
+}
+
 // 何度呼んでも安全。開いている間は必ず隠す（z64 が modal より上なので描画させない）
 function syncActionControlsVisibility() {
   // ここでは rpMode を見ない。reveal の 🖼️ で背景表示を切ると「自分の土台」ごと消えて
   // 二度と押せなくなる（しかも localStorage に残って再読込でも戻らない）ため。
   const base = isMobileLayout() && !isOverlayOpen();
   const typing = isFooterFocused();
+  const scrolling = (typeof scrollUiActive !== "undefined") && scrollUiActive;
   // メニュー（reveal）は入力中だけ畳む。中央の「ツール」は常に押せる
   if (!base || typing) hideReveal();
   const reveal = $("mobileReveal");
   const revealVisible = !!(reveal && !reveal.classList.contains("hidden"));
-  // 前/次はFABと同じ条件（モバイル・入力中でない・オーバーレイなし）で出す。
-  // 入力中も中央の「ツール」は残すので、ナビだけを .nav-off で抜く
+  // 前/次はスクロール中だけ出す（FAB と入れ替え）。入力中は中央の「ツール」を優先する。
   const cluster = $("mobileTurnCluster");
   if (cluster) {
     cluster.classList.toggle("hidden", !base);
     cluster.classList.toggle("nav-off", !(base && !typing));
+    cluster.classList.toggle("is-scroll-nav", Boolean(base && scrolling && !typing));
   }
   const toggle = $("mobileActionToggle");
+  // スクロール中と停止後の短い猶予の間、下端から離れているときだけ中央に「最新へ」を出す
+  const showLatest = Boolean(base && !typing && !revealVisible && scrolling && isAwayFromBottom());
+  // 中央は入力中だけ「送信」。ツールは + のメニューへ移したので、アイドル時は何も出さない。
+  const sendMode = Boolean(base && typing && !revealVisible && !isSendBlocked() && hasSendableContent());
+  actionToggleMode = sendMode ? "send" : "";
   if (toggle) {
-    toggle.classList.toggle("hidden", !base);
-    // 入力中（入力欄にフォーカスがあり、文字か添付がある）だけ「送信」に入れ替わる。
-    // 応答待ちの間は送れないので「ツール」に戻す（押しても無反応のボタンを出さない）
-    const sendMode = base && typing && !revealVisible && !isSendBlocked() && hasSendableContent();
-    actionToggleMode = (base && revealVisible) ? "close" : (sendMode ? "send" : "tools");
-    const label = actionToggleMode === "close" ? "✕ 閉じる"
-                : actionToggleMode === "send" ? "送信" : "ツール";
-    if (toggle.textContent !== label) toggle.textContent = label;
-    // 4つの操作メニューを開いている間は「閉じる」を青く点灯させる。
-    toggle.classList.toggle("on", base && revealVisible);
-    toggle.classList.toggle("send-mode", actionToggleMode === "send");
-    const hint = actionToggleMode === "send" ? "送信"
-               : actionToggleMode === "close" ? "ツールを閉じる" : "ツールを開く";
-    if (toggle.title !== hint) toggle.title = hint;
-    toggle.setAttribute("aria-label", hint);
+    toggle.classList.toggle("hidden", !sendMode);
+    toggle.classList.toggle("send-mode", sendMode);
+    if (toggle.textContent !== "送信") toggle.textContent = "送信";
+    if (toggle.title !== "送信") toggle.title = "送信";
+    toggle.setAttribute("aria-label", "送信");
+  }
+  const latestBtn = $("mobileScrollLatest");
+  if (latestBtn) {
+    latestBtn.classList.toggle("hidden", !base);
+    latestBtn.classList.toggle("is-visible", showLatest);
+    latestBtn.setAttribute("aria-hidden", String(!showLatest));
   }
   // チャンネルが開いていればいつでもモデル選択（AG / Google）を出す
   const model = $("revealModel");
@@ -235,6 +269,7 @@ function syncActionControlsVisibility() {
   const rpBtn = $("revealRpToggle");
   if (rpBtn) {
     rpBtn.classList.toggle("on", !!rpMode);
+    rpBtn.setAttribute("aria-checked", String(!!rpMode));
     const label = rpMode ? "背景表示をオフにする" : "背景表示をオンにする";
     rpBtn.title = label;
     rpBtn.setAttribute("aria-label", label);
@@ -354,7 +389,9 @@ function updateFabState() {
 
   // モーダル・シート・lightbox は自前の閉じる導線があるので、FAB は完全に消す。
   // 入力中は消さない（☰ を押せばそのままドロワーを開ける）
-  const visible = mobile && !moreSheet && !lightbox && !hasOpenModal;
+  // スクロール中は同じ場所に前/次（⌃⌄）を出すため、FAB は早めに退避し、先に戻す
+  const scrolling = (typeof scrollUiFabHidden !== "undefined") && scrollUiFabHidden;
+  const visible = mobile && !moreSheet && !lightbox && !hasOpenModal && !scrolling;
   const closeMode = isSettingsOpen || isSideOpen;
   if (fab) {
     fab.classList.toggle("fab-hidden", !visible);   // 未知クラス（RP色など）は保持
@@ -423,18 +460,15 @@ function updateHeaderAndSideStatus() {
   syncActionControlsVisibility();
 }
 
+// モデルの切り替えは入力欄のお気に入りチップに移したので、footBar は常に footer に置く
+// （ドロワー下段とモデルシートへの移送は廃止。残っているのは Google/Vertex の思考の深さだけ）
 function syncFootBarPlacement() {
   const footBar = $("footBar");
   const footer = document.querySelector("footer");
-  if (!footBar || !footer) return;                 // スロット欠品でもデスクトップ復帰は必ず通す
-  if (isMobileLayout()) {
-    const sheetOpen = !!($("modelSheet") && !$("modelSheet").classList.contains("hidden"));
-    const target = (sheetOpen && $("modelSheetSlot")) || $("sideModelContainer") || footer;
-    if (footBar.parentElement !== target) target.appendChild(footBar);
-  } else if (footBar.parentElement !== footer) {
-    if (typeof footer.insertBefore === "function") footer.insertBefore(footBar, $("attachList") || footer.firstChild);
-    else footer.appendChild(footBar);
-  }
+  if (!footBar || !footer) return;
+  if (footBar.parentElement === footer) return;
+  if (typeof footer.insertBefore === "function") footer.insertBefore(footBar, $("attachList") || footer.firstChild);
+  else footer.appendChild(footBar);
 }
 
 async function api(path, body, method = null) {
@@ -731,9 +765,11 @@ async function refreshSessions() {
 }
 
 async function switchTo(id) {
+  dismissToast();
   resetDecensorToast();
   sid = id;
   setStorage("sid", sid);
+  resetHistoryStateForSession(id, true);
   lastRev = -1;
   navHoldBottom = false;
   pinnedBottom = true;
@@ -1891,8 +1927,7 @@ function renderModels() {
   const isVertex = prov === "vertex";
   const rows = ideModels?.models || [];
   const reset = modelResetText;
-  const left = (r) => (typeof r.left !== "number" ? ""
-    : r.left > 0 ? `（残り${Math.max(1, Math.round(r.left * 100))}%）` : `（使い切り${reset(r)}）`);
+  const left = (r) => { const q = modelQuota(r); return q ? `（${modelQuotaText(r)}）` : ""; };
 
   const agOpts = [`<option value="ag:">会話の最後の入力と同じ${ideModels?.error ? "（一覧を読めない）" : ""}</option>`]
     .concat(rows.map((r) => `<option value="ag:${esc(r.model)}">${esc(r.label)}${r.model === ideModels?.default ? " ・既定" : ""}</option>`));
@@ -2014,6 +2049,7 @@ function renderModels() {
   updateModelSheetLeft();
   updateFootModelSubInfo();
   updateAgModelSubInfo();
+  updateAgQuotaBadge();
   syncComposerModelChip();
   ThinkingUI.render(state?.setting);
   if (typeof renderFavSaveControls === "function") renderFavSaveControls();
@@ -3336,19 +3372,7 @@ const ThinkingUI = {
       }
     }
 
-    // 3. Sidebar AI Summary text
-    const sideSummaryEl = $("sideAiSummaryText");
-    if (sideSummaryEl) {
-      if (isGoogle || isVertex) {
-        const pName = isGoogle ? "AI Studio" : "Vertex";
-        const thLabel = this.LEVEL_LABELS[mainLevel] || mainLevel;
-        sideSummaryEl.textContent = fav ? `使用中: ${fav.name}` : `使用中: ${pName}: ${currentModelId || "-"} (${thLabel})`;
-      } else {
-        sideSummaryEl.textContent = fav ? `使用中: ${fav.name}` : "Antigravity";
-      }
-    }
-
-    // 4. FootBar Compact Thinking Section
+    // 3. FootBar Compact Thinking Section
     const footSec = $("footThinkingSection");
     if (footSec) {
       footSec.classList.toggle("hidden", isAg);
@@ -4412,27 +4436,71 @@ function messageSignature(m, isLast) {
 
 // ---------------------------------------------------------------- その他の操作（⋯）
 // メッセージごとの操作は「⋯」にまとめる。
-// PC はその場にポップオーバー、狭い画面は画面下のシート。
+// 基本は「⋯ のすぐそば」にその場で出す（PC / スマホ共通）。
+// 長押しのようにアンカーが無いときと、画面が低くて上下どちらにも入らないときだけ
+// 画面下からのシートに切り替える。
 // 開いている間は外側クリック / Esc で閉じ、スクロールやリサイズでは閉じずに位置を追う。
 const moreOpen = { cur: null };
+
+// アンカーとメニューの間に空ける隙間 / 画面端から空ける余白 / ポップオーバーに必要な最小の高さ
+const MORE_MENU_GAP = 6;
+const MORE_MENU_MARGIN = 8;
+const MORE_POPUP_MIN_ROOM = 180;
 
 function isNarrowScreen() {
   return typeof window !== "undefined" && window.innerWidth <= 768;
 }
 
-// アンカーの位置に合わせて置き直す（下に入らなければ上へフリップ）
+// ⋯ の上と下に、それぞれどれだけメニューを出せる余地があるか
+function moreAnchorRoom(anchor) {
+  const r = anchor.getBoundingClientRect();
+  return {
+    rect: r,
+    above: Math.max(0, r.top - MORE_MENU_MARGIN - MORE_MENU_GAP),
+    below: Math.max(0, window.innerHeight - r.bottom - MORE_MENU_MARGIN - MORE_MENU_GAP),
+  };
+}
+
+// その場に出すか、シートにするか。
+// 長押し（opts.sheet）はアンカーが無い（div）のでシート。
+// 狭い画面でも、⋯ の上下どちらかに十分な余地があればその場に出す（指の下に生えてくる）。
+function shouldUseMoreSheet(el, anchor, opts = {}) {
+  if (opts.sheet === true) return true;
+  if (!anchor || typeof anchor.getBoundingClientRect !== "function") return true;
+  if (anchor.isConnected === false) return true;
+  if (!isNarrowScreen()) return false;   // PC は今まで通りその場に出す
+  const room = moreAnchorRoom(anchor);
+  const need = Math.min(el.offsetHeight || MORE_POPUP_MIN_ROOM, MORE_POPUP_MIN_ROOM);
+  return Math.max(room.above, room.below) < need;
+}
+
+// アンカーの位置に合わせて置き直す。
+// 縦: 下に収まらなければ上へフリップ。どちらにも収まらなければ広い側に置き、高さを切ってスクロール。
+// 横: 左寄せの吹き出し（AI）は ⋯ の左端、右寄せ（ユーザー）は ⋯ の右端に揃えて、画面内向きに開く。
 function placeMorePopup(el, anchor) {
   if (!el || !anchor || anchor.isConnected === false) return;
-  const r = anchor.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
   const w = el.offsetWidth || 176;
-  const h = el.offsetHeight || 220;
-  let top = r.bottom + 6;
-  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
-  let left = r.right - w;
-  if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - w - 8);
-  if (left < 8) left = 8;
-  el.style.top = top + "px";
+  const want = el.offsetHeight || 220;
+  const room = moreAnchorRoom(anchor);
+  const r = room.rect;
+
+  const openUp = room.below < want && (room.above >= want || room.above > room.below);
+  const avail = openUp ? room.above : room.below;
+  // 長いメニューは、開く側に入る高さで切ってスクロールさせる（96px を切ると操作できない）
+  const cap = Math.max(96, Math.min(avail, Math.round(vh * 0.7), 420));
+  const h = Math.min(want, cap);
+
+  el.style.maxHeight = cap + "px";
+  el.style.top = (openUp ? Math.max(MORE_MENU_MARGIN, r.top - h - MORE_MENU_GAP) : r.bottom + MORE_MENU_GAP) + "px";
+
+  const alignLeft = r.left + r.width / 2 < vw / 2;
+  let left = alignLeft ? r.left : r.right - w;
+  left = Math.max(MORE_MENU_MARGIN, Math.min(left, vw - MORE_MENU_MARGIN - w));
   el.style.left = left + "px";
+  // 出現アニメは「押したボタン側の角」を起点にする
+  el.style.transformOrigin = (openUp ? "bottom " : "top ") + (alignLeft ? "left" : "right");
 }
 
 function moreOnDocClick(e) {
@@ -4533,13 +4601,15 @@ function buildMoreMenu(m, isLast, s) {
   // 編集系
   item(m.role === "user" ? "✏️ 編集して再送" : "📝 本文を編集", () => openEdit(m),
     { title: m.role === "user" ? "この入力を編集して、この発言以降をやり直す" : "この発言の本文を編集する" });
+  const allMsgsForMenu = typeof getAllMessages === "function" ? getAllMessages() : (s.messages || []);
+  const menuMsgIdx = allMsgsForMenu.indexOf(m);
   if (m.role !== "user" && (m.state || s.setting?.rp_state)) {
-    item("🧑 キャラの状態", () => openState(m, s.messages), { title: "この応答のときのキャラの状態と内心を直す（次の入力で AI が読む）" });
+    item("🧑 キャラの状態", () => openState(m, allMsgsForMenu), { title: "この応答のときのキャラの状態と内心を直す（次の入力で AI が読む）" });
   }
   sep();
 
   // 会話系
-  if (m.role !== "user" && s.messages.slice(0, s.messages.indexOf(m)).some((x) => x.role === "user")) {
+  if (m.role !== "user" && menuMsgIdx >= 0 && allMsgsForMenu.slice(0, menuMsgIdx).some((x) => x.role === "user")) {
     item("🔄 再生成", async () => {
       if (!confirm("この応答以降の会話を削除して、AI応答を作り直しますか？")) return;
       const ch = sid;
@@ -4603,25 +4673,27 @@ function toggleMoreMenu(anchorBtn, m, isLast, s, opts = {}) {
   const menu = buildMoreMenu(m, isLast, s);
   const pinWrap = opts.pinWrap
     || (anchorBtn && typeof anchorBtn.closest === "function" ? anchorBtn.closest(".msg-wrap") : null);
-  const useSheet = opts.sheet === true || isNarrowScreen();   // 長押しは常にシート
   let backdrop = null;
 
-  if (useSheet) {
+  // 位置を測ってから出すため、いったん非表示で DOM に載せる
+  // （visibility:hidden なので幅・高さは測れる）
+  menu.classList.add("more-popup");
+  menu.style.visibility = "hidden";
+  document.body.appendChild(menu);
+
+  if (shouldUseMoreSheet(menu, anchorBtn, opts)) {
+    menu.classList.remove("more-popup");
+    menu.classList.add("more-sheet");
     backdrop = document.createElement("div");
     backdrop.className = "more-backdrop";
-    menu.classList.add("more-sheet");
     document.body.appendChild(backdrop);
-    document.body.appendChild(menu);
     backdrop.addEventListener("click", closeMoreMenu);
     moreOpen.cur = { kind: "sheet", el: menu, backdrop, anchor: anchorBtn, pinWrap };
   } else {
-    menu.classList.add("more-popup");
-    menu.style.visibility = "hidden";
-    document.body.appendChild(menu);
     placeMorePopup(menu, anchorBtn);
-    menu.style.visibility = "";
     moreOpen.cur = { kind: "popup", el: menu, backdrop: null, anchor: anchorBtn, pinWrap };
   }
+  menu.style.visibility = "";
 
   if (pinWrap && pinWrap.classList) pinWrap.classList.add("actions-pinned");
 
@@ -5384,12 +5456,53 @@ function modelResetText(r) {
   const d = new Date(r.reset);
   return isNaN(d) ? "" : `・${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}に回復`;
 }
+// Antigravity の利用枠は週（weekly）を使う。古い応答などで週が無ければ 5 時間の枠で代用する
+function modelQuota(r) {
+  if (!r) return null;
+  if (r.weekly && typeof r.weekly.left === "number") return { left: r.weekly.left, reset: r.weekly.reset || "", weekly: true };
+  if (typeof r.left === "number") return { left: r.left, reset: r.reset || "", weekly: false };
+  return null;
+}
+function modelQuotaText(r) {
+  const q = modelQuota(r);
+  if (!q) return "";
+  if (q.left > 0) return `残り${Math.max(1, Math.round(q.left * 100))}%`;
+  return `使い切り${q.reset ? modelResetText(q) : ""}`;
+}
+// 入力欄の中の「残り x%」。今使うモデルのグループの週の枠だけを出す（Antigravity のときだけ）
+function updateAgQuotaBadge() {
+  const el = $("agQuotaBadge");
+  if (!el) return;
+  const prov = state?.setting?.ai_provider || "antigravity";
+  const cur = typeof currentModelConfig === "function" ? currentModelConfig() : null;
+  const model = String(cur?.main || "").replace(/^ag:/, "") || (prov === "antigravity" ? ideModels?.default || "" : "");
+  const r = prov === "antigravity"
+    ? (ideModels?.models || []).find((x) => x.model === model) || null
+    : null;
+  const q = modelQuota(r);
+  if (!q) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    el.removeAttribute("title");
+    return;
+  }
+  const pct = Math.max(1, Math.round(q.left * 100));
+  const label = r?.label || model;
+  const reset = q.reset ? modelResetText(q) : "";
+  el.textContent = q.left > 0 ? `${pct}%` : "使い切り";
+  el.classList.toggle("is-low", q.left <= 0 || pct <= 15);
+  el.title = (q.weekly ? `Antigravity の今週の残り（${label}）` : `Antigravity の残り（${label}）`)
+    + (q.left > 0 ? reset : `。${reset.replace(/^・/, "")}`)
+    + "。タップで読み直す";
+  el.setAttribute("aria-label", `${q.left > 0 ? `今週の残り ${pct}%` : "使い切り"}（${label}）。タップで読み直す`);
+  el.classList.remove("hidden");
+}
 function modelLeftText(r) {
-  if (typeof r.left !== "number") return "";
-  if (r.left > 0) return `残り${Math.max(1, Math.round(r.left * 100))}%`;   // 既存 renderModels と同じ丸め
-  const d = new Date(r.reset);
-  const when = isNaN(d) ? "" : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}に回復`;
-  return when ? `使い切り（${when}）` : "使い切り";
+  const q = modelQuota(r);
+  if (!q) return "";
+  if (q.left > 0) return `残り${Math.max(1, Math.round(q.left * 100))}%`;
+  const when = modelResetText(q);
+  return when ? `使い切り（${when.replace(/^・/, "")}）` : "使い切り";
 }
 function updateModelSheetLeft() {
   const el = $("modelSheetLeft");
@@ -5415,6 +5528,26 @@ function updateModelSheetLeft() {
   el.textContent = txt ? `残り利用可能: ${txt}` : "";
   el.classList.toggle("hidden", !txt);
 }
+function modelQuotaBadges(r) {
+  if (!r) return "";
+  const m = String(r.label || "").match(/^(.*?)\s*[\(（](.*?)[\)）]\s*$/);
+  const sub = m ? m[2].trim() : "";
+  const badges = [];
+  if (sub) badges.push(`<span class="model-badge thinking">${esc(sub)}</span>`);
+  const q = modelQuota(r);
+  if (q) {
+    if (q.left > 0) {
+      const pct = Math.max(1, Math.round(q.left * 100));
+      const lowCls = pct <= 15 ? " is-low" : "";
+      const wk = q.weekly ? "今週 " : "";
+      badges.push(`<span class="model-badge quota${lowCls}">${wk}残り ${pct}%</span>`);
+    } else {
+      const reset = modelResetText(q);
+      badges.push(`<span class="model-badge quota is-low">使い切り${reset ? ` ${esc(reset)}` : ""}</span>`);
+    }
+  }
+  return badges.join("");
+}
 function updateFootModelSubInfo() {
   const el = $("footModelSubInfo");
   if (!el) return;
@@ -5433,30 +5566,7 @@ function updateFootModelSubInfo() {
   }
   const val = $("ideModel") ? $("ideModel").value : "";
   const model = val.startsWith("ag:") ? val.slice(3) : val;
-  const r = (ideModels?.models || []).find((x) => x.model === model);
-  if (!r) {
-    el.innerHTML = "";
-    return;
-  }
-  // カッコ () や（）を外してモダンなバッジ表示にする
-  const m = String(r.label || "").match(/^(.*?)\s*[\(（](.*?)[\)）]\s*$/);
-  const sub = m ? m[2].trim() : "";
-  const badges = [];
-  if (sub) {
-    badges.push(`<span class="model-badge thinking">${esc(sub)}</span>`);
-  }
-  if (typeof r.left === "number") {
-    if (r.left > 0) {
-      const pct = Math.max(1, Math.round(r.left * 100));
-      const lowCls = pct <= 15 ? " is-low" : "";
-      badges.push(`<span class="model-badge quota${lowCls}">残り ${pct}%</span>`);
-    } else {
-      const reset = modelResetText(r);
-      const when = reset ? ` ${esc(reset)}` : "";
-      badges.push(`<span class="model-badge quota is-low">使い切り${when}</span>`);
-    }
-  }
-  el.innerHTML = badges.join("");
+  el.innerHTML = modelQuotaBadges((ideModels?.models || []).find((x) => x.model === model));
 }
 function updateAgModelSubInfo() {
   const el = $("agModelSubInfo");
@@ -5467,29 +5577,7 @@ function updateAgModelSubInfo() {
     return;
   }
   const model = $("agModel") ? $("agModel").value : (state?.setting?.ide_model || "");
-  const r = (ideModels?.models || []).find((x) => x.model === model);
-  if (!r) {
-    el.innerHTML = "";
-    return;
-  }
-  const m = String(r.label || "").match(/^(.*?)\s*[\(（](.*?)[\)）]\s*$/);
-  const sub = m ? m[2].trim() : "";
-  const badges = [];
-  if (sub) {
-    badges.push(`<span class="model-badge thinking">${esc(sub)}</span>`);
-  }
-  if (typeof r.left === "number") {
-    if (r.left > 0) {
-      const pct = Math.max(1, Math.round(r.left * 100));
-      const lowCls = pct <= 15 ? " is-low" : "";
-      badges.push(`<span class="model-badge quota${lowCls}">残り ${pct}%</span>`);
-    } else {
-      const reset = modelResetText(r);
-      const when = reset ? ` ${esc(reset)}` : "";
-      badges.push(`<span class="model-badge quota is-low">使い切り${when}</span>`);
-    }
-  }
-  el.innerHTML = badges.join("");
+  el.innerHTML = modelQuotaBadges((ideModels?.models || []).find((x) => x.model === model));
 }
 function openModelSheet() {
   if (!state || !state.setting) {
@@ -5544,6 +5632,323 @@ function closeAiToolModal() {
   syncActionControlsVisibility();
 }
 
+/* ---- SPEC-v4 History Autoload & Header ---- */
+let historyState = {
+  sid: null,
+  loading: false,
+  error: null,
+  hasMore: true,
+  nextCursor: null,
+  loadedChunks: 0,
+  emptyPageStreak: 0,
+};
+let archivedMessages = [];
+let autoLoadPagesWithoutInput = 0;
+let lastAutoLoadAt = 0;
+let historyHeaderEl = null;
+let isInitialScrollSettled = false;
+let historyPrevScrollTop = 0;
+let historyLateCorrectionUntil = 0;
+
+const MAX_AUTO_PAGES_WITHOUT_INPUT = 3;
+const MIN_AUTO_LOAD_INTERVAL_MS = 250;
+const AUTO_LOAD_SOFT_LIMIT_PAGES = 30;
+
+function resetHistoryStateForSession(newSid, hasHistory) {
+  historyState = {
+    sid: newSid,
+    loading: false,
+    error: null,
+    hasMore: hasHistory !== false,
+    nextCursor: null,
+    loadedChunks: 0,
+    emptyPageStreak: 0,
+  };
+  archivedMessages = [];
+  autoLoadPagesWithoutInput = 0;
+  lastAutoLoadAt = 0;
+  isInitialScrollSettled = false;
+  historyPrevScrollTop = 0;
+  historyLateCorrectionUntil = 0;
+  historyHeaderEl = null;
+}
+
+function getAllMessages() {
+  if (!archivedMessages.length) return state?.messages || [];
+  const res = [];
+  const seen = new Set();
+  for (const m of archivedMessages) {
+    if (m && m.id) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+    }
+    res.push(m);
+  }
+  for (const m of (state?.messages || [])) {
+    if (m && m.id) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+    }
+    res.push(m);
+  }
+  return res;
+}
+
+function getOrCreateHistoryHeader() {
+  if (!sid) return null;
+  if (!historyHeaderEl) {
+    historyHeaderEl = document.createElement("div");
+    historyHeaderEl.id = "historyHeader";
+    historyHeaderEl.className = "history-header";
+  }
+
+  let stateKey = "";
+  if (historyState.loading) {
+    stateKey = "loading";
+  } else if (historyState.error) {
+    stateKey = `error:${historyState.error}`;
+  } else if (historyState.hasMore) {
+    stateKey = "hasMore";
+  } else {
+    stateKey = "beginning";
+  }
+
+  if (historyHeaderEl.dataset.stateKey !== stateKey) {
+    historyHeaderEl.dataset.stateKey = stateKey;
+    historyHeaderEl.innerHTML = "";
+
+    if (historyState.loading) {
+      const wrap = document.createElement("div");
+      wrap.className = "history-loading";
+      wrap.setAttribute("role", "status");
+      wrap.setAttribute("aria-live", "polite");
+      const spinner = document.createElement("span");
+      spinner.className = "history-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.textContent = "Loading earlier turns…";
+      wrap.appendChild(spinner);
+      wrap.appendChild(label);
+      historyHeaderEl.appendChild(wrap);
+    } else if (historyState.error) {
+      const wrap = document.createElement("div");
+      wrap.className = "history-error";
+      wrap.setAttribute("role", "alert");
+      const errMsg = document.createElement("span");
+      errMsg.textContent = "Failed to load earlier turns";
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "history-retry-btn";
+      retryBtn.textContent = "Retry";
+      retryBtn.onclick = (e) => {
+        e.preventDefault();
+        requestLoadEarlier(true);
+      };
+      wrap.appendChild(errMsg);
+      wrap.appendChild(retryBtn);
+      historyHeaderEl.appendChild(wrap);
+    } else if (historyState.hasMore) {
+      const btn = document.createElement("button");
+      btn.id = "loadEarlierBtn";
+      btn.className = "load-earlier-btn";
+      btn.textContent = "Load earlier turns";
+      btn.onclick = (e) => {
+        e.preventDefault();
+        requestLoadEarlier(true);
+      };
+      historyHeaderEl.appendChild(btn);
+    } else {
+      const beg = document.createElement("div");
+      beg.className = "history-beginning";
+      beg.textContent = "Beginning of thread";
+      historyHeaderEl.appendChild(beg);
+    }
+  }
+
+  return historyHeaderEl;
+}
+
+async function requestLoadEarlier(isManual = false) {
+  if (historyState.loading) return;
+  if (!historyState.hasMore) return;
+  if (!sid) return;
+
+  const now = Date.now();
+  if (!isManual && now - lastAutoLoadAt < MIN_AUTO_LOAD_INTERVAL_MS) {
+    return;
+  }
+  if (!isManual && autoLoadPagesWithoutInput >= MAX_AUTO_PAGES_WITHOUT_INPUT) {
+    return;
+  }
+  if (!isManual && historyState.loadedChunks >= AUTO_LOAD_SOFT_LIMIT_PAGES) {
+    return;
+  }
+
+  const reqSid = sid;
+  isInitialScrollSettled = true;
+  historyState.loading = true;
+  historyState.error = null;
+  lastAutoLoadAt = now;
+  if (!isManual) {
+    autoLoadPagesWithoutInput++;
+  } else {
+    autoLoadPagesWithoutInput = 0;
+    toast("過去の会話を読み込み中…", { kind: "info", ms: 0 });
+  }
+  render();
+
+  const logEl = $("chatLog");
+  const firstChild = logEl ? logEl.querySelector(".msg-wrap") : null;
+  const anchorTop = firstChild ? firstChild.getBoundingClientRect().top : 0;
+  const oldScrollHeight = logEl ? logEl.scrollHeight : 0;
+
+  try {
+    let url = `/api/session/history?sid=${encodeURIComponent(reqSid)}`;
+    if (historyState.nextCursor !== null) {
+      url += `&before_rot=${encodeURIComponent(historyState.nextCursor)}`;
+    }
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.ok && data.error) {
+      throw new Error(data.error);
+    }
+
+    if (sid !== reqSid) return; // Discard if user switched session during fetch
+
+    const fetchedMessages = Array.isArray(data.messages) ? data.messages : [];
+    const existingIds = new Set();
+    for (const m of archivedMessages) {
+      if (m && m.id) existingIds.add(m.id);
+    }
+    for (const m of (state?.messages || [])) {
+      if (m && m.id) existingIds.add(m.id);
+    }
+
+    const newMsgs = fetchedMessages.filter((m) => m && m.id && !existingIds.has(m.id));
+    const addedCount = newMsgs.length;
+
+    archivedMessages = [...newMsgs, ...archivedMessages];
+
+    historyState.loading = false;
+    historyState.hasMore = Boolean(data.has_more);
+    historyState.nextCursor = data.next_cursor != null ? data.next_cursor : null;
+    historyState.loadedChunks++;
+
+    if (addedCount === 0) {
+      historyState.emptyPageStreak = (historyState.emptyPageStreak || 0) + 1;
+      if (historyState.emptyPageStreak >= 2) {
+        historyState.hasMore = false;
+      }
+    } else {
+      historyState.emptyPageStreak = 0;
+    }
+
+    render();
+
+    const applyDriftCorrection = () => {
+      if (!logEl) return;
+      if (firstChild && firstChild.isConnected) {
+        const newTop = firstChild.getBoundingClientRect().top;
+        const drift = newTop - anchorTop;
+        if (Math.abs(drift) >= 2) {
+          logEl.scrollTop += drift;
+        }
+      } else {
+        const drift = logEl.scrollHeight - oldScrollHeight;
+        if (Math.abs(drift) >= 2) {
+          logEl.scrollTop += drift;
+        }
+      }
+    };
+
+    applyDriftCorrection();
+
+    // Late correction window (500ms) for async image loads / layout shifts (SPEC-v4 A5)
+    historyLateCorrectionUntil = Date.now() + 500;
+    const imgs = logEl ? logEl.querySelectorAll(".msg-wrap img") : [];
+    imgs.forEach((img) => {
+      if (!img.complete) {
+        img.addEventListener("load", () => {
+          if (Date.now() <= historyLateCorrectionUntil) {
+            applyDriftCorrection();
+          }
+        }, { once: true });
+      }
+    });
+
+    if (addedCount > 0) {
+      toast(`過去のメッセージを読み込みました（${addedCount}件）`, { kind: "ok", ms: 2500 });
+    } else if (isManual) {
+      toast("これより前のメッセージはありません", { kind: "info", ms: 2000 });
+    }
+  } catch (err) {
+    if (sid !== reqSid) return;
+    console.error("Failed to load earlier turns:", err);
+    historyState.loading = false;
+    historyState.error = err.message || "過去の会話の読み込みに失敗しました";
+    render();
+    toast(`過去の会話の読み込みに失敗しました: ${historyState.error}`, { kind: "err", ms: 4000 });
+  }
+}
+
+function initHistoryAutoload() {
+  const logEl = $("chatLog");
+  if (!logEl) return;
+
+  const onUserGesture = (e) => {
+    isInitialScrollSettled = true;
+    autoLoadPagesWithoutInput = 0;
+    if (logEl && logEl.scrollTop < 120 && historyState.hasMore && !historyState.loading) {
+      if (e.type === "wheel" && e.deltaY < 0) {
+        requestLoadEarlier(false);
+      } else if (e.type === "keydown" && (e.key === "ArrowUp" || e.key === "PageUp" || e.key === "Home")) {
+        requestLoadEarlier(false);
+      }
+    }
+  };
+
+  window.addEventListener("wheel", onUserGesture, { passive: true });
+  window.addEventListener("touchstart", onUserGesture, { passive: true });
+  window.addEventListener("pointerdown", () => {
+    isInitialScrollSettled = true;
+    autoLoadPagesWithoutInput = 0;
+  }, { passive: true });
+  window.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const scrollKeys = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "];
+    if (scrollKeys.includes(e.key)) {
+      onUserGesture(e);
+    }
+  }, { passive: true });
+
+  logEl.addEventListener("scroll", () => {
+    const currentScrollTop = logEl.scrollTop;
+    const delta = currentScrollTop - historyPrevScrollTop;
+    historyPrevScrollTop = currentScrollTop;
+
+    // Scrolling down or leaving preload region resets pages-without-input counter (SPEC-v4 A3)
+    if (delta > 2 || currentScrollTop > 300) {
+      autoLoadPagesWithoutInput = 0;
+    }
+
+    if (!isInitialScrollSettled) return;
+
+    if (currentScrollTop < 120 && historyState.hasMore && !historyState.loading) {
+      requestLoadEarlier(false);
+    }
+  }, { passive: true });
+
+  logEl.addEventListener("touchmove", () => {
+    isInitialScrollSettled = true;
+    autoLoadPagesWithoutInput = 0;
+    if (logEl.scrollTop < 120 && historyState.hasMore && !historyState.loading) {
+      requestLoadEarlier(false);
+    }
+  }, { passive: true });
+}
+
 function render() {
   const s = state;
   syncGoogleSettingsUI();
@@ -5571,6 +5976,11 @@ function render() {
 
   const desiredChildren = [];
 
+  const historyHdr = getOrCreateHistoryHeader();
+  if (historyHdr) {
+    desiredChildren.push(historyHdr);
+  }
+
   if (s.setting?.summary) {
     let sm = log.querySelector(".summary-card");
     if (!sm || sm.textContent !== s.setting.summary) {
@@ -5581,9 +5991,10 @@ function render() {
     desiredChildren.push(sm);
   }
 
-  for (let i = 0; i < s.messages.length; i++) {
-    const m = s.messages[i];
-    const isLast = i === s.messages.length - 1;
+  const allMessages = getAllMessages();
+  for (let i = 0; i < allMessages.length; i++) {
+    const m = allMessages[i];
+    const isLast = i === allMessages.length - 1;
     const sig = messageSignature(m, isLast);
     const mid = m.id ? "msg-" + m.id : null;
     let wrap = mid ? existingMap.get(mid) : null;
@@ -5661,6 +6072,7 @@ function render() {
   log.classList.toggle("rp", rpMode);
   $("rpToggle").classList.toggle("on", rpMode);
   updateHeaderAndSideStatus();
+  if (window.__rpCardReady) syncRpCardStrengthUI();
 
   // AIから新しい返信が届いた瞬間に、本文をすぐ読めるよう上部チップ直下にカード上端を寄せる
   // （スマホ・PCの両方。送信直後で自分の発言を読んでいるときも、返信の上端へ移す）
@@ -5725,6 +6137,9 @@ function updateRpBg() {
 log.addEventListener("scroll", () => {
   lastScrollTime = Date.now();
   touchMoved = true;
+  // スクロールが続いている間は「スクロール中UI」を維持し、位置の変化は次フレームで反映する
+  if (scrollUiActive && !scrollUiFingerDown) restartScrollUiTimers(scrollUiFabHold ? null : SCROLL_UI_FAB_MS, SCROLL_UI_LINGER_MS);
+  queueScrollUiSync();
   // ナビ移動で止めた位置から、ユーザー自身が最下段まで戻ったら自動追従を再開する。
   if (navHoldBottom) {
     const gap = log.scrollHeight - log.scrollTop - log.clientHeight;
@@ -5751,15 +6166,76 @@ let logTouchStartY = null;
 log.addEventListener("touchstart", (e) => {
   const t = e.touches && e.touches[0];
   logTouchStartY = t ? t.clientY : null;
+  // 慣性スクロール中に触れたら、指を置いている間はタイマーを進めない
+  if (scrollUiActive || scrollUiFabHidden) {
+    scrollUiFingerDown = true;
+    pauseScrollUiTimers();
+  }
 }, { passive: true });
 log.addEventListener("touchmove", (e) => {
   const t = e.touches && e.touches[0];
   if (!t || logTouchStartY === null) return;
-  if (Math.abs(t.clientY - logTouchStartY) > 12) userScrolledSinceAlign = true;
+  if (Math.abs(t.clientY - logTouchStartY) > 12) {
+    userScrolledSinceAlign = true;
+    markScrollUiActive();
+  }
 }, { passive: true });
-log.addEventListener("touchend", () => { logTouchStartY = null; }, { passive: true });
-log.addEventListener("touchcancel", () => { logTouchStartY = null; }, { passive: true });
-log.addEventListener("wheel", () => { userScrolledSinceAlign = true; }, { passive: true });
+log.addEventListener("touchend", () => {
+  logTouchStartY = null;
+  const wasDown = scrollUiFingerDown;
+  scrollUiFingerDown = false;
+  if (wasDown && scrollUiActive) restartScrollUiTimers(SCROLL_UI_FAB_MS, SCROLL_UI_LINGER_MS);
+}, { passive: true });
+log.addEventListener("touchcancel", () => {
+  logTouchStartY = null;
+  const wasDown = scrollUiFingerDown;
+  scrollUiFingerDown = false;
+  if (wasDown && scrollUiActive) restartScrollUiTimers(SCROLL_UI_FAB_MS, SCROLL_UI_LINGER_MS);
+}, { passive: true });
+log.addEventListener("wheel", () => { userScrolledSinceAlign = true; markScrollUiActive(); }, { passive: true });
+
+/* ---- スクロール中UI（FAB は早く戻し、⌃⌄ は長めに残す） ---- */
+function pauseScrollUiTimers() {
+  if (scrollUiFabTimer) { clearTimeout(scrollUiFabTimer); scrollUiFabTimer = null; }
+  if (scrollUiLingerTimer) { clearTimeout(scrollUiLingerTimer); scrollUiLingerTimer = null; }
+}
+function restartScrollUiTimers(fabMs, lingerMs) {
+  pauseScrollUiTimers();
+  // fabMs が null のときは FAB を戻さない（⌃⌄ 操作中）
+  if (fabMs !== null) scrollUiFabTimer = setTimeout(showFabAfterScroll, fabMs);
+  scrollUiLingerTimer = setTimeout(endScrollUi, lingerMs);
+}
+function showFabAfterScroll() {
+  scrollUiFabTimer = null;
+  if (scrollUiFabHold || !scrollUiFabHidden) return;
+  scrollUiFabHidden = false;
+  updateFabState();          // FAB だけ先に戻す（⌃⌄ は linger の間そのまま）
+}
+function markScrollUiActive() {
+  if (!isMobileLayout()) return;
+  const changed = !scrollUiActive || !scrollUiFabHidden;
+  scrollUiActive = true;
+  scrollUiFabHidden = true;
+  scrollUiFabHold = false;   // 新しいスクロールは新しいセッション
+  // 指を置いている間はタイマーを進めない（離した時点から数える）
+  if (!scrollUiFingerDown) restartScrollUiTimers(SCROLL_UI_FAB_MS, SCROLL_UI_LINGER_MS);
+  if (changed) updateFabState();
+}
+function endScrollUi() {
+  pauseScrollUiTimers();
+  scrollUiFabHold = false;
+  if (!scrollUiActive && !scrollUiFabHidden) return;
+  scrollUiActive = false;
+  scrollUiFabHidden = false;
+  updateFabState();          // FAB・⌃⌄ を戻し、「↓ 最新へ」をツールに切り替える
+}
+let scrollUiSyncQueued = false;
+function queueScrollUiSync() {
+  if (scrollUiSyncQueued) return;
+  scrollUiSyncQueued = true;
+  const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+  raf(() => { scrollUiSyncQueued = false; syncActionControlsVisibility(); });
+}
 
 async function poll() {
   if (!sid) return refreshSessions();
@@ -5776,6 +6252,10 @@ async function poll() {
         lastRev = -1;
         return poll();
       }
+      if (typeof s.has_history === "boolean" && historyState.loadedChunks === 0 && historyState.nextCursor === null && historyState.hasMore !== s.has_history) {
+        historyState.hasMore = s.has_history;
+        render();
+      }
       if ($("statusPill").classList.contains("err")) {
         $("statusPill").className = "pill ok";
         $("statusPill").textContent = "入力待機";
@@ -5791,6 +6271,11 @@ async function poll() {
       lastRev = key;
       state = s;
       window.currentSession = s;
+      if (s.id !== historyState.sid) {
+        resetHistoryStateForSession(s.id, s.has_history);
+      } else if (historyState.loadedChunks === 0 && historyState.nextCursor === null) {
+        historyState.hasMore = Boolean(s.has_history);
+      }
       if (typeof PromptToolbar !== "undefined") {
         PromptToolbar.syncWithSession(s);
       }
@@ -8199,6 +8684,15 @@ if ($("favModelBtn")) {
   });
 }
 if ($("favModelSheetClose")) $("favModelSheetClose").onclick = closeFavModelSheet;
+// 入力欄の「残り x%」: タップでモデル一覧と週の枠を読み直す
+if ($("agQuotaBadge")) {
+  $("agQuotaBadge").onclick = async () => {
+    const el = $("agQuotaBadge");
+    if (el) el.classList.add("is-loading");
+    try { await loadModels(); } catch (e) { console.warn("quota reload failed:", e); }
+    if (el) el.classList.remove("is-loading");
+  };
+}
 if ($("favOpenAiModalBtn")) $("favOpenAiModalBtn").onclick = openAiModalFromFavSheet;
 if ($("favEmptyOpenSettings")) $("favEmptyOpenSettings").onclick = openAiModalFromFavSheet;
 if ($("favUndoBtn")) $("favUndoBtn").onclick = restoreDeletedFavorite;
@@ -8544,7 +9038,8 @@ function setupAttachFlickSend() {
         btn.style.transform = "translateY(95px)";
         btn.style.opacity = "0";
 
-        // メッセージ送信
+        // メッセージ送信（メニューが開いていたら閉じる）
+        hideReveal();
         send();
 
         // 元の位置にスッと戻る
@@ -8593,14 +9088,25 @@ function setupAttachFlickSend() {
     resetBtnStyle(true);
   });
 
-  // PC（マウス操作）: 従来の「クリックしてファイル添付」のみを維持
+  // PC（マウス操作）: 従来の「クリックしてファイル添付」を維持
+  // スマホ: + の上に「追加・ツール」メニューを開く（下フリック送信はそのまま）
   btn.onclick = (e) => {
     if (Date.now() < suppressClickUntil) {
       e.preventDefault();
       e.stopImmediatePropagation();
       return;
     }
-    input.click();
+    if (!isMobileLayout()) { input.click(); return; }
+    const menu = $("mobileReveal");
+    if (menu && !menu.classList.contains("hidden")) {
+      hideReveal();
+      syncActionControlsVisibility();
+      return;
+    }
+    const ae = document.activeElement;
+    if (ae && typeof ae.blur === "function") ae.blur();   // キーボードを閉じてから出す
+    showReveal(true);
+    syncActionControlsVisibility();
   };
 
   btn.addEventListener("click", (e) => {
@@ -8711,6 +9217,18 @@ if ($("mobileFab")) {
     setDrawerOpen(true, { reason: "fab" });
   };
 }
+// 下端から離れて読んでいる間に出る「↓ 最新へ」。押したら最下段へ戻る
+if ($("mobileScrollLatest")) {
+  $("mobileScrollLatest").onclick = () => {
+    endScrollUi();
+    pinnedBottom = true;
+    navHoldBottom = false;
+    if (!log) return;
+    if (typeof log.scrollTo === "function") log.scrollTo({ top: log.scrollHeight, behavior: "smooth" });
+    else log.scrollTop = log.scrollHeight;
+    syncActionControlsVisibility();
+  };
+}
 // タップが速すぎても青い反応が見えるように、押下時に一瞬だけ青いクラスを付ける。
 // CSS の :active だけだと、指を離すのが速い端末では色がほぼ見えない。
 function flashTapButton(btn) {
@@ -8738,6 +9256,39 @@ function bindTurnTapFlash(id) {
 }
 bindTurnTapFlash("mobileTurnPrev");
 bindTurnTapFlash("mobileTurnNext");
+
+// ⌃⌄ を押している間は、FAB の復帰・⌃⌄ のフェードを止める。
+// 押した瞬間に指の下で UI が入れ替わらないようにする。
+let turnPressPaused = false;
+function pauseForTurnPress() {
+  if (!scrollUiActive && !scrollUiFabHidden) return;
+  turnPressPaused = true;
+  scrollUiFingerDown = true;   // プログラム側のスクロールでタイマーを再開させない
+  scrollUiFabHold = true;      // このセッション中は FAB を戻さない
+  pauseScrollUiTimers();
+  // すでに FAB が出ていても、押している間は退避する
+  if (!scrollUiFabHidden) {
+    scrollUiFabHidden = true;
+    updateFabState();
+  }
+}
+function resumeAfterTurnPress() {
+  if (!turnPressPaused) return;
+  turnPressPaused = false;
+  scrollUiFingerDown = false;
+  // FAB は戻さず、⌃⌄ を残すタイマーだけ再開する（FAB はセッション終了時に戻る）
+  if (scrollUiActive) restartScrollUiTimers(null, SCROLL_UI_LINGER_MS);
+}
+["mobileTurnPrev", "mobileTurnNext"].forEach((id) => {
+  const btn = $(id);
+  if (!btn) return;
+  btn.addEventListener("pointerdown", pauseForTurnPress, { passive: true });
+  btn.addEventListener("touchstart", pauseForTurnPress, { passive: true });
+});
+window.addEventListener("pointerup", resumeAfterTurnPress);
+window.addEventListener("pointercancel", resumeAfterTurnPress);
+window.addEventListener("touchend", resumeAfterTurnPress, { passive: true });
+window.addEventListener("touchcancel", resumeAfterTurnPress, { passive: true });
 
 // 「ツール / 閉じる」「選択肢」は動的に作られることもあるので、
 // document への委譲で拾って同じ青フラッシュを付ける。
@@ -8776,7 +9327,7 @@ if ($("mobileActionToggle")) {
   const actionToggle = $("mobileActionToggle");
   // 表示は「送信」なのに押しても送信されないバグの対策。
   //  1) 押した瞬間の役割を覚えておく（ボタンはフッターの外なので、触れた時点で
-  //     入力欄のフォーカスが外れ、actionToggleMode が「ツール」に戻ってしまう）
+  //     入力欄のフォーカスが外れ、actionToggleMode が「送信」から外れてしまう）
   //  2) 押下で preventDefault（フォーカスを手放さない＝キーボードが閉じて
   //     ボタンが指の下から動くのを防ぐ）
   //  3) 送信は pointerup で行う（click が別要素に落ちても送れる）
@@ -8822,7 +9373,6 @@ if ($("mobileActionToggle")) {
     if (Math.hypot(dx, dy) > TAP_SLOP) pressMoved = true;
   }, { passive: true });
   // 「送信」は pointerup で送る。ボタン自体が動いて click が別要素に落ちても送れるように。
-  // （ツール/閉じるは今まで通り click で開閉する）
   actionToggle.addEventListener("pointerup", () => {
     if (!actionTogglePressed) { scheduleRelease(600); return; }
     const mode = pressedMode;
@@ -8846,22 +9396,13 @@ if ($("mobileActionToggle")) {
     if (Date.now() < suppressClickUntil) return;   // pointerup で送信済み
     const mode = pressedMode || actionToggleMode;   // 押した瞬間の役割で動く
     clearPressed();
-    if (mode === "send") {
-      // 中央の送信。キーボードは閉じない（続けて打てるように blur しない）
-      send();
-      syncActionControlsVisibility();
-      return;
-    }
-    const ae = document.activeElement;                       // ★15: 入力の focus が残っていると押しても無反応になる
-    const footer = document.querySelector("footer");
-    if (ae && footer && footer.contains(ae) && typeof ae.blur === "function") ae.blur();
-    const el = $("mobileReveal");
-    // もう一度押したら閉じる（トグル）。開いたままだと「ツール」に戻れなくなるため
-    if (el && !el.classList.contains("hidden")) hideReveal();
-    else showReveal();
+    if (mode !== "send") return;
+    // 中央の送信。キーボードは閉じない（続けて打てるように blur しない）
+    send();
     syncActionControlsVisibility();
   };
 }
+if ($("revealUpload"))  $("revealUpload").onclick  = () => { hideReveal(); syncActionControlsVisibility(); $("attachInput").click(); };
 if ($("revealRpToggle")) $("revealRpToggle").onclick = () => { hideReveal(); $("rpToggle").click(); syncActionControlsVisibility(); };
 if ($("revealRag"))      $("revealRag").onclick      = () => { hideReveal(); openRag(); syncActionControlsVisibility(); };
 if ($("revealState"))    $("revealState").onclick    = () => {
@@ -8977,6 +9518,237 @@ if ($("elapsedDayInput")) $("elapsedDayInput").addEventListener("change", () => 
 if ($("modelSheetClose")) $("modelSheetClose").onclick = closeModelSheet;
 // バーの外側（画面のどこか）をタップしたら閉じる
 if ($("revealBackdrop")) $("revealBackdrop").onclick = () => { hideReveal(); syncActionControlsVisibility(); };
+/* == RP-CARD-BEGIN == */
+const RP_CARD_DEFAULT = 50;
+const RP_TIERS = {
+  "text":        { F: 0.00, C: 0.38, U: 0.95, rgb: "16, 16, 24" },
+  "user":        { F: 0.12, C: 0.88, U: 0.98, rgb: "59, 91, 219" },
+  "code":        { F: 0.20, C: 0.35, U: 0.60, rgb: "0, 0, 0" },
+  "inline":      { F: 0.20, C: 0.30, U: 0.55, rgb: "0, 0, 0" },
+  "file":        { F: 0.35, C: 1.00, U: 1.00, rgb: "44, 44, 50" },
+  "tool":        { F: 0.40, C: 0.85, U: 0.95, rgb: "30, 30, 38" },
+  "tool-alt":    { F: 0.40, C: 0.70, U: 0.95, rgb: "30, 30, 38" },
+  "input":       { F: 0.60, C: 1.00, U: 1.00, rgb: "43, 43, 51" },
+  "input-focus": { F: 0.60, C: 1.00, U: 1.00, rgb: "48, 48, 58" },
+  "chip":        { F: 0.60, C: 1.00, U: 1.00, rgb: "51, 51, 61" },
+  "attach":      { F: 0.60, C: 1.00, U: 1.00, rgb: "44, 44, 50" },
+};
+
+function clampRpCardStrength(val) {
+  if (val === null || val === undefined || (typeof val === "string" && val.trim() === "")) {
+    return RP_CARD_DEFAULT;
+  }
+  const n = Number(val);
+  if (Number.isNaN(n)) return RP_CARD_DEFAULT;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function calcRpTierAlpha(tier, t) {
+  const TC = 0.5;
+  const clampedT = Math.max(0, Math.min(1, t));
+  const alpha = clampedT <= TC
+    ? tier.F + (tier.C - tier.F) * (clampedT / TC)
+    : tier.C + (tier.U - tier.C) * ((clampedT - TC) / (1 - TC));
+  return Math.round(alpha * 1000) / 1000;
+}
+
+let rpPeekPointerId = null;
+let rpPeekStartedAt = 0;
+let rpPeekTimer = null;
+
+function rpPeekBegin() {
+  const hadTimer = Boolean(rpPeekTimer);
+  if (rpPeekTimer) {
+    clearTimeout(rpPeekTimer);
+    rpPeekTimer = null;
+  }
+  if (!rpMode) return;
+  const isMobile = typeof isMobileLayout === "function" ? isMobileLayout() : false;
+  if (!isMobile) return;
+  if (rpPeekPointerId === null) return;
+  if (!document.body) return;
+  if (!document.body.classList.contains("rp-peek") || hadTimer) {
+    rpPeekStartedAt = Date.now();
+    document.body.classList.add("rp-peek");
+  }
+}
+
+function rpPeekEnd(immediate = false) {
+  rpPeekPointerId = null;
+  if (!document.body || !document.body.classList.contains("rp-peek")) {
+    if (rpPeekTimer) {
+      clearTimeout(rpPeekTimer);
+      rpPeekTimer = null;
+    }
+    return;
+  }
+  const elapsed = Date.now() - rpPeekStartedAt;
+  if (immediate || elapsed >= 150) {
+    if (rpPeekTimer) {
+      clearTimeout(rpPeekTimer);
+      rpPeekTimer = null;
+    }
+    document.body.classList.remove("rp-peek");
+  } else if (!rpPeekTimer) {
+    const remain = Math.max(0, 150 - elapsed);
+    rpPeekTimer = setTimeout(() => {
+      rpPeekTimer = null;
+      if (document.body) document.body.classList.remove("rp-peek");
+    }, remain);
+  }
+}
+
+function applyRpCardStrength(value) {
+  const val = clampRpCardStrength(value);
+  const slider = $("rpCardStrength");
+  const valLabel = $("rpCardValue");
+  const resetBtn = $("rpCardReset");
+  const row = $("sideOpacityRow");
+
+  if (slider) {
+    if (slider.value !== String(val)) {
+      slider.value = String(val);
+    }
+    slider.setAttribute("aria-valuetext", `${val}%`);
+  }
+  if (valLabel) {
+    valLabel.textContent = `${val}%`;
+  }
+
+  if (!rpMode) {
+    if (slider) slider.disabled = true;
+    if (resetBtn) resetBtn.disabled = true;
+    if (row) row.classList.add("is-off");
+    if (rpPeekTimer) {
+      clearTimeout(rpPeekTimer);
+      rpPeekTimer = null;
+    }
+    rpPeekPointerId = null;
+    if (document.body) {
+      document.body.classList.remove("rp-peek", "rp-crisp", "rp-thin");
+      for (const key of Object.keys(RP_TIERS)) {
+        document.body.style.removeProperty(`--rp-bg-${key}`);
+      }
+      document.body.style.removeProperty("--rp-edge");
+      document.body.style.removeProperty("--rp-shadow");
+    }
+    return;
+  }
+
+  if (slider) slider.disabled = false;
+  if (resetBtn) resetBtn.disabled = false;
+  if (row) row.classList.remove("is-off");
+
+  const t = Math.max(0, Math.min(1, val / 100));
+  const TC = 0.5;
+
+  if (document.body) {
+    for (const [key, tier] of Object.entries(RP_TIERS)) {
+      const alpha = calcRpTierAlpha(tier, t);
+      document.body.style.setProperty(`--rp-bg-${key}`, `rgba(${tier.rgb}, ${alpha})`);
+    }
+
+    const k = Math.min(1, t / TC);
+    const edgeAlpha = Math.round(0.10 * k * 1000) / 1000;
+    const shadowAlpha = Math.round(0.45 * k * 1000) / 1000;
+    document.body.style.setProperty("--rp-edge", `rgba(255, 255, 255, ${edgeAlpha})`);
+    document.body.style.setProperty("--rp-shadow", `rgba(0, 0, 0, ${shadowAlpha})`);
+
+    document.body.classList.toggle("rp-crisp", t >= 0.7);
+    document.body.classList.toggle("rp-thin", t < 0.3);
+  }
+}
+
+function syncRpCardStrengthUI() {
+  if (!rpMode) {
+    applyRpCardStrength(0);
+    return;
+  }
+  const slider = $("rpCardStrength");
+  if (rpPeekPointerId !== null || (slider && typeof document !== "undefined" && document.activeElement === slider)) {
+    return;
+  }
+  const saved = getStorage("rpCardStrength", String(RP_CARD_DEFAULT));
+  const val = clampRpCardStrength(saved);
+  applyRpCardStrength(val);
+}
+
+function initRpCardStrength() {
+  if (window.__rpCardReady) return;
+  const slider = $("rpCardStrength");
+  const resetBtn = $("rpCardReset");
+  if (!slider) return;
+
+  slider.addEventListener("pointerdown", (e) => {
+    rpPeekPointerId = e.pointerId;
+  });
+  slider.addEventListener("input", () => {
+    if (rpPeekPointerId !== null) {
+      rpPeekBegin();
+    }
+    const val = clampRpCardStrength(slider.value);
+    applyRpCardStrength(val);
+  });
+  slider.addEventListener("change", () => {
+    const val = clampRpCardStrength(slider.value);
+    applyRpCardStrength(val);
+    setStorage("rpCardStrength", String(val));
+  });
+
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      slider.value = String(RP_CARD_DEFAULT);
+      applyRpCardStrength(RP_CARD_DEFAULT);
+      setStorage("rpCardStrength", String(RP_CARD_DEFAULT));
+    });
+  }
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("pointerup", (e) => {
+      if (rpPeekPointerId !== null && e.pointerId === rpPeekPointerId) {
+        rpPeekEnd();
+      }
+    }, true);
+    window.addEventListener("pointercancel", (e) => {
+      if (rpPeekPointerId !== null && e.pointerId === rpPeekPointerId) {
+        rpPeekEnd();
+      }
+    }, true);
+    window.addEventListener("blur", () => {
+      rpPeekEnd(true);
+    });
+  }
+
+  if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        rpPeekEnd(true);
+      }
+    });
+  }
+
+  window.__rpCardReady = true;
+  syncRpCardStrengthUI();
+}
+
+window.__rpCard = {
+  RP_CARD_DEFAULT,
+  RP_TIERS,
+  clampRpCardStrength,
+  calcRpTierAlpha,
+  applyRpCardStrength,
+  syncRpCardStrengthUI,
+  initRpCardStrength,
+  rpPeekBegin,
+  rpPeekEnd,
+  getPeekPointerId: () => rpPeekPointerId,
+  getPeekStartedAt: () => rpPeekStartedAt,
+  getPeekTimer: () => rpPeekTimer,
+};
+
+initRpCardStrength();
+/* == RP-CARD-END == */
+
 if ($("sideRpToggle")) {
   $("sideRpToggle").onclick = () => $("rpToggle").click();
 }
@@ -9618,6 +10390,10 @@ function initDrawerSwipe(o) {
     if (el.classList.contains('hidden')) return false;
     if (el.getAttribute('aria-hidden') === 'true') return false;
     if (el.hasAttribute('inert')) return false;
+    // 祖先の display:none は自分の computed display に反映されない（子は flex のまま）。
+    // 常設モーダルの内側（.modal-content[role="dialog"] 等）が「表示中」と誤判定され、
+    // 全タッチが IGNORED になるのを防ぐため、実際にレイアウトされているかを見る。
+    if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) return false;
     const style = window.getComputedStyle(el);
     if (!style) return false;
     return !(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0');
@@ -10144,6 +10920,7 @@ if (typeof window !== 'undefined') {
 
   pollLoopFn = pollLoop;
 
+  initHistoryAutoload();
   pollLoop();
   setInterval(pollProgress, 800);
   setInterval(refreshSessions, 3000);

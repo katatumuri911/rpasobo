@@ -460,15 +460,88 @@ def _model_data(port, tok, fresh=False):
     return rows, default
 
 
+_quota_cache = (0.0, None)  # (読んだ時刻, グループ一覧)。30秒は覚えておく
+
+
+def _base_label(label):
+    """「Gemini 3.8 Flash (High)」→「Gemini 3.8 Flash」。利用枠のグループはこの名前で並んでいる"""
+    return re.sub(r"\s*[\(（][^\)）]*[\)）]\s*$", "", label or "").strip()
+
+
+def _quota_groups(port, tok, fresh=False):
+    """利用枠のグループ一覧 [{name, models, weekly}]。読めなければ None
+
+    RetrieveUserQuotaSummary は「Gemini Models」「Claude and GPT models」のようなグループごとに、
+    週（weekly）と5時間（5h）の残りを返す。アプリで使うのは週だけ。
+    """
+    global _quota_cache
+    t, groups = _quota_cache
+    if not fresh and groups is not None and time.time() - t < 30:
+        return groups
+    code, d = _call(port, tok, "RetrieveUserQuotaSummary", {})
+    if code != 200 or not isinstance(d, dict):
+        return groups
+    out = []
+    for g in ((d.get("response") or {}).get("groups") or []):
+        if not isinstance(g, dict):
+            continue
+        buckets = {b.get("window"): b for b in g.get("buckets") or [] if isinstance(b, dict)}
+        wk = buckets.get("weekly") or {}
+        m = re.search(r"Models within this group:\s*(.+)", g.get("description") or "")
+        out.append({
+            "name": g.get("displayName") or "",
+            "models": [x.strip() for x in m.group(1).split(",")] if m else [],
+            "weekly": {"left": wk.get("remainingFraction", 0.0 if wk else None),
+                       "reset": wk.get("resetTime") or ""} if wk else None,
+        })
+    if out:
+        _quota_cache = (time.time(), out)
+        return out
+    return groups
+
+
+def _group_for(label, groups):
+    """モデルの表示名から、そのモデルが属する利用枠のグループを探す"""
+    base = _base_label(label).lower()
+    if not base:
+        return None
+    for g in groups:
+        if any((m or "").lower() == base for m in g.get("models") or []):
+            return g
+    for g in groups:
+        for m in g.get("models") or []:
+            ml = (m or "").lower()
+            if ml and (base.startswith(ml) or ml.startswith(base)):
+                return g
+    head = base.split(" ")[0]
+    for g in groups:
+        if head and head in (g.get("name") or "").lower():
+            return g
+    return groups[0] if len(groups) == 1 else None
+
+
 def models():
-    """Antigravity で選べるモデル。({"models": [...], "default": キー}, None) か (None, 理由)"""
+    """Antigravity で選べるモデル。({"models": [...], "default": キー}, None) か (None, 理由)
+
+    各モデルには、利用枠のグループの週の残りを weekly={left, reset} として付ける（読めれば）。
+    left/reset は今までどおり5時間の枠（送信前の「使い切っている」の注意に使う）。
+    """
     hub = hub_server()
     if not hub:
         return None, "Antigravity の言語サーバーが見つからない（Antigravity が起動しているか確認）"
     rows, default = _model_data(*hub, fresh=True)
     if rows is None:
         return None, "モデルの一覧を読めなかった"
-    return {"models": rows, "default": default}, None
+    groups = _quota_groups(*hub) or []
+    for r in rows:
+        g = _group_for(r.get("label"), groups)
+        if g:
+            r["quotaGroup"] = g.get("name") or ""
+            if g.get("weekly"):
+                r["weekly"] = g["weekly"]
+    return {"models": rows, "default": default,
+            "quota": [{"name": g.get("name") or "", "models": g.get("models") or [], "weekly": g.get("weekly")}
+                      for g in groups]}, None
 
 
 def model_label(port, tok, key):

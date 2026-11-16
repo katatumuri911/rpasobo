@@ -154,17 +154,14 @@ t("-5 -> 1", sandbox.clampDay(-5) === 1);
 t("999999 -> 99999", sandbox.clampDay(999999) === 99999);
 t("3.9 -> 3", sandbox.clampDay(3.9) === 3);
 
-console.log("[2] ツール（旧「操作を表示」） / reveal はオーバーレイ中に出さない");
+console.log("[2] 中央ボタンは入力中だけ送信（ツールは + のメニュー）");
 sandbox.syncActionControlsVisibility();
-t("モバイル+RP+オーバーレイ無し -> トグル表示", !els.mobileActionToggle.classList.contains("hidden"));
+t("アイドル時は中央ボタンを出さない", els.mobileActionToggle.classList.contains("hidden"));
 t("reveal は隠れたまま", els.mobileReveal.classList.contains("hidden"));
 els.mobileReveal.classList.remove("hidden");
 sandbox.syncActionControlsVisibility();
-t("reveal 表示中もトグルは押せる（隠さない）", !els.mobileActionToggle.classList.contains("hidden"));
-t("reveal 表示中はトグルが「✕ 閉じる」になる", els.mobileActionToggle.textContent === "✕ 閉じる");
+t("reveal を開いても中央ボタンは出さない", els.mobileActionToggle.classList.contains("hidden"));
 els.mobileReveal.classList.add("hidden");
-sandbox.syncActionControlsVisibility();
-t("reveal を閉じたら「ツール」に戻る", els.mobileActionToggle.textContent === "ツール");
 body.classList.add("side-open");
 sandbox.syncActionControlsVisibility();
 t("ドロワー中は隠す", els.mobileActionToggle.classList.contains("hidden"));
@@ -183,7 +180,7 @@ t("モデルシート中は隠す", els.mobileActionToggle.classList.contains("h
 els.modelSheet.classList.add("hidden");
 sandbox.rpMode = false;
 sandbox.syncActionControlsVisibility();
-t("RPオフでもトグルは表示（🖼でRPを切っても消えない）", !els.mobileActionToggle.classList.contains("hidden"));
+t("RPオフでもアイドル時は非表示", els.mobileActionToggle.classList.contains("hidden"));
 t("RPオフで 🖼 の .on が外れる", !els.revealRpToggle.classList.contains("on"));
 sandbox.rpMode = true;
 sandbox.syncActionControlsVisibility();
@@ -192,7 +189,7 @@ t("RPオンで 🖼 が .on になる", els.revealRpToggle.classList.contains("o
 els.mobileReveal.classList.add("hidden");
 documentStub.activeElement = els.attachList;   // footer の中にフォーカスがある状態
 sandbox.syncActionControlsVisibility();
-t("入力中でもトグルは隠さない", !els.mobileActionToggle.classList.contains("hidden"));
+t("入力中でも空なら中央ボタンは出さない", els.mobileActionToggle.classList.contains("hidden"));
 els.mobileReveal.classList.remove("hidden");
 sandbox.syncActionControlsVisibility();
 t("入力中はメニューを畳む", els.mobileReveal.classList.contains("hidden"));
@@ -200,63 +197,56 @@ documentStub.activeElement = null;
 els.mobileReveal.classList.add("hidden");
 sandbox.syncActionControlsVisibility();
 
-console.log("[2b] 中央の「ツール」は入力中だけ青い「送信」に入れ替わる（左手でも届く送信）");
+console.log("[2b] 中央の「送信」は入力中だけ出る（左手でも届く送信）");
 els.messageInput.value = "";
 sandbox.attaching = [];
 documentStub.activeElement = els.messageInput;   // 入力中（フォーカスあり）
 sandbox.syncActionControlsVisibility();
-t("入力中でも空ならツール", els.mobileActionToggle.textContent === "ツール");
+t("入力中でも空なら非表示", els.mobileActionToggle.classList.contains("hidden"));
 t("空なら send-mode は付かない", !els.mobileActionToggle.classList.contains("send-mode"));
 els.messageInput.value = "こんにちは";
 sandbox.syncActionControlsVisibility();
 t("入力中に文字あり -> 送信", els.mobileActionToggle.textContent === "送信");
+t("入力中に文字あり -> 表示", !els.mobileActionToggle.classList.contains("hidden"));
 t("入力中に文字あり -> send-mode（青くなる）", els.mobileActionToggle.classList.contains("send-mode"));
 sandbox.sending = true;
 sandbox.syncActionControlsVisibility();
-t("送信中は押しても無反応の送信を出さない", els.mobileActionToggle.textContent === "ツール");
+t("送信中は押しても無反応の送信を出さない", els.mobileActionToggle.classList.contains("hidden"));
 sandbox.sending = false;
 sandbox.hasWaitingInput = () => true;
 sandbox.syncActionControlsVisibility();
-t("応答待ち中もツール", els.mobileActionToggle.textContent === "ツール");
+t("応答待ち中も非表示", els.mobileActionToggle.classList.contains("hidden"));
 sandbox.hasWaitingInput = () => false;
 els.messageInput.value = "";
 sandbox.attaching = [{ name: "a.png", file: {} }];
 sandbox.syncActionControlsVisibility();
 t("添付だけでも送信", els.mobileActionToggle.textContent === "送信");
-// 入力を止めれば（キーボードを閉じれば）ツールに戻る＝レアケースのツールはこれで開ける
+// 入力を止めたら非表示に戻る（ツールは + から開く）
 documentStub.activeElement = null;
 els.messageInput.value = "こんにちは";
 sandbox.attaching = [];
 sandbox.syncActionControlsVisibility();
-t("入力を止めたらツールに戻る（文字が残っていても）", els.mobileActionToggle.textContent === "ツール");
+t("入力を止めたら非表示に戻る（文字が残っていても）", els.mobileActionToggle.classList.contains("hidden"));
 t("入力を止めたら send-mode も外れる", !els.mobileActionToggle.classList.contains("send-mode"));
 documentStub.activeElement = null;
 sandbox.attaching = [];
 els.messageInput.value = "こんにちは";
 els.mobileReveal.classList.remove("hidden");
 sandbox.syncActionControlsVisibility();
-t("メニューを開いている間は「✕ 閉じる」が優先", els.mobileActionToggle.textContent === "✕ 閉じる");
+t("メニューを開いている間も中央ボタンは出さない", els.mobileActionToggle.classList.contains("hidden"));
 els.mobileReveal.classList.add("hidden");
 els.messageInput.value = "";
 sandbox.syncActionControlsVisibility();
 
-console.log("[3] footBar は「今見えている状態」から配置を導出する");
+console.log("[3] footBar は常に footer（ドロワー・シートへの移送は廃止）");
 mobileOn = false;
 sandbox.syncFootBarPlacement();
 t("デスクトップ: footer へ", els.footBar.parentElement === footer);
 mobileOn = true;
+els.footBar.parentElement = null;
 sandbox.syncFootBarPlacement();
-t("モバイル: ドロワー下段へ", els.footBar.parentElement === els.sideModelContainer);
-els.modelSheet.classList.remove("hidden");
-sandbox.syncFootBarPlacement();
-t("シート開: シート内へ", els.footBar.parentElement === els.modelSheetSlot);
-els.modelSheet.classList.add("hidden");
-sandbox.syncFootBarPlacement();
-t("シート閉（背景タップ相当）: ドロワー下段へ戻る", els.footBar.parentElement === els.sideModelContainer);
-mobileOn = false;
-sandbox.syncFootBarPlacement();
-t("デスクトップ復帰: footer へ", els.footBar.parentElement === footer);
-t("attachList より前に戻す", footer.children.indexOf(els.footBar) < footer.children.indexOf(els.attachList));
+t("モバイルでも footer へ（ドロワー下段は廃止）", els.footBar.parentElement === footer);
+t("attachList より前に置く", footer.children.indexOf(els.footBar) < footer.children.indexOf(els.attachList));
 
 mobileOn = true;
 console.log("[4] 🤖 はチャンネル設定があるとき出す（AG / Google）");
@@ -337,12 +327,12 @@ t("前提: 入力中は「送信」", els.mobileActionToggle.textContent === "�
 const prevented = els.mobileActionToggle.fire("pointerdown", { button: 0, clientX: 100, clientY: 100 });
 t("送信の押下では入力欄のフォーカスを手放さない（preventDefault）", prevented === true);
 documentStub.activeElement = els.mobileActionToggle;   // もし blur してもボタンは footer の外
-t("押している間は「送信」のまま（ツールに戻らない）", els.mobileActionToggle.textContent === "送信");
+t("押している間は「送信」のまま（非表示に戻らない）", els.mobileActionToggle.textContent === "送信");
 els.mobileActionToggle.fire("pointerup", { clientX: 100, clientY: 100 });
 t("指を離すと send() が呼ばれる（click が別要素に落ちても送れる）", sendCount === 1);
 els.mobileActionToggle.onclick();   // click が来ても
 t("click が重なっても二重送信しない", sendCount === 1);
-t("ツールのメニューは開かない", els.mobileReveal.classList.contains("hidden"));
+t("送信後にメニューは開かない", els.mobileReveal.classList.contains("hidden"));
 
 // 指を大きく動かした（スクロール）ときは送らない
 els.messageInput.value = "こんにちは";
@@ -359,14 +349,14 @@ fakeNow += 5000;   // スクロール判定の抑止時間を過ぎたあとの�
 els.messageInput.value = "";
 documentStub.activeElement = null;
 sandbox.syncActionControlsVisibility();
-t("前提: 入力していないときは「ツール」", els.mobileActionToggle.textContent === "ツール");
+t("前提: 入力していないときは非表示", els.mobileActionToggle.classList.contains("hidden"));
 els.mobileActionToggle.fire("pointerdown", { button: 0 });
 els.mobileActionToggle.fire("pointerup");
 els.mobileActionToggle.onclick();
-t("ツールではメニューが開く", !els.mobileReveal.classList.contains("hidden"));
-t("ツールでは send() を呼ばない", sendCount === 1);
+t("アイドル時はメニューを開かない", els.mobileReveal.classList.contains("hidden"));
+t("アイドル時は send() を呼ばない", sendCount === 1);
 
-console.log("[8] サイドドロワー スワイプ開閉（T1〜T24）");
+console.log("[8] サイドドロワー スワイプ開閉（T1〜T26）");
 
 /* --- 時計（I-7: 各テスト冒頭でリセット、テスト内は単調増加） --- */
 let swipeClock = 0;
@@ -396,6 +386,7 @@ function createSwipeStubEnv() {
       this._classes = new Set();
       this._listeners = {};
       this._rect = { width: 0, height: 0, left: 0, top: 0 };
+      this._rects = 1;                 // 実ブラウザの getClientRects() の代わり（0 なら未レイアウト）
       this._scrollWidth = 0;
       this._clientWidth = 0;
       this.classList = {
@@ -413,6 +404,7 @@ function createSwipeStubEnv() {
     get scrollWidth() { return this._scrollWidth; }
     get clientWidth() { return this._clientWidth; }
     getBoundingClientRect() { return this._rect; }
+    getClientRects() { return this._rects === 0 ? [] : [{ width: 100, height: 100, left: 0, top: 0 }]; }
     appendChild(c) { c.parentElement = this; this.children.push(c); return c; }
     contains(n) { return this === n || this.children.some((c) => c.contains(n)); }
     setAttribute(k, v) { this.attrs[k] = String(v); }
@@ -525,6 +517,7 @@ function createSwipeStubEnv() {
     querySelectorAll(sel) {
       if (sel.includes('.modal') && !modal.classList.contains('hidden')) return [modal];
       if (sel.includes('#settingsPanel') && !settingsPanel.classList.contains('hidden')) return [settingsPanel];
+      if (sel.includes('[role="dialog"]') || sel.includes('[aria-modal="true"]')) return dialogStubs;
       return [];
     }
   };
@@ -556,6 +549,20 @@ function createSwipeStubEnv() {
   modal.classList.add('modal', 'hidden');
   const settingsPanel = new StubEl('settingsPanel', 'section', doc);
   settingsPanel.classList.add('hidden');
+
+  // 常設だが祖先 .modal.hidden の中にいて実際には描画されないダイアログ（実 DOM と同じ形）。
+  // 自分の computed display は block のままなので、矩形の有無で判定しないと誤検知する。
+  let dialogStubs = [];
+  const hiddenAncestorDialog = new StubEl('fav-model-sheet-content', 'div', doc);
+  hiddenAncestorDialog.classList.add('modal-content');
+  hiddenAncestorDialog.setAttribute('role', 'dialog');
+  hiddenAncestorDialog.setAttribute('aria-modal', 'true');
+  hiddenAncestorDialog._rects = 0;
+  const renderedDialog = new StubEl('rendered-dialog', 'div', doc);
+  renderedDialog.classList.add('modal-content');
+  renderedDialog.setAttribute('role', 'dialog');
+  renderedDialog.setAttribute('aria-modal', 'true');
+  renderedDialog._rects = 1;
 
   app.appendChild(toggle);
   app.appendChild(composer);
@@ -622,6 +629,8 @@ function createSwipeStubEnv() {
     sb, doc, win, hooks: win.__appTestHooks, winListeners, docListeners,
     drawer, overlay, toggle, main: app,
     composer, promptToolbar, codeBlock, hscrollInner, noSwipe, modal, closeInside,
+    hiddenAncestorDialog, renderedDialog,
+    setDialogs: (list) => { dialogStubs = list || []; },
     setMobileViewport: (v) => { mobileViewportMatch = v; },
     setSelection: (s) => { selectionStub = s; }
   };
@@ -1275,6 +1284,36 @@ function teardown(fx) {
     fx.doc.body.classList.contains('side-open') &&
     fx.state.calls === prevCalls + 1;
   t("T24: settle中のタップ切替（P-19）", cond);
+  teardown(fx);
+}
+
+// --- T25: 祖先 display:none の常設ダイアログは「モーダル表示中」と誤判定しない ---
+// 実機不具合の回帰テスト：.modal-content[role="dialog"][aria-modal="true"] が
+// 非表示の .modal.hidden の中に常設されているため、全タッチが IGNORED になっていた。
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setDialogs([fx.hiddenAncestorDialog]);
+  swipeClock = 100; dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  const started = fx.controller.getState() === 'PENDING';
+  swipeClock = 115; dispatchTouch(fx.main, 'touchmove', { x: 30, y: 200 });
+  swipeClock = 140; dispatchTouch(fx.main, 'touchmove', { x: 80, y: 200 });
+  swipeClock = 145; dispatchTouch(fx.main, 'touchend', { x: 80, y: 200 });
+  const cond = started && fx.state.open === true;
+  t("T25: 非表示祖先の常設ダイアログを無視", cond);
+  teardown(fx);
+}
+
+// --- T26: 実際に描画されているダイアログは従来どおりスワイプをブロック ---
+{
+  resetClock();
+  const fx = buildFixture();
+  fx.setDialogs([fx.renderedDialog]);
+  swipeClock = 0;  dispatchTouch(fx.main, 'touchstart', { x: 15, y: 200 });
+  swipeClock = 20; dispatchTouch(fx.main, 'touchmove', { x: 200, y: 200 });
+  const st = fx.controller.getState();
+  const cond = fx.state.open === false && (st === 'IGNORED' || st === 'IDLE');
+  t("T26: 表示中ダイアログはブロック", cond);
   teardown(fx);
 }
 

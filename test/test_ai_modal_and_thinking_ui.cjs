@@ -29,9 +29,10 @@ assert("#aiToolModal exists and is unique", countId("aiToolModal") === 1);
 assert("#openAiToolBtn exists in settingsPanel", countId("openAiToolBtn") === 1);
 assert("#aiSummaryRow exists and is unique", countId("aiSummaryRow") === 1);
 assert("#aiSummaryText exists and is unique", countId("aiSummaryText") === 1);
-assert("#sideAiToolBtn exists in sidebar", countId("sideAiToolBtn") === 1);
-assert("#sideAiSummaryRow exists in sidebar", countId("sideAiSummaryRow") === 1);
-assert("#sideAiSummaryText exists in sidebar", countId("sideAiSummaryText") === 1);
+assert("#sideAiSummaryRow is removed from sidebar", countId("sideAiSummaryRow") === 0);
+assert("#sideAiSummaryText is removed from sidebar", countId("sideAiSummaryText") === 0);
+assert("#sideModelContainer is removed from sidebar", countId("sideModelContainer") === 0);
+assert("#agQuotaBadge exists in composer", countId("agQuotaBadge") === 1);
 assert("#footThinkingSection exists", countId("footThinkingSection") === 1);
 assert("#footThinkingBar exists", countId("footThinkingBar") === 1);
 assert("#footChoicesThinkingSelect exists", countId("footChoicesThinkingSelect") === 1);
@@ -191,7 +192,7 @@ function getOrCreate(id) {
 
 // Populate elements
 const ids = [
-  "aiSummaryText", "sideAiSummaryText", "footThinkingSection", "footThinkingEff",
+  "aiSummaryText", "footThinkingSection", "footThinkingEff",
   "footChoicesThinkingSelect", "googleCardsSection", "googleThinkingPills",
   "googleThinkingBadge", "googleThinkingGuide", "choicesIdeCard",
   "choicesThinkingPills", "choicesThinkingBadge", "choicesThinkingGuide",
@@ -243,14 +244,7 @@ assert("aiSummaryText is rendered for Google",
   elements.aiSummaryText.textContent.includes("💨最小")
 );
 
-assert("sideAiSummaryText is rendered for Sidebar",
-  elements.sideAiSummaryText.textContent.includes("AI Studio: gemini-3.8-flash")
-);
-
 T.render.call(T, { ai_provider: "antigravity" });
-assert("sideAiSummaryText is rendered as Antigravity for AG",
-  elements.sideAiSummaryText.textContent === "Antigravity"
-);
 T.render.call(T, sandbox.state.setting);
 
 assert("footThinkingBar segment 'minimal' is active and marked as rounded (3.8-flash)",

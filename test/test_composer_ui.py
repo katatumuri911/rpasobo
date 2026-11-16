@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -89,6 +90,73 @@ class TestComposerUI(unittest.TestCase):
         """index.html で style.css と app.js にバージョンクエリパラメータが付与されていること"""
         self.assertTrue(re.search(r'href="style\.css\?v=\d+"', self.index_html), "style.css のバージョンクエリがありません")
         self.assertTrue(re.search(r'src="app\.js\?v=\d+"', self.index_html), "app.js のバージョンクエリがありません")
+
+    def test_sidebar_model_card_removed_and_quota_badge_in_composer(self):
+        """サイドメニューのモデルカードは廃止し、残量は入力欄の #agQuotaBadge に出す"""
+        self.assertNotIn('id="sideAiSummaryRow"', self.index_html)
+        self.assertNotIn('id="sideModelContainer"', self.index_html)
+        self.assertIn('id="agQuotaBadge"', self.index_html)
+        foot_input = re.search(r'<div class="foot-input">[\s\S]*?</div>', self.index_html)
+        self.assertIsNotNone(foot_input)
+        self.assertIn('id="agQuotaBadge"', foot_input.group(0), "残量バッジが入力欄の外にあります")
+        quota_css = re.search(r"\.ag-quota\s*\{[^}]*\}", self.style_css)
+        self.assertIsNotNone(quota_css)
+        self.assertIn("grid-area: quota", quota_css.group(0))
+        grid = re.search(r"\.foot-input\s*\{[^}]*\}", self.style_css)
+        self.assertIn("quota", grid.group(0))
+
+    def test_ag_quota_badge_uses_weekly_quota_only(self):
+        """#agQuotaBadge は週の残り（weekly）だけを出し、5時間の枠しか無いときは代用、AG 以外は隠す"""
+        m = re.search(r"function modelResetText\(r\) \{[\s\S]*?\n\}", self.app_js)
+        self.assertIsNotNone(m)
+        js_code = """
+        const el = { textContent: "", title: "", _c: new Set(["hidden"]),
+          classList: { add(c) { el._c.add(c); }, remove(c) { el._c.delete(c); },
+            toggle(c, v) { v ? el._c.add(c) : el._c.delete(c); }, contains(c) { return el._c.has(c); } },
+          setAttribute() {}, removeAttribute() {} };
+        const choice = { main: "M318" };
+        const sb = {
+          console, Date,
+          state: { setting: { ai_provider: "antigravity" } },
+          ideModels: { default: "M318", models: [
+            { model: "M318", label: "Gemini 3.8 Flash (High)", left: 0.99,
+              weekly: { left: 0.45, reset: "2026-11-21T01:35:23Z" } },
+            { model: "M35", label: "Claude Sonnet 4.6 (Thinking)", left: 1,
+              weekly: { left: 1, reset: "2026-11-17T00:40:13Z" } } ] },
+          currentModelConfig: () => ({ provider: "antigravity", main: choice.main }),
+          $: (id) => (id === "agQuotaBadge" ? el : null),
+        };
+        Object.assign(globalThis, sb);
+        __FUNCS__
+        updateAgQuotaBadge();
+        if (el.textContent !== "45%") throw new Error("週の残りを出していない: " + el.textContent);
+        if (!el.title.includes("今週")) throw new Error("週だと分からない: " + el.title);
+        if (el._c.has("hidden")) throw new Error("AG なのに隠れている");
+        choice.main = "M35";
+        updateAgQuotaBadge();
+        if (el.textContent !== "100%") throw new Error("グループの切替が効いていない: " + el.textContent);
+        // 週が無い古い応答では 5 時間の枠で代用する
+        sb.ideModels.models[0].weekly = null;
+        choice.main = "M318";
+        updateAgQuotaBadge();
+        if (el.textContent !== "99%") throw new Error("5時間の枠で代用していない: " + el.textContent);
+        sb.state.setting.ai_provider = "google";
+        updateAgQuotaBadge();
+        if (!el._c.has("hidden") || el.textContent !== "") throw new Error("AG 以外で隠れていない");
+        console.log("OK");
+        """.replace("__FUNCS__", m.group(0) + "\n" + re.search(r"function modelQuota\(r\) \{[\s\S]*?\n\}", self.app_js).group(0)
+                 + "\n" + re.search(r"function modelQuotaText\(r\) \{[\s\S]*?\n\}", self.app_js).group(0)
+                 + "\n" + re.search(r"function updateAgQuotaBadge\(\) \{[\s\S]*?\n\}", self.app_js).group(0))
+        # Windows の node -e は引数を cp932 で解釈するので、UTF-8 の一時ファイルから実行する
+        with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as f:
+            f.write(js_code)
+            path = f.name
+        try:
+            res = subprocess.run(["node", path], capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(0, res.returncode, res.stderr)
+        finally:
+            os.unlink(path)
+        self.assertIn("OK", res.stdout)
 
 
 if __name__ == "__main__":
