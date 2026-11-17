@@ -1,7 +1,7 @@
 # AIチャンネル作成ウィザード 完全版実装プラン（コード付き）
 
 - 対象: `C:/Users/nukon/RPasobou`
-- 版: 1.3（年齢補正・校正プリセット反映）
+- 版: 2.0（wizard_tags.json の defaults 移行）
 - 実装範囲: Phase 0 + Phase 1
 - この文書は、そのまま実装に移せるように、目的・最終ゴール・データモデル・API・サーバーコード・フロントコード・CSS・HTML/JS差分・テスト・受け入れ基準までを含む。
 
@@ -9,7 +9,7 @@
 
 ## 1. 目的
 
-「＋（新規チャンネル）」を押したとき、**AIとの短い質疑応答だけで、キャラクター・世界観・関係性・第一声まで揃った新規チャンネルを作れるようにする**。
+「＋（新規チャンネル）」を押したとき、**AIとの短い質疑応答だけで、キャラクター・世界観・関係性・第一声まで揃った新規チャンネルを作れるようにする**。開幕画像は、チャンネル完成を待たせず、最初のAI発言に非同期で生成する。
 
 現状の「空のチャンネルを作ってから、設定画面で全部入力する」導線は残しつつ、以下の課題を解決する。
 
@@ -37,13 +37,14 @@
 | G4 | 関係性・世界観・雰囲気・特殊要素を選べる | タグの上限を守り、NGと衝突したらNGを優先する |
 | G5 | AIが最大6問・2ラウンド質問する | 1ラウンド最大3問。すべてスキップ／おまかせ可能 |
 | G6 | プレビューで確認・編集できる | タイトル、あらすじ、キャラ名、年齢、口調、開始状況、第一声、あなたの名前、プロジェクトを編集できる |
-| G7 | ワンタップで作成できる | 作成後に新チャンネルへ切り替わり、第一声が入っている |
+| G7 | ワンタップで作成できる | 作成後に新チャンネルへ切り替わり、第一声が入っている。開幕画像は非同期で生成中/完成 |
 | G8 | 二重作成しない | 連打・再送・リロードでも同じ `sid` を返す |
 | G9 | AIなしでも必ず作れる | AI未設定・失敗・タイムアウト時はテンプレートcomposeで作成できる |
 | G10 | リロードで続きから再開できる | `draft.step` と `status` から画面を復元する |
 | G11 | 既存導線を壊さない | 「空のチャンネル」と既存 `/api/session/new` のテストが通る |
 | G12 | モバイルで使える | 375px幅で全画面表示、FABと重ならない、Esc/戻るで閉じられる |
 | G13 | 最初に引き継ぎ元を確認できる | 「＋」直後に、現在のチャンネル名と「このチャンネルから引き継ぐ／引き継がない（初期設定）」を表示する。引き継がない場合は初期設定で作れる |
+| G14 | 開幕画像を非同期生成できる | 作成直後に最初のAI発言へ画像が `queued` で付き、チャンネルはすぐ使える。画像OFFなら生成しない。失敗・タイムアウトでもチャンネルは壊れない |
 
 ### 2.2 品質ゴール
 
@@ -53,6 +54,7 @@
 - チャンネル作成AIと本文AIを分離する。本文AIの設定は変更しない。
 - 最初に「引き継ぎ元」を確認する。引き継ぐ場合のみ、画像設定・参照ファイル・プロジェクト・ユーザー名・本文AI設定をコピーし、ストーリー・進捗・IDE会話は必ずリセットする。
 - プロンプトインジェクション対策として、AI出力はプレーンテキスト化し、許可キー以外は設定に入れない。
+- 開幕画像はチャンネル作成をブロックしない。画像OFFなら生成せず、失敗・タイムアウトでも第一声とチャンネルは使える。
 
 ### 2.3 非ゴール（今回やらない）
 
@@ -60,6 +62,7 @@
 - 既存チャンネルの一括移行。
 - 版権キャラのデータベース化。
 - 複数キャラクターの同時作成（Phase 1は相手1人＋あなた）。
+- 開幕画像の同期的な完成保証（画像の完成を待ってから「作成完了」にはしない）。
 - 別チャンネルを一覧から選ぶUI（Phase 1は「現在のチャンネル／引き継がない」の2択。Phase 2で追加）。
 - 音声、共有、クラウド同期。
 - 自由チャット形式の長いインタビュー。
@@ -88,6 +91,7 @@
 17. 引き継ぎ元を変えられるのは、スロット・質問・composeがまだ無い最初の段階だけ。入力後は `base_locked` で拒否する。
 18. Phase 1では別チャンネル一覧を出さない。別のチャンネルから引き継ぎたい場合は、そのチャンネルを開いてから「＋」を押す。Phase 2で選択UIを追加する。
 19. 「校正プリセット」は既存の `char_presets()`（`data/char-presets.json`）を使う。キャラ名または選択IDが一致したら、プリセットのタグをAIタグより優先し、`locked=true` / `source="preset"` にする。年齢はプリセットに無いため、年齢ルール（18歳未満は「なし」）で別途扱う。
+20. 開幕画像は案A（非同期）。`create_session()` の後、最初のassistantメッセージに `image.status="queued"` を付けて既存の `queued_images` / `image_event` / `image_worker` に流す。ウィザードは画像の完成を待たない。`image_mode="off"` なら積まない。
 
 ### 3.1 校正プリセット（既存の `char_presets`）
 
@@ -96,6 +100,7 @@
 - 保存内容: `{id, name, tags}`。`tags` は「そのキャラの固定画像タグ」（例: `1girl, black hair, long hair, red eyes`）。
 - 用途: AIが生成したキャラの見た目タグを、プリセットのタグで**上書きして揃える**。同じキャラを別チャンネルで作っても見た目がブレない。
 - 優先順位: プリセットがある → プリセットのタグ（`locked=true`, `source="preset"`）。無い → AIのタグ。
+- AIタグと違い、プリセットのタグは服装・品質タグも削らない（ユーザーが保存した見た目をそのまま使う）。
 - 年齢: プリセットは年齢を持たない。年齢は2.2のルール（18歳未満は「なし」）で別に処理する。
 - 既存UI: 相手画面の「キャラプリセット（任意）」で選択できる。名前が一致する場合は自動で使う。
 
@@ -110,13 +115,14 @@
 | 下書き（draft） | ウィザードの途中状態。`data/wizards/wiz_*.json` |
 | 引き継ぎ元（base） | 新チャンネルに設定をコピーする元のチャンネル。`base_sid` / `base_setting` / `inherit_base` |
 | スロット | キャラ・世界観・関係性などの設定項目。`source` を持つ |
-| source | `locked > user > answer > derived > auto > unset` の優先度 |
+| source | `locked > user > answer > auto > derived > unset` の優先度 |
 | derived | タグから導出された値 |
 | auto | ユーザーが「おまかせ」を選んだ状態 |
 | compose | スロットとタグから最終設定を生成する処理 |
 | ジョブ | AI質問・composeを非同期実行する単位。`wj_*` |
 | プリセット | `char_presets()` が返す固定キャラ。`locked` になる |
 | 校正プリセット | 既存の `char_presets()`。キャラ名＋固定画像タグ。AIタグより優先して見た目を揃える |
+| 開幕画像 | 新チャンネルの最初のassistantメッセージに付ける画像。作成後に非同期生成する |
 | ビルダー会話 | Antigravityのウィザード専用会話。`data/wizard_ide/` |
 
 ---
@@ -138,7 +144,9 @@
     ├─ composeジョブ ──> google_ai.generate / ide_poke
     │                     └─ 失敗時は wizard_template_compose()
     └─ create ──> create_session(final_setting)
-                    └─ data/sessions/<sid>.json
+                    ├─ 第一声を messages に保存
+                    ├─ 開幕画像を image.status="queued" で最初のassistantに付与
+                    └─ queued_images / image_event ──> image_worker ──> ComfyUI
 
 [Antigravity]
   data/wizard_ide/ の専用会話（単一）
@@ -153,6 +161,7 @@
 - **テンプレートcompose fallback**。AI失敗でも必ず作成。
 - **冪等作成**。`created_sid` と `rev` で二重作成を防ぐ。
 - **楽観ロック**。`rev` 不一致は409で返し、クライアントが再読み込みする。
+- **開幕画像は非同期**。`create_session` 後に最初のAI発言へ `image.status="queued"` を付け、既存の `queued_images` / `image_event` / `image_worker` に流す。`image_mode="off"` なら積まない。画像の失敗・タイムアウトでチャンネル作成は失敗させない。
 
 ### 5.2 データ配置
 
@@ -214,6 +223,8 @@ data/
  ↓
 [完成]
   新チャンネルへ切り替え。第一声が入っている。
+  開幕画像は裏で生成中（画像OFFなら生成しない）。
+  画像の完成は待たない。失敗してもチャンネルは使える。
 ```
 
 ---
@@ -252,6 +263,7 @@ data/
   "selected_ng": ["ng_minor", "ng_ntr"],
   "custom_ng": ["流血"],
   "partner_preset_id": "",
+  "partner_preset_off": false,
   "questions": [],
   "asked_slots": ["relationship"],
   "asked_question_ids": ["q_relationship"],
@@ -303,8 +315,8 @@ data/
 locked   6  プリセット・固定。AIもユーザーも変更不可
 user     5  ユーザーが明示入力
 answer   4  AI質問への回答
-derived  3  タグから導出
-auto     2  「おまかせ」
+auto     3  「おまかせ」（タグより優先）
+derived  2  タグから導出
 unset    0  未設定
 ```
 
@@ -312,12 +324,65 @@ unset    0  未設定
 
 ### 7.4 タグカタログ
 
-`wizard_tags.json` は以下を持つ。
+`defaults/wizard_tags.json` は以下を持つ。
 
 - `axes`: `relation` / `world` / `tone` / `kink` / `role` の上限。
-- `tags`: `{id,label,axis,description,effects}`。`effects` は `{slot: value}` の dict。
+- `tags`: `{id,label,axis,description,effects,image_tags?}`。`effects` は `{slot: value}` の dict。`image_tags` は開幕画像の場面タグ（英語、任意）。
 - `ng_presets`: `{id,label,locked?}`。`ng_minor` は常に有効。
 - `examples`: アイデア例。
+
+#### 7.4.1 `wizard_tags.json` の完全な初期値
+
+`axes` は **dict**（`{軸ID: {label,max}}`）。`tags[].description` を使い、古い `desc` も読み替える。`conflicts_ng` は NG の ID または表示名（正規化して比較）。
+
+```json
+{
+  "version": 1,
+  "axes": {
+    "relation": { "label": "関係性", "max": 3 },
+    "world": { "label": "世界観", "max": 2 },
+    "tone": { "label": "雰囲気", "max": 2 },
+    "kink": { "label": "特殊要素", "max": 4 },
+    "role": { "label": "あなたの立場", "max": 2 }
+  },
+  "tags": [
+    { "id": "rel_pure", "label": "純愛", "axis": "relation", "description": "相手を大切にする、まっすぐな恋愛。", "effects": { "relationship": ["純愛"], "tone": ["穏やか"] }, "image_tags": ["romantic", "gentle lighting"] },
+    { "id": "rel_childhood", "label": "幼馴染", "axis": "relation", "description": "子どもの頃から一緒の、遠慮のない関係。", "effects": { "relationship": ["幼馴染"] }, "image_tags": ["childhood friend", "warm light"] },
+    { "id": "rel_lover", "label": "恋人", "axis": "relation", "description": "すでに付き合っている二人。", "effects": { "relationship": ["恋人"] }, "image_tags": ["couple", "close distance"] },
+    { "id": "rel_rival", "label": "ライバル", "axis": "relation", "description": "負けたくない相手。反発と惹かれ合い。", "effects": { "relationship": ["ライバル"] }, "image_tags": ["rival", "tension"] },
+    { "id": "rel_family", "label": "家族", "axis": "relation", "description": "家族として暮らす二人。", "effects": { "relationship": ["家族"] }, "image_tags": ["family", "home"] },
+
+    { "id": "world_school", "label": "学園", "axis": "world", "description": "学校を舞台にした日常。", "effects": { "world": ["学園"] }, "image_tags": ["classroom", "after school"] },
+    { "id": "world_office", "label": "オフィス", "axis": "world", "description": "仕事場での関係。", "effects": { "world": ["オフィス"] }, "image_tags": ["office", "city night"] },
+    { "id": "world_fantasy", "label": "ファンタジー", "axis": "world", "description": "魔法や剣のある世界。", "effects": { "world": ["ファンタジー"] }, "image_tags": ["fantasy castle", "magic"] },
+
+    { "id": "tone_gentle", "label": "穏やか", "axis": "tone", "description": "静かでやさしい空気。", "effects": { "tone": ["穏やか"] }, "image_tags": ["soft lighting"] },
+    { "id": "tone_dark", "label": "ダーク", "axis": "tone", "description": "重く、影のある雰囲気。", "effects": { "tone": ["ダーク"] }, "image_tags": ["dark lighting", "shadow"] },
+    { "id": "tone_comedy", "label": "コメディ", "axis": "tone", "description": "軽快で笑いのある会話。", "effects": { "tone": ["コメディ"] }, "image_tags": ["bright lighting"] },
+
+    { "id": "kink_ntr", "label": "NTR", "axis": "kink", "description": "第三者が絡む背徳的な関係。", "effects": { "kinks": ["NTR"], "tone": ["背徳"] }, "conflicts_ng": ["ng_ntr"] },
+    { "id": "kink_gore", "label": "グロ", "axis": "kink", "description": "流血や残酷な描写を含む。", "effects": { "kinks": ["グロ"], "tone": ["凄惨"] }, "conflicts_ng": ["ng_gore"] },
+    { "id": "kink_bondage", "label": "拘束", "axis": "kink", "description": "拘束や主従の要素。", "effects": { "kinks": ["拘束"], "intensity": ["hard"] }, "image_tags": ["restrained"] },
+    { "id": "kink_public", "label": "公開", "axis": "kink", "description": "人目につく場所での緊張感。", "effects": { "kinks": ["公開"], "intensity": ["medium"] }, "image_tags": ["public place"] },
+
+    { "id": "role_hero", "label": "主人公", "axis": "role", "description": "物語の中心になる立場。", "effects": { "player_role": ["主人公"] } },
+    { "id": "role_teacher", "label": "教師", "axis": "role", "description": "教える側の立場。", "effects": { "player_role": ["教師"] } },
+    { "id": "role_senior", "label": "先輩", "axis": "role", "description": "一歩先を行く立場。", "effects": { "player_role": ["先輩"] } }
+  ],
+  "ng_presets": [
+    { "id": "ng_minor", "label": "未成年", "locked": true },
+    { "id": "ng_ntr", "label": "NTR" },
+    { "id": "ng_gore", "label": "グロ・流血" },
+    { "id": "ng_scat", "label": "排泄" },
+    { "id": "ng_ryona", "label": "リョナ" }
+  ],
+  "examples": [
+    "幼馴染と、放課後の教室で秘密の関係を始める",
+    "事故で同居することになった年上の上司との、ぎこちない日常",
+    "魔法学院のライバル同士が、共同任務で距離を縮める"
+  ]
+}
+```
 
 ### 7.5 ジョブ
 
@@ -354,6 +419,31 @@ unset    0  未設定
 ```
 
 ウィザード内部では `tags` を配列で扱うが、`wizard_build_final_setting` の最終段で `wizard_normalize_chars()` を通し、必ず文字列に変換する。
+
+### 7.7 開幕画像
+
+チャンネル作成後、最初のassistantメッセージ（第一声）に画像を付ける。画像は既存の画像生成キューに積み、ウィザードは完成を待たない。
+
+```json
+{
+  "prompt": "classroom, morning, looking at viewer",
+  "negative": "lowres, bad anatomy",
+  "raw": false,
+  "seed": 123456789,
+  "status": "queued",
+  "chars": ["篠原 美咲"],
+  "opening": true
+}
+```
+
+- `prompt` は**場面タグだけ**。人物の髪色・服装などの外見は `chars` の固定タグから付く。
+- `chars` は最終設定の `chars[].name`。プリセットのタグもここから反映される。`chars` が空でも `character.name` を1件入れる。
+- `status` は既存の画像と同じ `queued` / `generating` / `done` / `error`。
+- `opening: true` で、通常の画像との区別と二重生成防止に使う。
+- `image_mode="off"` のときは画像を付けない。
+- `compose.setting.opening_image` は場面タグの配列。最終設定には保存せず、作成時のキュー投入にだけ使う。
+
+作成APIは `opening_image`（積んだか）と `opening_image_mid`（最初のassistantメッセージID）を返す。画像が失敗しても `sid` は返り、チャンネルは使える。
 
 ---
 
@@ -409,7 +499,7 @@ unset    0  未設定
 | POST | `/api/wizard/compose` | composeジョブ開始 | draft_id,rev | `job_id,draft` |
 | GET | `/api/wizard/job/<job_id>` | ジョブ状態 | - | `status,result,error` |
 | POST | `/api/wizard/job_cancel` | キャンセル | job_id | `ok` |
-| POST | `/api/wizard/create` | チャンネル作成 | draft_id,rev,overrides,use_template | `sid,title,draft` |
+| POST | `/api/wizard/create` | チャンネル作成 | draft_id,rev,overrides,use_template | `sid,title,draft,opening_image,opening_image_mid` |
 | POST | `/api/wizard/delete` | 下書き削除 | draft_id | `ok` |
 
 ### 9.1 エラーコード
@@ -431,6 +521,8 @@ unset    0  未設定
 | `created` | 409 | 作成済み |
 | `canceled` | 400 | キャンセル |
 
+※ 開幕画像のキュー投入に失敗しても作成自体は成功し、`opening_image=false` と警告を返す（エラーコードにはしない）。
+
 ## 10. バックエンド実装（`server.py`）
 
 `create_session()` の直後、`find_msg()` の前に挿入する。
@@ -443,7 +535,7 @@ unset    0  未設定
 # ============================================================
 WIZARD_DIR = os.path.join(DATA, "wizards")
 WIZARD_IDE_DIR = os.path.join(DATA, "wizard_ide")
-WIZARD_TAGS_PATH = os.path.join(ROOT, "wizard_tags.json")
+WIZARD_TAGS_PATH = defaults_path("wizard_tags.json")
 WIZARD_ID_RE = re.compile(r"^wiz_[0-9a-f]{10}$")
 WIZARD_JOB_RE = re.compile(r"^wj_[0-9a-f]{10}$")
 
@@ -528,7 +620,8 @@ APPLY_ORDER = [
 ]
 
 SOURCE_ORDER = {
-    "unset": 0, "auto": 2, "derived": 3, "answer": 4, "user": 5, "locked": 6,
+    # 「おまかせ」はユーザーの明示選択なので、タグ由来の derived より強い。
+    "unset": 0, "derived": 2, "auto": 3, "answer": 4, "user": 5, "locked": 6,
 }
 
 COMPOSE_SETTING_KEYS = [
@@ -540,6 +633,7 @@ COMPOSE_SETTING_KEYS = [
 PROTECTED_AI_SLOTS = {"player_name", "project"}
 
 wizard_lock = threading.RLock()
+wizard_create_lock = threading.Lock()  # 同じ下書きの二重作成を防ぐ
 wizard_jobs = {}
 wizard_tags_cache = {"ts": 0.0, "data": None, "index": {}}
 wizard_model_cache = {}
@@ -615,6 +709,13 @@ def wizard_ids_sorted():
 
 
 def wizard_sweep():
+    with wizard_lock:
+        now_t = time.time()
+        # 終了したジョブをいつまでもメモリに残さない
+        for jid, j in list(wizard_jobs.items()):
+            age = now_t - _as_int((j or {}).get("ts_epoch"), 0)
+            if (j or {}).get("status") in ("done", "error") and age > WIZARD_JOB_KEEP:
+                wizard_jobs.pop(jid, None)
     if not os.path.isdir(WIZARD_DIR):
         return 0
     drafts = []
@@ -650,9 +751,27 @@ def wizard_tags():
         raw = read_json(WIZARD_TAGS_PATH, {})
         if not isinstance(raw, dict):
             raw = {}
-        tags = [x for x in (raw.get("tags") or []) if isinstance(x, dict) and x.get("id")]
+        tags = []
+        for x in (raw.get("tags") or []):
+            if not isinstance(x, dict) or not x.get("id"):
+                continue
+            tag = dict(x)
+            # 仕様書の desc / 実装の description の両方を受ける
+            tag["description"] = str(tag.get("description") or tag.get("desc") or "")
+            c = tag.get("conflicts_ng") or []
+            tag["conflicts_ng"] = (split_tags(c) if isinstance(c, str) else list(c))[:20]
+            tags.append(tag)
         ng = [x for x in (raw.get("ng_presets") or []) if isinstance(x, dict) and x.get("id")]
-        axes = raw.get("axes") if isinstance(raw.get("axes"), dict) else {}
+        axes_raw = raw.get("axes")
+        if isinstance(axes_raw, dict):
+            axes = axes_raw
+        elif isinstance(axes_raw, list):
+            # 仕様書の [{id,label,max}] 形式も受ける
+            axes = {str(a.get("id")): {"label": a.get("label") or a.get("id"),
+                                       "max": a.get("max")}
+                    for a in axes_raw if isinstance(a, dict) and a.get("id")}
+        else:
+            axes = {}
         data = {
             "version": _as_int(raw.get("version"), 1),
             "axes": axes,
@@ -680,8 +799,34 @@ def wizard_ng_labels(d):
     return list(dict.fromkeys(labels))
 
 
+def wizard_norm_label(x):
+    return re.sub(r"[\s_\-・/]+", "", str(x or "").casefold())
+
+
 def wizard_ng_conflicts(d):
-    return {x.lower() for x in wizard_ng_labels(d)}
+    """NG の ID と表示名の両方。表記ゆれは正規化して比較する。"""
+    out = set()
+    presets = {x.get("id"): x for x in wizard_tags().get("ng_presets", [])}
+    for nid in (d.get("selected_ng") or []):
+        out.add(wizard_norm_label(nid))
+        if nid in presets:
+            out.add(wizard_norm_label(presets[nid].get("label")))
+    for x in (d.get("custom_ng") or []):
+        out.add(wizard_norm_label(x))
+    out.discard("")
+    return out
+
+
+def wizard_tag_hits_ng(tag, ng_set):
+    if not isinstance(tag, dict):
+        return False
+    cand = [tag.get("label")]
+    for key in ("conflicts_ng", "conflicts"):
+        v = tag.get(key) or []
+        if isinstance(v, str):
+            v = split_tags(v)
+        cand.extend(v)
+    return any(wizard_norm_label(x) in ng_set for x in cand if str(x or "").strip())
 
 
 def wizard_clean_tags(tags):
@@ -696,11 +841,13 @@ def wizard_clean_tags(tags):
         "school uniform", "serafuku", "uniform", "dress", "outfit",
         "standing", "sitting", "lying", "walking", "running",
     )
+    drop_set = set(drop)
     out = []
     for x in raw:
         s = str(x or "").strip()
         low = s.lower()
-        if not s or any(w in low for w in drop):
+        # 部分一致だと headdress / flying / han solo を誤爆するため完全一致で落とす
+        if not s or low in drop_set:
             continue
         if s not in out:
             out.append(s)
@@ -842,7 +989,9 @@ def wizard_recompute_derived(d):
         for key, val in (tag.get("effects") or {}).items():
             if key not in WIZARD_SLOTS:
                 continue
-            if SOURCE_ORDER.get(wslot_source(d, key), 0) > SOURCE_ORDER["derived"]:
+            # auto はユーザーの「おまかせ」なので derived で上書きしない。
+            # 既に derived の項目は複数タグの効果をマージする。
+            if wslot_source(d, key) not in ("unset", "derived"):
                 continue
             spec = WIZARD_SLOTS[key]
             if spec.get("type") == "multi":
@@ -1039,6 +1188,7 @@ def wizard_compose_prompt(d):
   "chars": [
     {{"name": "相手の名前", "tags": ["1girl", "long hair"]}}
   ],
+  "opening_image": ["classroom", "morning", "looking at viewer"],
   "elapsed_time": {{"day": 1, "period": "午前"}},
   "warnings": [],
   "title_alternatives": ["案1", "案2", "案3"]
@@ -1049,7 +1199,130 @@ def wizard_compose_prompt(d):
 - 版権キャラは原作の設定を尊重する。未成年キャラは年齢を「なし」にする。
 - NGと特殊要素が衝突したらNGを優先する。
 - charsのtagsは画像生成用。quality/服装/ポーズ/構図タグは入れない。
+- opening_imageは開幕画像の場面タグだけ（英語、最大12個）。人物の髪色・服装などの外見は入れない。
 - JSON以外を出力しない。"""
+
+
+OPENING_SCENE_DROP = (
+    "masterpiece", "best quality", "high quality", "highres", "absurdres",
+    "official art", "school uniform", "serafuku", "uniform", "dress", "outfit",
+)
+
+
+def wizard_clean_scene_tags(tags):
+    """開幕画像の場面タグ。人物の外見は chars 側に任せる。"""
+    try:
+        raw = split_tags(tags) if isinstance(tags, str) else (tags or [])
+    except Exception:
+        raw = []
+    out = []
+    for x in raw:
+        s = wizard_plain_text(x, 60)
+        low = s.lower()
+        if not s or not re.search(r"[a-zA-Z0-9]", s):
+            continue
+        if any(w in low for w in OPENING_SCENE_DROP):
+            continue
+        if re.search(r"\b(hair|eyes?|eyebrows?|skin|breasts?|nipples?|penis|pussy|uniform|dress|shirt|skirt|panties|bra|lingerie|outfit)\b", low):
+            continue
+        if s not in out:
+            out.append(s)
+    return out[:12]
+
+
+def wizard_opening_tags(d):
+    """タグカタログの image_tags から、開幕画像の場面タグを作る。"""
+    out = []
+    for tid in (d.get("selected_tags") or []):
+        tag = wizard_tag_by_id(tid) or {}
+        raw = tag.get("image_tags") or []
+        if isinstance(raw, str):
+            raw = split_tags(raw)
+        for x in raw:
+            out.append(x)
+    return wizard_clean_scene_tags(out)
+
+
+WIZARD_COUNT_RE = re.compile(r"(\d+\+?\s*(girl|boy|other)s?|multiple (girls|boys|others)|solo( focus)?)", re.I)
+
+
+def wizard_count_tag(tags, chars):
+    """開幕画像に必ず1つ入れる人数タグ。AI/プリセット優先、無ければ1girl。"""
+    if isinstance(tags, str):
+        tags = split_tags(tags)
+    for x in (tags or []):
+        s = str(x).strip()
+        if WIZARD_COUNT_RE.fullmatch(s):
+            return s
+    for c in chars or []:
+        for t in split_tags(c.get("tags")):
+            s = str(t).strip()
+            if WIZARD_COUNT_RE.fullmatch(s):
+                return s
+    return "1girl"
+
+
+def wizard_opening_message_id(s):
+    for m in (s.get("messages") or []):
+        im = m.get("image") or {}
+        if m.get("role") == "assistant" and im.get("opening"):
+            return str(m.get("id") or "")
+    return ""
+
+
+def wizard_enqueue_opening_image(s, setting, tags=None):
+    """作成をブロックせず、最初のassistant発言に開幕画像を積む。戻り値は message id。"""
+    if (setting.get("image_mode") or "always") == "off":
+        return ""
+    first = next((m for m in (s.get("messages") or [])
+                  if m.get("role") == "assistant"), None)
+    if not first or not first.get("id"):
+        return ""
+    chars = [c for c in (setting.get("chars") or [])
+             if isinstance(c, dict) and str(c.get("name") or "").strip()][:3]
+    names = [str(c.get("name"))[:40] for c in chars]
+    if not names:
+        # 画像タグが空でも、第一声のキャラ名は画像メタに残す
+        ch = setting.get("character") if isinstance(setting.get("character"), dict) else {}
+        lead = str(ch.get("name") or "").strip()
+        if lead:
+            names = [lead[:40]]
+    blocked = set()
+    for c in chars:
+        for t in split_tags(c.get("tags")):
+            ts = str(t).strip()
+            if WIZARD_COUNT_RE.fullmatch(ts):
+                continue
+            blocked.add(ts.lower())
+    scene = wizard_clean_scene_tags(tags)
+    scene = [t for t in scene if t.strip().lower() not in blocked]
+    if not scene:
+        scene = ["indoors", "morning", "looking at viewer"]
+    if not any(WIZARD_COUNT_RE.fullmatch(t.strip()) for t in scene):
+        scene.insert(0, wizard_count_tag(tags, chars))
+    image_cfg = setting.get("image") if isinstance(setting.get("image"), dict) else {}
+    img = {
+        "prompt": ", ".join(scene),
+        "negative": str(image_cfg.get("base_negative") or ""),
+        "raw": False,
+        "seed": random.randint(0, 2**32 - 1),
+        "status": "queued",
+        "chars": names,
+        "opening": True,
+    }
+    with lock:
+        try:
+            cur = load(s["id"])
+        except Exception:
+            return ""
+        cm = find_msg(cur, first["id"])
+        if not cm or cm.get("image"):
+            return ""
+        cm["image"] = img
+        save(cur)
+        queued_images.append((s["id"], first["id"]))
+        image_event.set()
+    return str(first["id"])
 
 
 def wizard_template_compose(d):
@@ -1100,6 +1373,7 @@ def wizard_template_compose(d):
         f"全員18歳以上の成人として描写する。"
     )[:2000]
     chars = wizard_build_chars(d, [], name)
+    opening_image = wizard_opening_tags(d) or ["indoors", "morning", "looking at viewer"]
     warnings = ["AIを使わずにテンプレートで設定を生成しました。プレビューで調整してください。"]
     if not chars[0].get("tags"):
         warnings.append("画像タグが空です。必要ならキャラプリセットを選んでください。")
@@ -1121,6 +1395,7 @@ def wizard_template_compose(d):
             "speech": f"「……{player}、どうする？」",
         },
         "chars": chars,
+        "opening_image": opening_image,
         "elapsed_time": {"day": 1, "period": normalize_period(period)},
         "user_name": player,
         "project": str(wizard_effective_value(d, "project") or "")[:40],
@@ -1129,6 +1404,8 @@ def wizard_template_compose(d):
 
 
 def wizard_partner_preset(d):
+    if d.get("partner_preset_off"):
+        return None
     pid = str(d.get("partner_preset_id") or "").strip()
     name = str(wslot_value(d, "partner_name") or "").strip()
     presets = []
@@ -1208,24 +1485,37 @@ def wizard_normalize_chars(chars):
         name = wizard_plain_text(c.get("name"), 40)
         if not name:
             continue
-        tags = ", ".join(wizard_clean_tags(c.get("tags")))
+        locked = bool(c.get("locked"))
+        src = str(c.get("source") or ("preset" if locked else "ai"))
+        if src == "preset" or locked:
+            # プリセットはユーザーが固定した「正」。服装・人数・品質タグも削らない。
+            tags = ", ".join(wizard_preset_tags(c))
+        else:
+            tags = ", ".join(wizard_clean_tags(c.get("tags")))
         if not tags:
             continue
-        locked = bool(c.get("locked"))
         out.append({
             "id": str(c.get("id") or new_id()),
             "name": name,
             "tags": tags,
             "locked": locked,
-            "source": str(c.get("source") or ("preset" if locked else "ai")),
+            "source": src,
         })
     return out
 
 
 def wizard_age_is_minor(age):
     s = str(age or "")
+    # 「17歳」のような明示年齢を最優先
+    m = re.search(r"(\d+)\s*(歳|才)", s)
+    if m:
+        return int(m.group(1)) < 18
+    # 「大学1年」の1を年齢と誤認しない
+    if re.search(r"(大学|短大|専門学校|社会人|成人|大人)", s):
+        return False
     # 数字だけでなく「高校生」「高2」などの表現も未成年として扱う
-    if re.search(r"(小学生|中学生|高校生|小学|中学|高校|JK|JC|JS|小[1-6]|中[1-3]|高[1-3])", s, re.I):
+    # 「小生」「中生」のような一般語を誤爆しないよう、学校段階の語だけで判定する
+    if re.search(r"(小学生|中学生|高校生|女子高生|男子高生|女子中学生|男子中学生|小学|中学|高校|中等部|高等部|幼女|幼児|JK|JC|JS|小[1-6]|中[1-3]|高[1-3])", s, re.I):
         return True
     m = re.search(r"\d+", s)
     return bool(m and int(m.group()) < 18)
@@ -1273,6 +1563,9 @@ def wizard_sanitize_compose(d, raw):
         },
     }
     setting["chars"] = wizard_build_chars(d, raw.get("chars"), name)
+    opening_image = wizard_clean_scene_tags(raw.get("opening_image"))
+    if opening_image:
+        setting["opening_image"] = opening_image
 
     et = raw.get("elapsed_time")
     day = _safe_day(et.get("day") if isinstance(et, dict) else 1, 1)
@@ -1329,6 +1622,7 @@ def wizard_build_final_setting(d, overrides=None):
         base.pop(k, None)
 
     final = copy.deepcopy(setting)
+    old_name = str((final.get("character") or {}).get("name") or "").strip()
     for k in ("title", "summary", "scenario", "first_message", "instructions"):
         if k in overrides:
             final[k] = wizard_plain_text(overrides.get(k), {"title": 40, "summary": 300}.get(k, 2000))
@@ -1354,19 +1648,35 @@ def wizard_build_final_setting(d, overrides=None):
             final["chars"] = chars
 
     name = str((final.get("character") or {}).get("name") or "")
-    user_name = str(overrides.get("user_name") or wizard_effective_value(d, "player_name") or "あなた")[:40]
+    user_name = ((wizard_plain_text(overrides.get("user_name"), 40) or "あなた")
+                 if "user_name" in overrides else
+                 str(wizard_effective_value(d, "player_name") or "あなた")[:40])
     final["user_name"] = user_name
-    if not overrides.get("instructions"):
-        base_instr = str(final.get("instructions") or "").strip()
-        facts = (
-            "\n\n# 確定事項\n"
-            f"- 相手の名前: {name}\n"
-            f"- あなたの名前: {user_name}\n"
-            f"- あらすじ: {final.get('summary', '')}\n"
-            f"- 目的・ゴール: {wizard_effective_value(d, 'goal') or 'おまかせ'}\n"
-            f"- NG: {'、'.join(wizard_ng_labels(d)) or 'なし'}"
-        )
-        final["instructions"] = (base_instr + facts)[:2000]
+
+    # プレビューで名前を変えたら、chars と第一声などにも追従させる
+    chars_list = final.get("chars")
+    if name and isinstance(chars_list, list) and chars_list:
+        first_char = chars_list[0]
+        if isinstance(first_char, dict):
+            first_char["name"] = name
+    if old_name and name and old_name != name:
+        for k in ("first_message", "scenario", "summary", "instructions"):
+            if isinstance(final.get(k), str):
+                final[k] = final[k].replace(old_name, name)
+
+    # instructions はプレビューで編集されても、確定事項を必ず末尾に入れる
+    base_instr = str(final.get("instructions") or "").strip()
+    base_instr = re.sub(r"\n\n# 確定事項\n(?:- .*\n?)*", "", base_instr).strip()
+    facts = (
+        "\n\n# 確定事項\n"
+        f"- 相手の名前: {name}\n"
+        f"- あなたの名前: {user_name}\n"
+        f"- あらすじ: {final.get('summary', '')}\n"
+        f"- 目的・ゴール: {wizard_effective_value(d, 'goal') or 'おまかせ'}\n"
+        f"- NG: {'、'.join(wizard_ng_labels(d)) or 'なし'}"
+    )
+    # 確定事項が長い instructions の末尾切れで消えないよう、facts の分を先に確保する
+    final["instructions"] = (base_instr[:max(0, 2000 - len(facts))] + facts)[:2000]
 
     # プレビューで年齢を書き換えた場合も成人チェックする
     age_warn = wizard_age_warning((final.get("character") or {}).get("age"))
@@ -1386,9 +1696,12 @@ def wizard_build_final_setting(d, overrides=None):
         if k in final and final[k] not in (None, "", []):
             base[k] = final[k]
     base["chars"] = wizard_normalize_chars(final.get("chars"))
-    base["project"] = str(overrides.get("project") or wizard_effective_value(d, "project")
-                          or base.get("project") or "")[:40]
-    base["user_name"] = str(overrides.get("user_name") or wizard_effective_value(d, "player_name") or "あなた")[:40]
+    if "project" in overrides:
+        base["project"] = wizard_plain_text(overrides.get("project"), 40)
+    else:
+        base["project"] = str(wizard_effective_value(d, "project")
+                              or base.get("project") or "")[:40]
+    base["user_name"] = user_name
     if not base.get("title"):
         base["title"] = "新しいチャンネル"
 
@@ -1438,7 +1751,7 @@ def wizard_error_code(msg, http=0):
     return "ai_error"
 
 
-def wizard_generate(model, prompt, system="", max_tokens=4096, kind="compose"):
+def wizard_generate(model, prompt, system="", max_tokens=4096, kind="compose", job=None):
     mc = model or {}
     if not mc.get("ai_enabled", True) or str(mc.get("provider") or "") == "none":
         raise WizardError("AIは無効です", code="ai_disabled")
@@ -1448,7 +1761,7 @@ def wizard_generate(model, prompt, system="", max_tokens=4096, kind="compose"):
     if kind == "questions":
         thinking = "low"
     if provider == "antigravity":
-        return wizard_ide_generate(mc, prompt, kind)
+        return wizard_ide_generate(mc, prompt, kind, job)
     if provider not in ("google", "vertex"):
         raise WizardError("作成AIのプロバイダーが未設定です", code="no_model")
     try:
@@ -1473,7 +1786,7 @@ def wizard_generate(model, prompt, system="", max_tokens=4096, kind="compose"):
     elif isinstance(res, dict):
         if res.get("error"):
             msg = str(res.get("error"))
-            code = wizard_error_code(msg, _as_int(res.get("http"), 0))
+            code = wizard_error_code(msg, _as_int(res.get("http_status"), 0))
             raise WizardError(msg, code=code, retryable=code in ("timeout", "quota", "ai_error"), status=502)
         text = str(res.get("text") or res.get("output") or "")
         meta = {"provider": provider, "model": mid, "thinking_level": thinking}
@@ -1508,14 +1821,15 @@ def wizard_ensure_builder():
         if not nid:
             raise WizardError(why or "作成AIの会話を作成できませんでした",
                               code="antigravity_down", retryable=True, status=502)
-        with lock:
-            cur = read_json(APP_SETTINGS, {})
-            cur["wizard_builder_ide"] = nid
-            write_json(APP_SETTINGS, cur)
-        return nid
+    # デッドロック防止: wizard_lock を解放してから lock で設定を保存する（ロック逆順ネスト防止）
+    with lock:
+        cur = read_json(APP_SETTINGS, {})
+        cur["wizard_builder_ide"] = nid
+        write_json(APP_SETTINGS, cur)
+    return nid
 
 
-def wizard_ide_generate(mc, prompt, kind="compose"):
+def wizard_ide_generate(mc, prompt, kind="compose", job=None):
     cid = wizard_ensure_builder()
     mid = str(mc.get("model") or "").strip()
     try:
@@ -1524,44 +1838,55 @@ def wizard_ide_generate(mc, prompt, kind="compose"):
     except Exception:
         step = 0
 
-    sent = False
     last_msg = ""
-    for attempt in range(3):
-        try:
-            res = ide_poke.send_to_conversation(cid, prompt, model=mid or None)
-        except Exception as e:
-            raise WizardError(str(e), code="antigravity_down", retryable=True, status=502)
-        ok = bool(res[0]) if isinstance(res, (tuple, list)) else bool(res)
-        msg = str(res[1]) if isinstance(res, (tuple, list)) and len(res) > 1 else ""
-        retry = bool(res[2]) if isinstance(res, (tuple, list)) and len(res) > 2 else False
-        last_msg = msg
-        if ok:
-            sent = True
-            break
-        if retry and attempt < 2:
-            time.sleep(5)
-            continue
-        raise WizardError(msg or "送信できませんでした", code="antigravity_down", retryable=retry, status=502)
-    if not sent:
-        raise WizardError(last_msg or "送信できませんでした", code="antigravity_down", retryable=True, status=502)
+    # 同じ会話に複数の生成を同時に送らない（send_poke と同じ会話ロックを使う）
+    with get_poke_lock(cid):
+        if job and job.get("cancel"):
+            raise WizardError("キャンセルしました", code="canceled")
+        sent = False
+        for attempt in range(3):
+            if job and job.get("cancel"):
+                raise WizardError("キャンセルしました", code="canceled")
+            try:
+                res = ide_poke.send_to_conversation(cid, prompt, model=mid or None)
+            except Exception as e:
+                raise WizardError(str(e), code="antigravity_down", retryable=True, status=502)
+            ok = bool(res[0]) if isinstance(res, (tuple, list)) else bool(res)
+            msg = str(res[1]) if isinstance(res, (tuple, list)) and len(res) > 1 else ""
+            retry = bool(res[2]) if isinstance(res, (tuple, list)) and len(res) > 2 else False
+            last_msg = msg or last_msg
+            if ok:
+                sent = True
+                break
+            if retry and attempt < 2:
+                time.sleep(5)
+                continue
+            raise WizardError(msg or "送信できませんでした", code="antigravity_down", retryable=retry, status=502)
+        if not sent:
+            raise WizardError(last_msg or "送信できませんでした", code="antigravity_down", retryable=True, status=502)
 
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        time.sleep(1)
-        try:
-            idle_ok, _st = ide_poke.idle(cid)
-        except Exception:
-            idle_ok = False
-        if not idle_ok:
-            continue
-        try:
-            r = ide_poke.last_reply(cid, after_step=step)
-        except Exception:
-            r = ("", "", False)
-        text = str(r[0] or "") if isinstance(r, (tuple, list)) else str(r or "")
-        if text.strip():
-            return text, {"provider": "antigravity", "model": mid, "thinking_level": ""}
-    raise WizardError("Antigravityの応答がタイムアウトしました", code="timeout", retryable=True, status=502)
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            if job and job.get("cancel"):
+                raise WizardError("キャンセルしました", code="canceled")
+            time.sleep(1)
+            try:
+                idle_ok, _st = ide_poke.idle(cid)
+            except Exception:
+                idle_ok = False
+            if not idle_ok:
+                continue
+            try:
+                r = ide_poke.last_reply(cid, after_step=step)
+            except Exception:
+                r = (None, None, "")
+            text = str(r[0] or "") if isinstance(r, (tuple, list)) else str(r or "")
+            err = str(r[1] or "") if isinstance(r, (tuple, list)) and len(r) > 1 else ""
+            if err:
+                last_msg = err
+            if text.strip():
+                return text, {"provider": "antigravity", "model": mid, "thinking_level": ""}
+        raise WizardError(last_msg or "Antigravityの応答がタイムアウトしました", code="timeout", retryable=True, status=502)
 
 
 def wizard_extract_json(text):
@@ -1586,13 +1911,17 @@ def wizard_job_running(jid):
                 and time.time() - j.get("ts_epoch", 0) < WIZARD_JOB_STALE)
 
 
-def wizard_start_job(draft, kind):
+def wizard_start_job(draft, kind, expected_rev=None):
     if kind not in ("questions", "compose"):
         raise WizardError("ジョブ種別が不正です", code="bad_request")
     with wizard_lock:
         d = wizard_load(draft.get("id"))
         if not d:
             raise WizardError("下書きがありません", code="not_found", status=404)
+        if expected_rev is not None and _as_int(expected_rev, -1) != _as_int(d.get("rev"), 0):
+            e = WizardError("下書きが更新されました", code="rev", status=409)
+            e.draft = wizard_public(d, True)
+            raise e
         if d.get("status") == "created":
             raise WizardError("作成済みです", code="created", status=409)
         if wizard_job_running(d.get("last_job")):
@@ -1700,7 +2029,7 @@ def wizard_do_questions(job):
     try:
         text, _meta = wizard_generate(d.get("model") or {}, wizard_question_prompt(d),
                                       system="あなたは質問設計の専門家です。JSONのみを返します。",
-                                      max_tokens=2048, kind="questions")
+                                      max_tokens=2048, kind="questions", job=job)
         raw = wizard_extract_json(text)
         qs = wizard_sanitize_questions(d, raw.get("questions") if isinstance(raw, dict) else [])
     except WizardError as e:
@@ -1749,10 +2078,13 @@ def wizard_do_compose(job):
         auto_slots = [k for k, s in (d.get("slots") or {}).items()
                       if (s or {}).get("source") == "auto"]
         missing_before = wizard_missing_required(d)
-        for k in missing_before:
-            if k not in auto_slots:
-                auto_slots.append(k)
-            wslot_set_auto(d, k)
+        if missing_before:
+            for k in missing_before:
+                if k not in auto_slots:
+                    auto_slots.append(k)
+                wslot_set_auto(d, k)
+            # 自動補完したスロットを即座に永続化（以後の wizard_load で破棄されないよう bump=False で保存）
+            wizard_save(d, bump=False)
 
     if not wizard_ai_enabled(d):
         with wizard_lock:
@@ -1795,7 +2127,7 @@ def wizard_do_compose(job):
                 prompt += "\n\n前回の出力は不正でした。JSONのみを返し、必須項目をすべて埋めてください。"
             text, _meta = wizard_generate(model, prompt,
                                           system="あなたは設定ライターです。JSONのみを返します。",
-                                          max_tokens=8192, kind="compose")
+                                          max_tokens=8192, kind="compose", job=job)
             raw = wizard_extract_json(text)
             candidate, cmeta = wizard_sanitize_compose(d, raw)
             miss = wizard_validate_compose(candidate)
@@ -1858,6 +2190,7 @@ def wizard_new_draft(base, model, confirm):
         "selected_ng": ["ng_minor"],
         "custom_ng": [],
         "partner_preset_id": "",
+        "partner_preset_off": False,
         "questions": [],
         "asked_slots": [],
         "asked_question_ids": [],
@@ -1888,6 +2221,8 @@ def wizard_public(d, full=False):
         "inherit_base": bool(d.get("inherit_base", bool(d.get("base_setting")))),
         "model": copy.deepcopy(d.get("model") or {}),
         "selected_tags": list(d.get("selected_tags") or []),
+        "partner_preset_id": str(d.get("partner_preset_id") or ""),
+        "partner_preset_off": bool(d.get("partner_preset_off")),
         "selected_ng": list(d.get("selected_ng") or []),
         "custom_ng": list(d.get("custom_ng") or []),
         "round": d.get("round", 0),
@@ -1926,7 +2261,7 @@ def wizard_public(d, full=False):
             "ai_provider": base.get("ai_provider"),
             "google_model": base.get("google_model"),
             "vertex_model": base.get("vertex_model"),
-            "image_mode": (base.get("image") or {}).get("mode") if isinstance(base.get("image"), dict) else "",
+            "image_mode": base.get("image_mode") or "always",
             "suggest_choices": base.get("suggest_choices"),
             "project": base.get("project"),
         }
@@ -2004,6 +2339,9 @@ def wizard_apply_slots(d, slots):
             continue
         val = item.get("value") if isinstance(item, dict) else item
         wslot_set(d, key, val, "user")
+    if any(k in slots for k in ("partner_type", "partner_name", "work")):
+        d["partner_preset_id"] = ""
+        d["partner_preset_off"] = False
     d["compose_stale"] = True
 
 
@@ -2020,10 +2358,10 @@ def wizard_apply_tags(d, body):
     if isinstance(custom, str):
         custom = re.split(r"[,、\n]", custom)
     d["custom_ng"] = [wizard_plain_text(x, 30) for x in (custom or []) if wizard_plain_text(x, 30)][:10]
-    ng_labels = wizard_ng_conflicts(d)
+    ng_set = wizard_ng_conflicts(d)
     d["selected_tags"] = [
         x for x in d["selected_tags"]
-        if (wizard_tag_by_id(x) or {}).get("label", "").lower() not in ng_labels
+        if not wizard_tag_hits_ng(wizard_tag_by_id(x), ng_set)
     ]
     wizard_recompute_derived(d)
     d["compose_stale"] = True
@@ -2072,6 +2410,9 @@ def wizard_apply_answer(d, body):
             if spec.get("type") == "enum" and val not in (spec.get("values") or []):
                 raise WizardError("選択肢が不正です", code="bad_answer")
             wslot_set(d, key, val, "user")
+        if key in ("partner_type", "partner_name", "work"):
+            d["partner_preset_id"] = ""
+            d["partner_preset_off"] = False
         return
 
     if qid == "fixed_tags":
@@ -2087,7 +2428,8 @@ def wizard_apply_answer(d, body):
     if qid == "fixed_preset":
         pid = str((body.get("option_ids") or [""])[0] or "")
         d["partner_preset_id"] = pid
-        preset = wizard_partner_preset({**d, "partner_preset_id": pid})
+        d["partner_preset_off"] = not bool(pid)
+        preset = wizard_partner_preset({**d, "partner_preset_id": pid, "partner_preset_off": d["partner_preset_off"]})
         if preset and not wslot_value(d, "partner_name"):
             wslot_set(d, "partner_name", preset.get("name") or "", "user")
         d["compose_stale"] = True
@@ -2178,12 +2520,26 @@ def wizard_apply_preview(d, setting):
 
 ```python
 def wizard_create(d, overrides, use_template=False):
+    """同じ下書きを二重に作成しないよう直列化し、最新の下書きで判定する。"""
+    with wizard_create_lock:
+        fresh = wizard_load(d.get("id")) or d
+        if _as_int(fresh.get("rev"), 0) != _as_int(d.get("rev"), -1):
+            e = WizardError("下書きが更新されました", code="rev", status=409)
+            e.draft = wizard_public(fresh, True)
+            raise e
+        return _wizard_create_locked(fresh, overrides, use_template)
+
+
+def _wizard_create_locked(d, overrides, use_template=False):
     if d.get("created_sid"):
         try:
             if os.path.exists(spath(d["created_sid"])):
+                s0 = load(d["created_sid"])
+                mid0 = wizard_opening_message_id(s0)
                 return {"ok": True, "sid": d["created_sid"],
                         "title": (d.get("compose") or {}).get("setting", {}).get("title", ""),
-                        "draft": wizard_public(d, True), "created": True}
+                        "draft": wizard_public(d, True), "created": True,
+                        "opening_image": bool(mid0), "opening_image_mid": mid0}
         except Exception:
             pass
         d["created_sid"] = ""
@@ -2205,6 +2561,12 @@ def wizard_create(d, overrides, use_template=False):
         d["warnings"] = list(warnings)
         wizard_save(d)
 
+    comp = d.get("compose") or {}
+    comp_setting = comp.get("setting") if isinstance(comp.get("setting"), dict) else {}
+    opening_tags = wizard_clean_scene_tags(comp_setting.get("opening_image"))
+    if not opening_tags:
+        opening_tags = wizard_opening_tags(d)
+
     final, warnings = wizard_build_final_setting(d, overrides)
     s = create_session(final)
     sid = s.get("id")
@@ -2218,8 +2580,17 @@ def wizard_create(d, overrides, use_template=False):
         d["warnings"] = list(warnings)
         wizard_save(d)
         pub = wizard_public(d, True)
+
+    # 案A: 画像の完成は待たない。最初のassistant発言にqueuedで積むだけ。
+    opening_mid = ""
+    try:
+        opening_mid = wizard_enqueue_opening_image(s, final, opening_tags)
+    except Exception:
+        warnings.append("開幕画像の生成を開始できませんでした（チャンネルは作成済みです）。")
+
     return {"ok": True, "sid": sid, "title": (s.get("setting") or {}).get("title", ""),
-            "draft": pub, "warnings": warnings}
+            "draft": pub, "warnings": warnings,
+            "opening_image": bool(opening_mid), "opening_image_mid": opening_mid}
 ```
 
 ### 10.11 モデル一覧・接続テスト
@@ -2244,7 +2615,7 @@ def wizard_models_payload(provider):
     now_t = time.time()
     with wizard_lock:
         c = wizard_model_cache.get(provider)
-        if c and now_t - c[0] < 300:
+        if c and now_t - c[0] < 300 and not (c[1] or {}).get("error"):
             return c[1]
 
     app = app_settings()
@@ -2333,7 +2704,10 @@ def wizard_models_payload(provider):
         "error": err,
     }
     with wizard_lock:
-        wizard_model_cache[provider] = (now_t, payload)
+        if err:
+            wizard_model_cache.pop(provider, None)
+        else:
+            wizard_model_cache[provider] = (now_t, payload)
     return payload
 
 
@@ -2343,7 +2717,15 @@ def wizard_test_model(body):
     if provider not in ("google", "vertex", "antigravity"):
         raise WizardError("プロバイダーが不正です", code="bad_request")
     if provider == "antigravity":
-        return {"ok": True, "note": "Antigravityはモデル一覧で確認します。生成テストは作成時に実行されます。"}
+        cid = wizard_ensure_builder()
+        try:
+            ok_idle, _st = ide_poke.idle(cid)
+        except Exception:
+            ok_idle = False
+        if not ok_idle:
+            raise WizardError("Antigravityの会話が応答中です。少し待ってから試してください。",
+                              code="antigravity_down", retryable=True, status=502)
+        return {"ok": True, "note": "Antigravityの会話を確認しました。"}
     text, meta = wizard_generate(
         {"provider": provider, "model": model, "thinking_level": "minimal"},
         'JSONで {"ok": true, "message": "接続OK"} とだけ返してください。',
@@ -2403,6 +2785,26 @@ def wizard_start(body):
 `wizard_route` は `H` クラスより前に置く。
 
 ```python
+from contextlib import contextmanager
+
+
+@contextmanager
+def wizard_write(body, bump=True, allow_running=False):
+    """rev 確認・状態確認・保存を同じロック内で行う（read-modify-write 競合対策）。"""
+    with wizard_lock:
+        d = wizard_draft_from_request(body)
+        if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
+            e = WizardError("下書きが更新されました", code="rev", status=409)
+            e.draft = wizard_public(d, True)
+            raise e
+        if d.get("status") == "created":
+            raise WizardError("作成済みの下書きは変更できません", code="created", status=409)
+        if not allow_running and wizard_job_running(d.get("last_job")):
+            raise WizardError("生成中です。完了してから操作してください", code="wizard_busy", status=409)
+        yield d
+        wizard_save(d, bump=bump)
+
+
 def wizard_route(h, path, body, method):
     try:
         path_only, _, qs = path.partition("?")
@@ -2413,7 +2815,7 @@ def wizard_route(h, path, body, method):
                     "ok": True,
                     "enabled": bool(app.get("wizard_enabled", True)),
                     "confirm": bool(app.get("wizard_confirm", True)),
-                    "configured": bool(str(app.get("wizard_model") or "").strip()),
+                    "configured": bool(str(app.get("wizard_model") or "").strip()) or str(app.get("wizard_provider") or "") == "antigravity",
                     "current": wizard_model_from_app(),
                     "max_questions": WIZARD_MAX_QUESTIONS,
                     "max_rounds": WIZARD_MAX_ROUNDS,
@@ -2457,74 +2859,58 @@ def wizard_route(h, path, body, method):
             if path_only == "/api/wizard/start":
                 return h.send_json(wizard_start(body))
             if path_only == "/api/wizard/base":
-                d = wizard_draft_from_request(body)
-                if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
-                    return h.send_json({"ok": False, "error": "下書きが更新されました。再読み込みしてください", "code": "rev", "draft": wizard_public(d, True)}, 409)
-                wizard_set_base(d, body.get("base_sid"), bool(body.get("inherit")))
-                wizard_save(d)
+                with wizard_write(body) as d:
+                    wizard_set_base(d, body.get("base_sid"), bool(body.get("inherit")))
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/answer":
-                d = wizard_draft_from_request(body)
-                if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
-                    return h.send_json({"ok": False, "error": "下書きが更新されました。再読み込みしてください", "code": "rev", "draft": wizard_public(d, True)}, 409)
-                wizard_apply_answer(d, body)
-                wizard_save(d)
+                with wizard_write(body) as d:
+                    wizard_apply_answer(d, body)
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/slots":
-                d = wizard_draft_from_request(body)
-                if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
-                    return h.send_json({"ok": False, "error": "下書きが更新されました", "code": "rev", "draft": wizard_public(d, True)}, 409)
-                wizard_apply_slots(d, body.get("slots") or {})
-                wizard_save(d)
+                with wizard_write(body) as d:
+                    wizard_apply_slots(d, body.get("slots") or {})
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/tags":
-                d = wizard_draft_from_request(body)
-                if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
-                    return h.send_json({"ok": False, "error": "下書きが更新されました", "code": "rev", "draft": wizard_public(d, True)}, 409)
-                wizard_apply_tags(d, body)
-                wizard_save(d)
+                with wizard_write(body) as d:
+                    wizard_apply_tags(d, body)
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/model":
-                d = wizard_draft_from_request(body)
-                provider = str(body.get("provider") or "").strip().lower()
-                if provider not in ("google", "vertex", "antigravity", "none"):
-                    raise WizardError("プロバイダーが不正です", code="bad_request")
-                d["model"] = {
-                    "provider": provider,
-                    "model": str(body.get("model") or "").strip(),
-                    "thinking_level": str(body.get("thinking_level") or "").strip().lower(),
-                    "ai_enabled": bool(body.get("ai_enabled", provider != "none")),
-                }
-                if "confirm" in body:
-                    d["confirm"] = bool(body.get("confirm"))
-                d["compose_stale"] = True
-                wizard_save(d)
+                with wizard_write(body) as d:
+                    provider = str(body.get("provider") or "").strip().lower()
+                    if provider not in ("google", "vertex", "antigravity", "none"):
+                        raise WizardError("プロバイダーが不正です", code="bad_request")
+                    d["model"] = {
+                        "provider": provider,
+                        "model": str(body.get("model") or "").strip(),
+                        "thinking_level": str(body.get("thinking_level") or "").strip().lower(),
+                        "ai_enabled": bool(body.get("ai_enabled", provider != "none")),
+                    }
+                    if "confirm" in body:
+                        d["confirm"] = bool(body.get("confirm"))
+                    d["compose_stale"] = True
+                    # 選択したモデルの configured 表示を次の一覧取得で更新する
+                    wizard_model_cache.clear()
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/step":
-                d = wizard_draft_from_request(body)
-                if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
-                    return h.send_json({"ok": False, "error": "下書きが更新されました", "code": "rev", "draft": wizard_public(d, True)}, 409)
-                step = str(body.get("step") or "").strip()
-                if step in ("base", "idea", "partner", "tags", "questions", "preview", "creating"):
-                    d["step"] = step
-                if "confirm" in body:
-                    d["confirm"] = bool(body.get("confirm"))
-                wizard_save(d)
+                with wizard_write(body, bump=False, allow_running=True) as d:
+                    step = str(body.get("step") or "").strip()
+                    if step in ("base", "idea", "partner", "tags", "questions", "preview", "creating"):
+                        d["step"] = step
+                    if "confirm" in body:
+                        d["confirm"] = bool(body.get("confirm"))
+                    # step / confirm はUI状態。ジョブ実行中の画面遷移でも 409 wizard_busy にせず、rev も上げない。
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/preview":
-                d = wizard_draft_from_request(body)
-                if _as_int(body.get("rev"), -1) != _as_int(d.get("rev"), 0):
-                    return h.send_json({"ok": False, "error": "下書きが更新されました", "code": "rev", "draft": wizard_public(d, True)}, 409)
-                wizard_apply_preview(d, body.get("setting") or {})
-                wizard_save(d)
+                with wizard_write(body) as d:
+                    wizard_apply_preview(d, body.get("setting") or {})
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/questions":
                 d = wizard_draft_from_request(body)
-                job, pub = wizard_start_job(d, "questions")
+                job, pub = wizard_start_job(d, "questions", body.get("rev"))
                 return h.send_json({"ok": True, "job_id": job["job_id"], "draft": pub})
             if path_only == "/api/wizard/compose":
                 d = wizard_draft_from_request(body)
-                job, pub = wizard_start_job(d, "compose")
+                job, pub = wizard_start_job(d, "compose", body.get("rev"))
                 return h.send_json({"ok": True, "job_id": job["job_id"], "draft": pub})
             if path_only == "/api/wizard/job_cancel":
                 jid = str(body.get("job_id") or "")
@@ -2554,7 +2940,10 @@ def wizard_route(h, path, body, method):
             return h.send_json({"ok": False, "error": "not found"}, 404)
         return h.send_json({"ok": False, "error": "method not allowed"}, 405)
     except WizardError as e:
-        return h.send_json({"ok": False, "error": str(e), "code": e.code, "retryable": e.retryable}, e.status)
+        payload = {"ok": False, "error": str(e), "code": e.code, "retryable": e.retryable}
+        if getattr(e, "draft", None):
+            payload["draft"] = e.draft
+        return h.send_json(payload, e.status)
     except ValueError as e:
         return h.send_json({"ok": False, "error": str(e), "code": "bad_request"}, 400)
     except Exception as e:
@@ -2579,33 +2968,52 @@ DEFAULT_APP = {
 
 #### `/api/app-settings`
 
-既存の `for k in DEFAULT_APP:` ループの後に検証だけを追加する。`body` は使わない。
+既存の `server.py`（10876-10887行付近）では、`with lock:` が `/api/app-settings` だけでなく `/api/file-presets` などの複数のエンドポイントをまとめて囲っている。
+デッドロック防止（`wizard_ensure_builder` での `wizard_lock` 解放後 `lock` 取得との逆順ネスト完全排除）のため、`/api/app-settings` を外側の `with lock:` の手前に独立して配置し、`with lock:` のスコープを `APP_SETTINGS` の読み書きのみに限定する。
+そして `lock` を完全に解放した直後に `with wizard_lock:` で `wizard_model_cache.clear()` を呼ぶ。
+**移動後、元の外側 `with lock:` 内にある `/api/app-settings` 分岐は必ず削除する**（残すと到達しない重複分岐になる）。
 
 ```python
-# 既存ループの後
-cur["wizard_enabled"] = bool(cur.get("wizard_enabled", True))
-cur["wizard_confirm"] = bool(cur.get("wizard_confirm", True))
-cur["wizard_model"] = str(cur.get("wizard_model") or "").strip()
-if cur.get("wizard_provider") not in ("google", "vertex", "antigravity"):
-    cur["wizard_provider"] = "google"
-if cur.get("wizard_thinking_level") not in ("minimal", "low", "medium", "high"):
-    cur["wizard_thinking_level"] = "high"
-write_json(APP_SETTINGS, cur)
+        # /api/app-settings の処理（server.py 10876行の with lock: の直前に配置）:
+        if p == "/api/app-settings":
+            with lock:
+                cur = read_json(APP_SETTINGS, {})
+                for k in DEFAULT_APP:
+                    if isinstance(d.get(k), str) and isinstance(DEFAULT_APP[k], str):
+                        cur[k] = d[k].strip()
+                    elif isinstance(d.get(k), bool) and isinstance(DEFAULT_APP[k], bool):
+                        cur[k] = d[k]
+                    elif isinstance(d.get(k), list) and isinstance(DEFAULT_APP[k], list):
+                        cur[k] = list(dict.fromkeys(x.strip() for x in str_list(d[k])))
+                cur["wizard_enabled"] = bool(cur.get("wizard_enabled", True))
+                cur["wizard_confirm"] = bool(cur.get("wizard_confirm", True))
+                cur["wizard_model"] = str(cur.get("wizard_model") or "").strip()
+                if cur.get("wizard_provider") not in ("google", "vertex", "antigravity"):
+                    cur["wizard_provider"] = "google"
+                if cur.get("wizard_thinking_level") not in ("minimal", "low", "medium", "high", "xhigh"):
+                    cur["wizard_thinking_level"] = "high"
+                write_json(APP_SETTINGS, cur)
+
+            # lock 解放後に実行（デッドロック防止: 逆順ネストの完全排除）
+            with wizard_lock:
+                wizard_model_cache.clear()
+            return self.send_json({"ok": True, "app": app_settings()})
 ```
 
 #### `do_GET` / `do_POST`
 
-```python
-# do_GET の blocked() の後
-path_only = self.path.split("?", 1)[0]
-if path_only.startswith("/api/wizard/"):
-    return wizard_route(self, self.path, None, "GET")
+`server.py` では `do_GET` / `do_POST` 冒頭で `u = urlparse(self.path)` により `p = u.path`（クエリ文字列無しのパス）が既に取得されている。
+また、`do_POST` では `try: d = self.body()` が既にパースされているため、`self.body()` を二重に呼ぶとソケット読み込みが失敗する。パース済みの `p` と `d` をそのまま利用し、ルーティングを行う。
 
-# do_POST の body パース後
-d = self.body()
-path_only = self.path.split("?", 1)[0]
-if path_only.startswith("/api/wizard/"):
-    return wizard_route(self, path_only, d, "POST")
+```python
+# do_GET: self.blocked(u) による拒否判定（9577-9578行付近）の直後
+if p.startswith("/api/wizard/"):
+    return wizard_route(self, p, None, "GET")
+
+# do_POST: self.body() のパースブロック（10434-10437行付近）の直後
+# （※d = self.body() を再実行してはならない。すでにパースされた d を渡す）
+if p.startswith("/api/wizard/"):
+    return wizard_route(self, p, d, "POST")
 ```
 
 ## 11. フロントエンド実装
@@ -2630,6 +3038,7 @@ if path_only.startswith("/api/wizard/"):
   let draft = null;
   let jobId = "";
   let jobKind = "";
+  let autoCreateOnce = false;  // 「おまかせで開始」の1回だけ自動作成（下書きの confirm は変えない）
   let jobTimer = null;
   let busy = false;
   let screen = "idea";
@@ -2641,9 +3050,23 @@ if path_only.startswith("/api/wizard/"):
   const body = () => $("#wizardBody");
   const foot = () => $("#wizardFoot");
 
-  function apiCall(path, data) {
+  async function apiCall(path, data) {
     if (typeof api !== "function") throw new Error("api() がありません");
-    return api(path, data);
+    const r = await api(path, data);
+    if (r && r.code === "rev") {
+      // サーバーが最新の下書きを返すので、画面だけ追従させる（古い rev で上書きしない）
+      if (r.draft) draft = r.draft;
+      if (typeof say === "function") say("他の操作で更新されました。最新の内容を読み込みました");
+      if (screen === "base" && typeof renderBase === "function") renderBase();
+      else if (screen === "partner") renderPartner();
+      else if (screen === "tags") renderTags();
+      else if (screen === "preview") renderPreview();
+      const e = new Error(r.error || "下書きが更新されました");
+      e.code = "rev";
+      e.draft = r.draft;
+      throw e;
+    }
+    return r;
   }
 
   function appMeta() {
@@ -2658,12 +3081,14 @@ if path_only.startswith("/api/wizard/"):
   async function activateCreatedSession(sidValue) {
     if (!sidValue) return;
     try {
-      if (typeof window.refreshSessions === "function") {
-        await window.refreshSessions();
+      const rf = window.refreshSessions || (typeof refreshSessions === "function" ? refreshSessions : null);
+      if (typeof rf === "function") {
+        await rf();
       }
     } catch (_) {}
-    if (typeof window.switchTo === "function") {
-      await window.switchTo(sidValue);
+    const sw = window.switchTo || (typeof switchTo === "function" ? switchTo : null);
+    if (typeof sw === "function") {
+      await sw(sidValue);
       return;
     }
     try { localStorage.setItem("sid", sidValue); } catch (_) {}
@@ -2691,6 +3116,7 @@ if path_only.startswith("/api/wizard/"):
   function titleFor(name) {
     return {
       model: "作成AIを選ぶ",
+      base: "引き継ぎ元を選ぶ",
       idea: "どんな話にしますか？",
       partner: "相手とあなた",
       tags: "関係性と雰囲気",
@@ -2702,7 +3128,7 @@ if path_only.startswith("/api/wizard/"):
   }
 
   function progressFor(name) {
-    const order = ["model", "idea", "partner", "tags", "questions", "preview"];
+    const order = ["base", "model", "idea", "partner", "tags", "questions", "preview"];
     const i = order.indexOf(name);
     if (i < 0) return "";
     return `${i + 1} / ${order.length}`;
@@ -2711,10 +3137,17 @@ if path_only.startswith("/api/wizard/"):
   function updateChrome() {
     $("#wizardTitle").textContent = titleFor(screen);
     $("#wizardProgress").textContent = progressFor(screen);
-    $("#wizardBack").classList.toggle("hidden", screen === "model" || screen === "creating");
+    $("#wizardBack").classList.toggle("hidden", screen === "base" || screen === "model" || screen === "creating");
     const mc = (draft && draft.model && draft.model.model) ? draft.model : ((wmeta && wmeta.current) || {});
-    $("#wizardModelChip").textContent = mc.model ? `AI: ${mc.model.split("/").pop()}` : "AI: 未設定";
-    $("#wizardModelChip").classList.toggle("warn", !mc.model);
+    const chip = $("#wizardModelChip");
+    if (chip) {
+      chip.textContent = mc.model ? `AI: ${mc.model.split("/").pop()}` : "AI: 未設定";
+      chip.classList.toggle("warn", !mc.model);
+      // 生成中にモデル画面へ飛ぶとジョブと下書きが壊れるので触れなくする
+      const locked = !!jobId || screen === "creating" || screen === "done" || busy;
+      chip.disabled = locked;
+      chip.setAttribute("aria-disabled", locked ? "true" : "false");
+    }
   }
 
   function errBox(msg, actions = "") {
@@ -2793,6 +3226,7 @@ if path_only.startswith("/api/wizard/"):
 
   async function open() {
     if (busy) return;
+    autoCreateOnce = false;
     busy = true;
     try {
       wmeta = await apiCall("/api/wizard/meta");
@@ -2801,13 +3235,26 @@ if path_only.startswith("/api/wizard/"):
       root().classList.remove("hidden");
       root().setAttribute("aria-hidden", "false");
       document.body.classList.add("wizard-open");
+      if (typeof updateFabState === "function") updateFabState();
       trapFocus();
-      await ensureDraft();
+      try {
+        await ensureDraft();
+      } catch (e) {
+        // trapFocus() の後に失敗した場合、フォーカスを戻さないと背面が操作できなくなる
+        stopPoll();
+        root().classList.add("hidden");
+        root().setAttribute("aria-hidden", "true");
+        document.body.classList.remove("wizard-open");
+        releaseFocus();
+        if (typeof updateFabState === "function") updateFabState();
+        throw e;
+      }
       // show() の中で startJob() を呼べるように、描画前に busy を下ろす
       busy = false;
       let start = entryScreen();
       if (start !== "base" && start !== "done" && start !== "creating") {
-        if (!((draft.model && draft.model.model) || wmeta.configured)) start = "model";
+        const hasModel = draft.model && (draft.model.model || draft.model.provider === "antigravity" || draft.model.provider === "none");
+        if (!(hasModel || wmeta.configured)) start = "model";
       }
       show(start);
       if (start !== "base" && draft.last_job && !jobId) resumeJob(draft.last_job);
@@ -2819,13 +3266,21 @@ if path_only.startswith("/api/wizard/"):
   function close(force) {
     if (!force && draft && draft.status !== "created") {
       if (!window.confirm("作成中の内容は下書きとして保存されます。閉じますか？")) return;
-      apiCall("/api/wizard/step", { draft_id: draft.id, rev: draft.rev, step: screen }).catch(() => {});
+      // 生成中に step を保存すると rev が上がり、裏の質問/compose が stale になる。
+      // ジョブ中は wizard_start_job が step を保存済みなので、ここでは送らない。
+      const running = !!(jobId || (draft.last_job &&
+        (draft.status === "composing" || draft.step === "questions" || draft.step === "creating")));
+      if (!running) {
+        apiCall("/api/wizard/step", { draft_id: draft.id, rev: draft.rev, step: screen }).catch(() => {});
+      }
     }
+    autoCreateOnce = false;
     stopPoll();
     root().classList.add("hidden");
     root().setAttribute("aria-hidden", "true");
     document.body.classList.remove("wizard-open");
     releaseFocus();
+    if (typeof updateFabState === "function") updateFabState();
   }
 
   function goBack() {
@@ -2942,6 +3397,7 @@ if path_only.startswith("/api/wizard/"):
         <label class="wizard-label" id="wizThinkWrap">思考の深さ
           <select id="wizThink" class="wizard-input">
             <option value="high" ${thinking === "high" ? "selected" : ""}>high（推奨）</option>
+            <option value="xhigh" ${thinking === "xhigh" ? "selected" : ""}>xhigh（Gemini 4 Hydrogen 系のみ）</option>
             <option value="medium" ${thinking === "medium" ? "selected" : ""}>medium</option>
             <option value="low" ${thinking === "low" ? "selected" : ""}>low</option>
             <option value="minimal" ${thinking === "minimal" ? "selected" : ""}>minimal</option>
@@ -3003,7 +3459,7 @@ if path_only.startswith("/api/wizard/"):
     wmeta.current = skipAi
       ? { provider: "none", model: "", thinking_level: "" }
       : { provider, model, thinking_level: thinking };
-    wmeta.configured = !skipAi && !!model;
+    wmeta.configured = !skipAi && (provider === "antigravity" || !!model);
     show("idea");
   }
 
@@ -3127,7 +3583,8 @@ if path_only.startswith("/api/wizard/"):
         </label>
         <label class="wizard-label">原作準拠度
           <select id="wizCanon" class="wizard-input">
-            ${["canon", "mixed", "au"].map(v => `<option value="${v}" ${s("canon_fidelity") === v ? "selected" : ""}>${v === "canon" ? "原作準拠" : v === "mixed" ? "混合" : "AU"}</option>`).join("")}
+            ${[["mixed", "混合（推奨）"], ["canon", "原作準拠"], ["au", "AU（パラレル）"]].map(([v, l]) =>
+              `<option value="${v}" ${(s("canon_fidelity") || "mixed") === v ? "selected" : ""}>${l}</option>`).join("")}
           </select>
         </label>
         <label class="wizard-label">物語の目的・ゴール
@@ -3165,17 +3622,20 @@ if path_only.startswith("/api/wizard/"):
         player_name: { value: "", source: "auto" },
         start_point: { value: "", source: "auto" },
       }, "partner");
+      await apiCall("/api/wizard/answer", {
+        draft_id: draft.id, rev: draft.rev, question_id: "fixed_preset",
+        option_ids: [], step: "partner",
+      });
       return;
     }
     await saveSlots(partnerValues(), "partner");
     const preset = val("#wizPreset");
-    if (preset) {
-      const r = await apiCall("/api/wizard/answer", {
-        draft_id: draft.id, rev: draft.rev, question_id: "fixed_preset",
-        option_ids: [preset], step: "partner",
-      });
-      if (r && r.draft) draft = r.draft;
-    }
+    // 空（使わない）も送る。送らないと一度選んだプリセットを解除できない。
+    const r = await apiCall("/api/wizard/answer", {
+      draft_id: draft.id, rev: draft.rev, question_id: "fixed_preset",
+      option_ids: preset ? [preset] : [], step: "partner",
+    });
+    if (r && r.draft) draft = r.draft;
   }
 
   // ------------------------------------------------------------ tags
@@ -3349,6 +3809,7 @@ if path_only.startswith("/api/wizard/"):
     const c = (draft.compose && draft.compose.setting) || {};
     const ch = c.character || {};
     const warn = (draft.warnings || []).concat((draft.compose && draft.compose.warnings) || []);
+    const imgMode = (draft.base_info && draft.base_info.image_mode) || "always";
     setBody(`
       <div class="wizard-card">
         ${warn.length ? `<div class="wizard-warn">${warn.map(x => `<p>${E(x)}</p>`).join("")}</div>` : ""}
@@ -3390,6 +3851,7 @@ if path_only.startswith("/api/wizard/"):
         </details>
         <div class="wizard-preview-meta">
           <span>画像タグ: ${E(tagsText(((c.chars || [])[0]) || {})) || "なし"}</span>
+          <span>開幕画像: ${imgMode === "off" ? "生成しない" : "作成後に非同期生成"}</span>
           <span>自動補完: ${E(((draft.compose && draft.compose.auto_slots) || []).map(k => draft.slots?.[k]?.label || k).join("、") || "なし")}</span>
         </div>
       </div>`);
@@ -3483,7 +3945,8 @@ if path_only.startswith("/api/wizard/"):
           if ((draft.questions || []).length) renderQuestions();
           else renderQuestionsDone();
         } else {
-          if (draft.confirm) show("preview");
+          if (autoCreateOnce) { autoCreateOnce = false; doCreate(); }
+          else if (draft.confirm) show("preview");
           else doCreate();
         }
         return;
@@ -3514,6 +3977,10 @@ if path_only.startswith("/api/wizard/"):
     if (j.status === "done") {
       jobId = "";
       if (j.result && j.result.draft) draft = j.result.draft;
+      if ((j.kind || jobKind) === "compose" && (autoCreateOnce || !draft.confirm)) {
+        autoCreateOnce = false;
+        return doCreate();
+      }
       show(entryScreen());
       return;
     }
@@ -3533,6 +4000,7 @@ if path_only.startswith("/api/wizard/"):
     if (!jobId) return;
     await apiCall("/api/wizard/job_cancel", { job_id: jobId }).catch(() => {});
     jobId = "";
+    autoCreateOnce = false;
     stopPoll();
   }
 
@@ -3541,6 +4009,7 @@ if path_only.startswith("/api/wizard/"):
       return doCreate({}, true);
     }
     if (draft.compose && !draft.compose_stale) {
+      if (autoCreateOnce) { autoCreateOnce = false; return doCreate(); }
       return draft.confirm ? show("preview") : doCreate();
     }
     if (withQuestions && !draft.done_questions && draft.round < wmeta.max_rounds) {
@@ -3551,6 +4020,7 @@ if path_only.startswith("/api/wizard/"):
 
   async function doCreate(overrides, useTemplate) {
     if (busy) return;
+    autoCreateOnce = false;
     busy = true;
     try {
       const r = await apiCall("/api/wizard/create", {
@@ -3569,15 +4039,31 @@ if path_only.startswith("/api/wizard/"):
       draft = r.draft || draft;
       if (r.sid) {
         if (appMeta()?.app?.new_channel_ide !== false && typeof checked === "function") {
-          checked("/api/ide/new", { sid: r.sid, target: "both" }).catch(() => {});
+          checked("/api/ide/new", { sid: r.sid, target: "both" })
+            .then(async () => {
+              // 会話一覧とセッション一覧の両方を、取得完了まで待って同期する
+              if (typeof loadIdeSessions === "function") await loadIdeSessions();
+              if (typeof refreshSessions === "function") await refreshSessions();
+            })
+            .catch(() => {});
         }
         close(true);
         await activateCreatedSession(r.sid);
+        const imgMode = (r.draft && r.draft.base_info && r.draft.base_info.image_mode) || "always";
+        if (r.opening_image && !r.created) say("開幕画像を裏で生成しています");
+        else if (!r.created && imgMode !== "off") say("開幕画像を開始できませんでした");
       } else {
         show("done");
       }
     } catch (e) {
-      setBody(errBox(e.message, `<button type="button" class="wizard-btn" data-act="create">再試行</button>`));
+      // 入力フォームを壊さず、プレビューを残したまま再試行できるようにする
+      say(e.message);
+      if (draft && draft.compose) {
+        show("preview");
+        setFoot(`<button type="button" class="wizard-btn" data-act="create">再試行</button>`);
+      } else {
+        show("tags");
+      }
     } finally {
       busy = false;
     }
@@ -3617,8 +4103,8 @@ if path_only.startswith("/api/wizard/"):
         if (a === "idea-next") { await saveIdea(false); return show("partner"); }
         if (a === "idea-auto") {
           await saveIdea(true);
-          const s = await apiCall("/api/wizard/step", { draft_id: draft.id, rev: draft.rev, step: "tags", confirm: false });
-          if (s && s.draft) draft = s.draft;
+          // confirm を下書きに書き込むと、キャンセル後も自動作成のままになる。1回だけのローカル印にする。
+          autoCreateOnce = true;
           return startCreateChain(false);
         }
         if (a === "empty") { close(true); if (window.callLegacyNewSession) window.callLegacyNewSession(); return; }
@@ -3678,6 +4164,21 @@ if path_only.startswith("/api/wizard/"):
         wizard_thinking_level: val("#f_wizard_thinking_level") || "high",
         wizard_confirm: isChecked("#f_wizard_confirm"),
       });
+      // 画面内の wmeta も更新する（次に開いたとき古い configured を掴まない）
+      const m = await apiCall("/api/wizard/meta");
+      if (m && !m.error) {
+        wmeta = m;
+        const sp = $("#f_wizard_provider");
+        if (sp) sp.value = m.current?.provider || "google";
+        const sm = $("#f_wizard_model");
+        if (sm) sm.value = m.current?.model || "";
+        const st = $("#f_wizard_thinking_level");
+        if (st) st.value = m.current?.thinking_level || "high";
+        const sc = $("#f_wizard_confirm");
+        if (sc) sc.checked = !!m.confirm;
+        const se = $("#f_wizard_enabled");
+        if (se) se.checked = !!m.enabled;
+      }
     } catch (e) {
       say(e.message);
     }
@@ -3687,7 +4188,10 @@ if path_only.startswith("/api/wizard/"):
     if (!$("#wizardRoot")) return;
     $("#wizardClose").onclick = () => close(false);
     $("#wizardBack").onclick = goBack;
-    $("#wizardModelChip").onclick = () => show("model");
+    $("#wizardModelChip").onclick = () => {
+      if (busy || jobId || screen === "creating" || screen === "done") return;
+      show("model");
+    };
 
     // body と foot の両方を覆う
     $(".wizard-modal", root()).addEventListener("click", onBodyClick);
@@ -3711,9 +4215,17 @@ if path_only.startswith("/api/wizard/"):
       }
     }, true);
 
-    document.addEventListener("click", (e) => {
-      if (e.target.closest("#appSettings")) setTimeout(loadWizardSettings, 50);
-    });
+    const appSetEl = $("#appSettings");
+    if (appSetEl) {
+      if (appSetEl.open) loadWizardSettings();
+      appSetEl.addEventListener("toggle", () => {
+        if (appSetEl.open) loadWizardSettings();
+      });
+    }
+    const appSaveBtn = $("#appSave");
+    if (appSaveBtn) {
+      appSaveBtn.addEventListener("click", () => setTimeout(saveWizardSettings, 0));
+    }
     ["#f_wizard_enabled", "#f_wizard_provider", "#f_wizard_model",
      "#f_wizard_thinking_level", "#f_wizard_confirm"].forEach((sel) => {
       const el = $(sel);
@@ -3734,6 +4246,7 @@ if path_only.startswith("/api/wizard/"):
 .wizard-root { position: fixed; inset: 0; z-index: 1200; display: flex; align-items: center; justify-content: center; }
 .wizard-root.hidden { display: none; }
 body.wizard-open { overflow: hidden; }
+body.wizard-open #toast { z-index: 1300; }  /* ウィザード表示中もトーストを前面に */
 .wizard-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(2px); }
 .wizard-modal {
   position: relative; width: min(680px, calc(100vw - 32px)); max-height: min(86vh, 820px);
@@ -3745,6 +4258,7 @@ body.wizard-open { overflow: hidden; }
 .wizard-head h2 { font-size: 16px; margin: 0; }
 .wizard-head .wizard-progress { font-size: 11px; color: var(--muted, #9aa0a6); }
 .wizard-head button { background: transparent; color: inherit; border: 0; font-size: 18px; cursor: pointer; padding: 6px 8px; border-radius: 8px; }
+.wizard-model-chip:disabled { opacity: .45; cursor: default; }
 .wizard-head button:hover { background: rgba(255,255,255,.08); }
 .wizard-model-chip { margin-left: auto; font-size: 11px; border: 1px solid var(--line, #3a3d42); padding: 4px 8px; border-radius: 999px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wizard-model-chip.warn { color: #f5c26b; border-color: #7a5a1e; }
@@ -3841,7 +4355,7 @@ body.wizard-open { overflow: hidden; }
 </div>
 ```
 
-スクリプト:
+スクリプト（`public/index.html` 957-960行付近の `<script>` 群の末尾に `wizard.js` を追加し、`app.js` のキャッシュバージョンを更新）:
 
 ```html
 <script src="prompt_toolbar.js"></script>
@@ -3850,12 +4364,12 @@ body.wizard-open { overflow: hidden; }
 <script src="wizard.js?v=1"></script>
 ```
 
-`#appSettings` 内に作成AIの設定を追加する。
+`<details id="appSettings">` 内、`<div class="row tight"><button id="appSave"...></div>` 行の直後、既存の `<div class="box">`（候補の婉曲表現ボックス、244行付近）の手前に作成AIの設定を追加する（既存の `.box` クラスに合わせる）。
 
 ```html
-<div class="settings-box">
-  <h3>チャンネル作成AI</h3>
-  <p class="muted">ウィザードの質問と設定生成に使います。本文AIとは別です。賢いモデルを推奨します。</p>
+<div class="box">
+  <div class="box-title">チャンネル作成AI</div>
+  <div class="muted">ウィザードの質問と設定生成に使います。本文AIとは別です。賢いモデルを推奨します。</div>
   <label class="wizard-check">
     <input type="checkbox" id="f_wizard_enabled" checked> ウィザードを使う
   </label>
@@ -3872,6 +4386,7 @@ body.wizard-open { overflow: hidden; }
   <label class="wizard-label">思考の深さ
     <select id="f_wizard_thinking_level" class="wizard-input">
       <option value="high">high（推奨）</option>
+      <option value="xhigh">xhigh（Gemini 4 Hydrogen 系のみ）</option>
       <option value="medium">medium</option>
       <option value="low">low</option>
       <option value="minimal">minimal</option>
@@ -3889,13 +4404,34 @@ body.wizard-open { overflow: hidden; }
 
 ```javascript
 async function legacyNewSession() {
-  // 既存の「＋」ボタンの処理をここへそのまま移す
-  // 例: 名前入力 → /api/session/new → 選択 → /api/ide/new
+  let base = null;
+  if (state && state.id === sid) {
+    try { base = formSid === sid ? readForm() : JSON.parse(JSON.stringify(state.setting)); }
+    catch { base = JSON.parse(JSON.stringify(state.setting)); }
+  }
+  const title = prompt("新しいチャンネル名", "新しいチャンネル");
+  if (title === null) return;
+  const r = await api("/api/session/new", base ? { title, setting: base } : { title });
+  await refreshSessions();
+  await switchTo(r.sid);
+  $("settingsPanel").classList.remove("hidden");
+  updateFabState();
+  flash("新しいチャンネルを作成しました");
+  if (meta.app?.new_channel_ide === false) return;
+  toast("Antigravity の新規会話を作っています…", { kind: "progress" });
+  try {
+    const n = await checked("/api/ide/new", { sid: r.sid, target: "both" });
+    toast(`Antigravity の新規会話を作って担当にしました: ${n.title}（${String(n.ide).slice(0, 8)}）`, { kind: "ok", ms: 6000 });
+    if (sid === r.sid) await poll();
+    refreshSessions(); loadIdeSessions();
+  } catch (e) {
+    toast("チャンネルは作りましたが、Antigravity の新規会話は作れませんでした:\n" + e.message, { kind: "err", ms: 15000 });
+  }
 }
 
 window.callLegacyNewSession = legacyNewSession;
 
-$("#newSession").onclick = async () => {
+$("newSession").onclick = async () => {
   if (window.RPWizard && meta?.app?.wizard_enabled !== false) {
     try {
       await window.RPWizard.open();
@@ -3930,6 +4466,14 @@ function isOverlayOpen() {
 }
 ```
 
+`updateFabState()` は、ウィザードが開いている間も FAB を隠す（`isOverlayOpen()` を通す）。
+
+```javascript
+// app.js の updateFabState() 内、visible を決める直前
+const wizardOpen = !!($("wizardRoot") && !$("wizardRoot").classList.contains("hidden"));
+const visible = mobile && !moreSheet && !lightbox && !hasOpenModal && !wizardOpen && !scrolling;
+```
+
 `closeTopmostLayer()` の先頭:
 
 ```javascript
@@ -3948,7 +4492,14 @@ if (wr && !wr.classList.contains("hidden")) {
 
 #### 作成後の切替
 
-`app.js` のトップレベル `switchTo` / `refreshSessions` はそのまま使う。`wizard.js` 側はローカル `switchTo` を作らず、`activateCreatedSession` から `window.switchTo` を呼ぶ。
+`app.js` のトップレベル `switchTo` / `refreshSessions` を `window` に明示公開する。
+`wizard.js` 側はローカル `switchTo` を作らず、`activateCreatedSession` から `window.switchTo` を呼ぶ。
+
+```javascript
+// app.js の switchTo / refreshSessions 定義の末尾（またはスクリプト末尾）で明示公開
+window.switchTo = switchTo;
+window.refreshSessions = refreshSessions;
+```
 
 ---
 
@@ -3957,6 +4508,7 @@ if (wr && !wr.classList.contains("hidden")) {
 ### 12.1 `test/test_wizard_server.py`（新規）
 
 ```python
+import json
 import os
 import shutil
 import tempfile
@@ -3967,13 +4519,36 @@ from unittest import mock
 import server
 
 
+TAGS_FIXTURE = {
+    "version": 1,
+    "axes": {"relation": {"label": "関係性", "max": 3}},
+    "tags": [
+        {"id": "rel_pure", "label": "純愛", "axis": "relation",
+         "description": "まっすぐな恋愛", "effects": {"relationship": ["純愛"]}},
+        {"id": "rel_childhood", "label": "幼馴染", "axis": "relation",
+         "description": "幼馴染", "effects": {"relationship": ["幼馴染"]}},
+        {"id": "kink_ntr", "label": "NTR", "axis": "kink",
+         "description": "背徳", "effects": {"kinks": ["NTR"]}, "conflicts_ng": ["ng_ntr"]},
+        {"id": "world_school", "label": "学園", "axis": "world",
+         "description": "学校", "effects": {"world": ["学園"]},
+         "image_tags": ["classroom"]},
+    ],
+    "ng_presets": [
+        {"id": "ng_minor", "label": "未成年", "locked": True},
+        {"id": "ng_ntr", "label": "NTR"},
+    ],
+    "examples": ["例"],
+}
+
+
 class WizardTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="wizard_test_")
         self._old = {}
         for name in ("DATA", "APP_SETTINGS", "SESS_DIR", "ARCHIVE_DIR",
                      "CHOICES_DIR", "STATES_DIR", "IMAGES_DIR", "TRASH",
-                     "WIZARD_DIR", "WIZARD_IDE_DIR", "PUSH_SUBS", "VAPID_FILE"):
+                     "WIZARD_DIR", "WIZARD_IDE_DIR", "WIZARD_TAGS_PATH",
+                     "PUSH_SUBS", "VAPID_FILE"):
             self._old[name] = getattr(server, name, None)
 
         data = os.path.join(self.tmp, "data")
@@ -3990,6 +4565,9 @@ class WizardTestBase(unittest.TestCase):
         server.WIZARD_IDE_DIR = os.path.join(data, "wizard_ide")
         server.PUSH_SUBS = os.path.join(data, "push_subs.json")
         server.VAPID_FILE = os.path.join(data, "vapid_keys.json")
+        server.WIZARD_TAGS_PATH = os.path.join(data, "wizard_tags.json")
+        with open(server.WIZARD_TAGS_PATH, "w", encoding="utf-8") as fp:
+            json.dump(TAGS_FIXTURE, fp, ensure_ascii=False)
 
         for p in (server.SESS_DIR, server.ARCHIVE_DIR, server.CHOICES_DIR,
                   server.STATES_DIR, server.IMAGES_DIR, server.TRASH,
@@ -4003,6 +4581,8 @@ class WizardTestBase(unittest.TestCase):
         server.wizard_jobs.clear()
         server.wizard_model_cache.clear()
         server.wizard_tags_cache.update({"ts": 0.0, "data": None, "index": {}})
+        server.queued_images.clear()
+        server.image_event.clear()
 
     def tearDown(self):
         for k, v in self._old.items():
@@ -4010,6 +4590,8 @@ class WizardTestBase(unittest.TestCase):
                 setattr(server, k, v)
         if getattr(self, "_old_char_presets", None) is not None:
             server.char_presets = self._old_char_presets
+        server.queued_images.clear()
+        server.image_event.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def new_draft(self):
@@ -4056,6 +4638,10 @@ class TestSourceModel(WizardTestBase):
         server.wslot_set(d, "work", "作品A", "user")
         server.wslot_set(d, "partner_type", "original", "user")
         self.assertIsNone(server.wslot_value(d, "work"))
+
+    def test_canon_fidelity_default(self):
+        d = self.new_draft()
+        self.assertEqual(server.wizard_effective_value(d, "canon_fidelity"), "mixed")
 
 
 class TestBaseStep(WizardTestBase):
@@ -4135,6 +4721,11 @@ class TestQuestionsAndTags(WizardTestBase):
         self.assertNotIn("player_name", opts[0]["effects"])
         self.assertNotIn("project", opts[0]["effects"])
 
+    def test_tags_can_be_read_twice(self):
+        # 2回目の wizard_tags() がキャッシュタイムスタンプの型破壊で落ちないこと
+        self.assertTrue(server.wizard_tags()["tags"])
+        self.assertTrue(server.wizard_tags()["tags"])
+
     def test_ng_removes_conflicting_tag(self):
         d = self.new_draft()
         server.wizard_apply_tags(d, {
@@ -4149,6 +4740,29 @@ class TestQuestionsAndTags(WizardTestBase):
         d = self.new_draft()
         server.wizard_apply_tags(d, {"selected_tags": [], "selected_ng": [], "custom_ng": ""})
         self.assertIn("ng_minor", d["selected_ng"])
+
+    def test_derived_does_not_overwrite_auto(self):
+        d = self.new_draft()
+        server.wslot_set_auto(d, "relationship")
+        d["selected_tags"] = ["rel_childhood"]
+        server.wizard_recompute_derived(d)
+        self.assertEqual(server.wslot_source(d, "relationship"), "auto")
+
+    def test_clean_tags_does_not_substring_drop(self):
+        self.assertEqual(
+            server.wizard_clean_tags(["headdress", "flying", "han solo"]),
+            ["headdress", "flying", "han solo"],
+        )
+
+    def test_ng_matches_normalized_custom_text(self):
+        d = self.new_draft()
+        server.wizard_apply_tags(d, {
+            "selected_tags": ["kink_ntr", "rel_pure"],
+            "selected_ng": [],
+            "custom_ng": "N T R",
+        })
+        self.assertNotIn("kink_ntr", d["selected_tags"])
+        self.assertIn("rel_pure", d["selected_tags"])
 
 
 class TestCompose(WizardTestBase):
@@ -4169,6 +4783,23 @@ class TestCompose(WizardTestBase):
         setting, meta = server.wizard_sanitize_compose(d, raw)
         self.assertEqual(setting["character"]["age"], "なし")
         self.assertTrue(any("18歳未満" in w for w in meta["warnings"]))
+
+    def test_age_text_detection(self):
+        self.assertTrue(server.wizard_age_is_minor("高校2年生"))
+        self.assertTrue(server.wizard_age_is_minor("17歳"))
+        self.assertFalse(server.wizard_age_is_minor("大学1年"))
+        self.assertFalse(server.wizard_age_is_minor("なし"))
+
+    def test_compose_sanitizes_opening_image(self):
+        d = self.new_draft()
+        raw = {
+            "title": "T", "summary": "S", "instructions": "I" * 400,
+            "scenario": "SC", "first_message": "F",
+            "character": {"name": "A", "age": "24", "profile": "P", "speech": "SP"},
+            "opening_image": ["classroom", "masterpiece", "1girl"],
+        }
+        setting, _ = server.wizard_sanitize_compose(d, raw)
+        self.assertEqual(setting["opening_image"], ["classroom", "1girl"])
 
     def test_age_highschool_becomes_none(self):
         d = self.new_draft()
@@ -4258,6 +4889,21 @@ class TestCompose(WizardTestBase):
         self.assertIn("太郎", final["instructions"])
         self.assertIn("新しいあらすじ", final["instructions"])
 
+    def test_compose_persists_auto_slots_on_disk_reload(self):
+        d = self.new_draft()
+        # 必須スロットを未設定のまま compose ジョブを実行
+        server.wizard_save(d)
+        job = {"job_id": "wj_test_persist", "draft_id": d["id"],
+               "kind": "compose", "base_rev": d["rev"], "cancel": False}
+        server.wizard_jobs[job["job_id"]] = job
+        d["last_job"] = job["job_id"]
+        server.wizard_save(d, bump=False)
+        server.wizard_do_compose(job)
+        fresh = server.wizard_load(d["id"])
+        # missing_before のスロットが auto で保存され、reload 後も保持されていること
+        self.assertEqual(server.wslot_source(fresh, "relationship"), "auto")
+        self.assertEqual(server.wslot_source(fresh, "world"), "auto")
+
 
 class TestCreate(WizardTestBase):
     def test_create_is_idempotent(self):
@@ -4289,6 +4935,77 @@ class TestCreate(WizardTestBase):
         self.assertTrue(s["messages"])
         self.assertEqual(s["messages"][0]["role"], "assistant")
 
+    def test_create_queues_opening_image(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        r = server.wizard_create(d, {})
+        self.assertTrue(r["opening_image"])
+        self.assertTrue(r["opening_image_mid"])
+        s = server.load(r["sid"])
+        m = s["messages"][0]
+        self.assertEqual(m["id"], r["opening_image_mid"])
+        self.assertEqual(m["image"]["status"], "queued")
+        self.assertTrue(m["image"]["opening"])
+        self.assertEqual(m["image"]["chars"], ["ヒロイン"])
+        self.assertIn((r["sid"], m["id"]), list(server.queued_images))
+
+    def test_create_skips_opening_image_when_off(self):
+        d = self.new_draft()
+        d["base_setting"] = {"image_mode": "off"}
+        self.with_compose(d)
+        r = server.wizard_create(d, {})
+        self.assertFalse(r["opening_image"])
+        s = server.load(r["sid"])
+        self.assertNotIn("image", s["messages"][0])
+        self.assertEqual(len(server.queued_images), 0)
+
+    def test_create_does_not_duplicate_opening_image(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        r1 = server.wizard_create(d, {})
+        r2 = server.wizard_create(server.wizard_load(d["id"]), {})
+        self.assertEqual(r1["sid"], r2["sid"])
+        self.assertEqual(len(server.queued_images), 1)
+        s = server.load(r1["sid"])
+        self.assertEqual(sum(1 for m in s["messages"] if (m.get("image") or {}).get("opening")), 1)
+
+    def test_opening_image_uses_scene_tags_and_filters_appearance(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        d["compose"]["setting"]["opening_image"] = ["classroom", "masterpiece", "1girl", "black hair"]
+        d["compose"]["setting"]["chars"][0]["tags"] = ["1girl", "black hair"]
+        server.wizard_save(d)
+        r = server.wizard_create(d, {})
+        s = server.load(r["sid"])
+        im = s["messages"][0]["image"]
+        self.assertIn("classroom", im["prompt"])
+        self.assertNotIn("masterpiece", im["prompt"])
+        # 人数タグは画像生成に必要なので残す（AIが付け忘れたら1girlを補う）
+        self.assertIn("1girl", im["prompt"])
+        self.assertNotIn("black hair", im["prompt"])
+
+    def test_opening_image_adds_count_when_missing(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        d["compose"]["setting"]["opening_image"] = ["classroom"]
+        d["compose"]["setting"]["chars"][0]["tags"] = ["black hair"]
+        server.wizard_save(d)
+        r = server.wizard_create(d, {})
+        s = server.load(r["sid"])
+        im = s["messages"][0]["image"]
+        self.assertIn("1girl", im["prompt"])
+        self.assertNotIn("black hair", im["prompt"])
+
+    def test_opening_image_failure_does_not_fail_create(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        with mock.patch.object(server, "wizard_enqueue_opening_image", side_effect=RuntimeError("boom")):
+            r = server.wizard_create(d, {})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["opening_image"])
+        self.assertTrue(any("開幕画像" in w for w in r["warnings"]))
+        self.assertTrue(os.path.exists(server.spath(r["sid"])))
+
 
 class TestJobsAndSweep(WizardTestBase):
     def test_stale_job_is_rejected(self):
@@ -4316,10 +5033,11 @@ class TestJobsAndSweep(WizardTestBase):
 
     def test_sweep_removes_oldest(self):
         ids = []
+        base_time = time.time() - 3600
         for i in range(server.WIZARD_DRAFT_LIMIT + 2):
             d = self.new_draft()
-            # wizard_save は updated を now() で上書きするため、保存後に直接書き込む
-            d["updated"] = f"2020-01-01T00:00:{i:02d}"
+            # 7日間のTTLには引っかからず、上限（20件）超過で古いものから消えることを確認する
+            d["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(base_time + i * 10))
             server.write_json(server.wizard_path(d["id"]), d)
             ids.append(d["id"])
             time.sleep(0.001)
@@ -4371,6 +5089,17 @@ if __name__ == "__main__":
 - 「あなたの名前」を空欄のまま保存すると、元チャンネルの呼び名が使われる。
 - 一度名前を入れて保存→空欄で保存すると、元の呼び名に戻る。
 - AIの質問に答えても呼び名が変わらない。
+- 年齢「17歳」で警告が出て、プレビューの年齢が「なし」になる。
+- 年齢「高校2年生」でも「なし」になる。
+- 年齢「なし」はそのまま維持される。
+- キャラプリセット「美咲」がある状態でAIが別の髪色を返しても、プリセットのタグが優先され、`locked` / `source=preset` になる。
+- 画像ONで作成すると、チャンネルがすぐ開き、第一声の画像が「生成中」になる。ウィザードは画像の完成を待たない。
+- 開幕画像の生成中にチャンネルを操作できる。
+- 画像OFFで作成すると、第一声に画像が付かず、画像生成キューも空のまま。
+- ComfyUI停止中でもチャンネルは作成され、画像はエラー表示になり、後から再生成できる。
+- 作成連打・再送で開幕画像が二重に積まれない。
+- プレビューに「開幕画像: 作成後に非同期生成 / 生成しない」が出る。
+- プリセットの外見タグが開幕画像の場面タグに混ざらない。
 - リロードで `draft.step` から復元される。
 
 ---
@@ -4379,10 +5108,10 @@ if __name__ == "__main__":
 
 | マイルストーン | 内容 | 受け入れゲート |
 |---|---|---|
-| M0 | 定数・スロット・source・既定値・`wizard_save(bump)`・chars正規化 | source優先度、既定値非保存、chars文字列化のテスト |
-| M1 | 下書きCRUD・引き継ぎ元ステップ・`apply_answer`・`apply_tags`・`apply_slots`・テンプレートcompose・`create` | 「引き継ぐ／引き継がない」が通り、AIなしで「引き継ぎ元→アイデア→相手→タグ→作成」が通る。二重作成なし |
-| M2 | モデル一覧・AIアダプタ・質問ジョブ・composeジョブ・stale/rev・キャンセル | モックAIで6問/2ラウンド、空出力→テンプレート、busy再送 |
-| M3 | `wizard.js` 全画面・引き継ぎ元画面・モデル設定UI・プレビュー保存・エラー/再試行・legacy公開 | リロード復元、連打、おまかせ即作成、AIなし作成、375px |
+| M0 | `wizard_tags.json` 作成（§7.4.1 カタログ）・定数・スロット・source・既定値・`wizard_save(bump)`・chars正規化 | カタログ読み込み、source優先度、既定値非保存、chars文字列化のテスト |
+| M1 | 下書きCRUD・引き継ぎ元ステップ・`apply_answer`・`apply_tags`・`apply_slots`・`wizard_build_chars`（プリセット優先）・テンプレートcompose・`create`・`wizard_enqueue_opening_image` | 「引き継ぐ／引き継がない」が通り、AIなしで「引き継ぎ元→アイデア→相手→タグ→作成」が通る。プリセットのタグがAIタグより優先され、開幕画像が `queued` で積まれ、二重作成なし |
+| M2 | モデル一覧・AIアダプタ・質問ジョブ・composeジョブ・年齢補正・`opening_image`タグ・stale/rev・キャンセル | モックAIで6問/2ラウンド、空出力→テンプレート、18歳未満→「なし」、開幕場面タグが空でもfallback、busy再送 |
+| M3 | `wizard.js` 全画面・引き継ぎ元画面・モデル設定UI・プレビュー保存・開幕画像の予告/トースト・エラー/再試行・legacy公開 | リロード復元、連打、おまかせ即作成、AIなし作成、画像OFF、375px |
 | M4 | テスト拡充・手動チェック・PWA/既存導線の回帰 | 下記チェックリスト全通し |
 
 ---
@@ -4416,6 +5145,12 @@ if __name__ == "__main__":
 | A22 | 「このチャンネルから引き継ぐ」で作成 | 元の `user_name` / `project` / 画像設定 / 参照ファイル / 本文AI設定が使われる |
 | A23 | チャンネル0件で「＋」 | 「引き継ぎ元なし」と「初期設定で作る」だけが出る |
 | A24 | アイデア入力後に `base` へ戻る | 「変更できません」と表示され、`base_locked` になる |
+| A25 | 年齢「高校2年生」 | 警告が出て、年齢が「なし」になる |
+| A26 | キャラプリセット「美咲」あり | プリセットのタグがAIタグより優先され、`locked` / `source=preset` になる |
+| A27 | 画像ONで作成 | 新チャンネルがすぐ開き、第一声の画像が `queued` / `generating`。ウィザードは待たない |
+| A28 | 画像OFFで作成 | 第一声に画像が付かず、`queued_images` にも積まれない |
+| A29 | ComfyUI停止中に作成 | チャンネルは作成され、画像は `error`。再生成できる |
+| A30 | 作成連打・再送 | 開幕画像は1つだけ。`opening_image_mid` が同じメッセージを指す |
 
 ---
 
@@ -4438,6 +5173,20 @@ if __name__ == "__main__":
 | 引き継ぎ元の確認が邪魔 | 既定を「引き継ぐ」にし、1画面だけ。前回の下書きは再開時にスキップ |
 | 未保存の設定が引き継がれない | 画面に「保存済みの設定のみ」と明記。必要ならPhase 2でスナップショット |
 | 別チャンネルから選べない | Phase 1は現在／なしの2択。別チャンネルは、そのチャンネルを開いてから「＋」 |
+| 年齢の文章表現を誤判定する | 「17歳」「高校2年生」などは未成年、「大学1年」「成人」は成人として扱う。判定できない場合は成人既定「なし」 |
+| プリセットのタグが服装を含む | プリセットはユーザーが固定した「正」なので、AIタグと違って服装もそのまま使う |
+| 開幕画像が遅い/失敗する | 非同期キューに積むだけにし、チャンネル作成は待たせない。失敗は画像の `error` 表示と再生成で回復する |
+| 開幕画像が二重に積まれる | `created_sid` の冪等作成と、最初のassistantの `image` 有無チェック。`opening: true` で識別する |
+| 画像OFFなのに画像が付く | `image_mode="off"` を最初に判定してキューに積まない |
+| 開幕画像に人物の外見が混ざる | プロンプトで場面タグのみ指示。`chars` と同名のタグは `wizard_enqueue_opening_image` で除去する |
+| 画像キューが混む | 開幕画像は既存キューに並ぶだけ。ウィザードの応答は待たない。画像完成は非ゴール |
+| 画像生成中にチャンネルを削除 | 既存の `image_worker` がセッションの存在を確認してスキップする |
+| 画面移動で実ジョブが stale になる | `/api/wizard/step` は `bump=False`。生成中は step を送らない |
+| 二重クリックで二重作成 | `wizard_create_lock` と `created_sid`／rev 再確認 |
+| プリセットを「使わない」に戻せない | `partner_preset_off` を保存し、空IDも送る |
+| プリセットの服装タグが消える | `source=="preset"` は `wizard_clean_tags` を通さない |
+| 人数タグが消えて画像が崩れる | 開幕画像の場面タグは人数タグを残し、無ければ `1girl` を補う |
+| rev競合で画面が古いまま | 409 に最新 `draft` を付け、`apiCall` が再描画する |
 
 ---
 
@@ -4450,6 +5199,278 @@ node --check public/wizard.js
 ```
 
 `wizard_tags.json` は起動時に読み込む。編集後はサーバーを再起動するか、`wizard_tags_cache` をクリアする。
+
+## 17. v1.5 レビュー指摘の修正一覧
+
+| 深刻度 | 指摘 | 対応 |
+|---|---|---|
+| 致命的 | `$("#newSession")` が `getElementById` と不一致 | `$("newSession")` に修正 |
+| 致命的 | 閉じる操作の step 保存が rev を上げ、生成ジョブが stale | `/api/wizard/step` を `bump=False`。生成中は閉じても step を送らない |
+| 致命的 | プリセットのタグが `wizard_normalize_chars` で削られる | `source=="preset"`／`locked` は `wizard_preset_tags` をそのまま使う |
+| 致命的 | タグカタログの axes/desc/ID が仕様と不一致 | §7.4.1 に完全な JSON を追加。`desc`・axes配列も読み替える |
+| 重大 | プレビューの instructions 編集で確定事項が消える | 常に末尾へ再付与。名前変更は chars／第一声へ反映 |
+| 重大 | `project`／`user_name` を空に戻せない | `or` 連鎖をやめ、明示的な空文字を保存 |
+| 重大 | プリセットの「使わない」が保存されない | `partner_preset_off` と空ID送信 |
+| 重大 | 作成失敗でフォームが消える | プレビューを再描画し、再試行ボタンを残す |
+| 重大 | Antigravity の configured／排他／キャンセル／エラー | configured を provider 考慮、`get_poke_lock`、`job.cancel`、`http_status` |
+| 重大 | rev 確認と保存が別ロック | `wizard_write` で同一ロック内に CAS。`/create` は専用ロック |
+| 中 | トーストがウィザードの下 | `body.wizard-open #toast` を前面に |
+| 中 | base のタイトル／進捗／モデルチップ | `titleFor`・`progressFor`、生成中はチップ無効 |
+| 中 | `wizard_thinking_level` が xhigh を拒否 | 検証と設定UIに xhigh を追加 |
+| 中 | `res.get("http")` で status 判定が死ぬ | `http_status` に修正 |
+| 中 | derived が auto を上書き／NG の表記ゆれ | `SOURCE_ORDER` と recompute を修正、NG を正規化 |
+| 軽微 | 終了ジョブがメモリに残る | `wizard_sweep` で TTL 回収 |
+| 軽微 | モバイルFABがウィザードに残る | `updateFabState` に `wizardOpen` を追加 |
+| 軽微 | confirm=false の再開で自動作成されない | `resumeJob`／`pollJob`／`startCreateChain` で統一。`idea-auto` は下書きを書き換えず1回だけ |
+
+## 18. v1.6 レビュー指摘（Hydrogen）の修正一覧
+
+| 深刻度 | 指摘 | 対応 |
+|---|---|---|
+| 致命的 | `wizard_ensure_builder` と `/api/app-settings` のデッドロック | `wizard_ensure_builder` では `wizard_lock` 解放後に `lock` を取得し、`/api/app-settings` では `with lock:` を抜けた直後に `wizard_lock` でキャッシュ破棄。ロック逆順ネストを完全に解消 |
+| 致命的 | compose ジョブで自動補完したスロットがリロードで消滅 | `wizard_do_compose` 内で `missing_before` を `wslot_set_auto` した直後に `wizard_save(d, bump=False)` を呼ぶように修正（以後の `wizard_load` で破棄されるのを防止） |
+| 致命的 | `#appSettings` 内のクリックで入力中のモデル名がリセット | `document.addEventListener("click")` で `#appSettings` 内の全クリック時に `loadWizardSettings()` を呼んでいた不具合を、`<details id="appSettings">` の `toggle` イベント（展開時のみ）と `#appSave` クリック時の同期に是正 |
+| 重大 | `app.js` の `legacyNewSession()` 実装がプレースホルダのみ | 既存 `app.js`（L9980-10003）の完全な実装コードをプラン内に記述 |
+| 重大 | `window.switchTo` / `window.refreshSessions` が未公開で `location.reload()` にフォールバック | `app.js` 側で `window.switchTo` / `window.refreshSessions` を明示公開し、`wizard.js` 側でもグローバル `switchTo` / `refreshSessions` をフォールバック参照するよう二重化 |
+| 重大 | ジョブ実行中にモーダルを閉じると 409 `wizard_busy` で失敗 | `/api/wizard/step` に `wizard_write(body, bump=False, allow_running=True)` を指定し、UI状態更新をジョブ実行中でも安全に受容 |
+| 中 | 原作準拠度（`canon_fidelity`）が未選択時に `canon` に強制反転 | HTMLの `<select>` 既定順を `mixed`（推奨・既定値）優先に変更し、未設定時の意図しない反転を解消 |
+| 中 | Antigravity / AI無効モデル設定時にモデル画面へ誤リダイレクト | `open()` のモデル判定に `provider === "antigravity"`（モデル空許容）および `provider === "none"`（AI無効）の条件を追加 |
+| 中 | `#appSettings` の設定枠が `.settings-box` でスタイル未定義 | `public/index.html` および `style.css` 既存の `.box` / `.box-title` クラスに統一 |
+| 軽微 | M0マイルストーンに `wizard_tags.json` の作成が未明記 | §13 の M0 に §7.4.1 カタログに基づく `wizard_tags.json` の配置を明記 |
+
+## 19. v1.7 レビュー指摘（Hydrogen再精査）の修正一覧
+
+| 深刻度 | 指摘 | 対応 |
+|---|---|---|
+| 致命的 | `wizard_tags()` 内でループ変数 `t` がタイムスタンプ `t` をシャドーイングし、全タグ参照・セッション作成・17件の単体テストが `TypeError` でクラッシュ | `t = dict(x)` を `tag = dict(x)` に修正し、`wizard_tags_cache["ts"]` にタグ辞書ではなく正規のタイムスタンプ `time.time()` が保存されるように是正 |
+| 致命的 | `/api/app-settings` の差分が `server.py` の外側 `with lock:` 内に配置されデッドロックリスクが残留 | `/api/app-settings` を外側 `with lock:` の手前に独立配置し、`with lock:` を `APP_SETTINGS` 保存のスコープのみに限定。元の分岐を削除し、`lock` 解放後に `wizard_lock` でキャッシュ破棄する構成を明記 |
+| 致命的 | `do_POST` の差分で `d = self.body()` を再実行しリクエストストリーム枯渇・例外発生 | 既に `server.py` 冒頭でパース済みの `d` および `p = u.path` をそのまま利用し、二重読み込みと再分割を排除 |
+| 重大 | `test_sweep_removes_oldest` で 2020 年の日時を使用し TTL で全削除されテストが失敗 | `time.time() - 3600` を基準とする直近の日時を使用し、7日間のTTLにはかからず件数上限（20件）による古い下書きの間引きのみを正確に検証するよう修正 |
+| 重大 | `open()` 実行中に `ensureDraft()` が例外で失敗すると空のモーダルが閉じずに残留 | `ensureDraft()` を try-catch で保護し、失敗時は `.hidden` 付加、`wizard-open` 除去、`releaseFocus()`、FAB同期を行う |
+| 重大 | モーダル表示・非表示時に `updateFabState()` が呼ばれずモバイルFABが非表示のまま残る | `open()` および `close()` 時に `updateFabState()` を明示的に呼び出し、モバイルFABの開閉表示を即時同期 |
+| 中 | ウィザード内モデル選択モーダル（`renderModel`）で `xhigh` 思考深度が選択不可 | `#wizThink` の `<select>` オプションに `xhigh（Gemini 4 Hydrogen 系のみ）` を追加 |
+| 中 | 新規チャンネル作成時の Antigravity 会話作成完了後に会話一覧が即時反映されない | `checked("/api/ide/new")` 完了時に `loadIdeSessions()` および `refreshSessions()` を呼び出すように改善 |
+| 中 | `#appSettings` が最初から展開されている場合にウィザード設定値が空欄になる | `init()` 時に `appSetEl.open` であれば即座に `loadWizardSettings()` を実行するガードを追加 |
+| 軽微 | `public/index.html` 内の作成AIボックスの具体的な挿入位置が曖昧 | `#appSettings` 内の `#appSave` 行の直後、候補の婉曲表現ボックスの手前であることを明記。`app.js` のキャッシュバージョン（`v=137` → `v=138`）も整合 |
+
+**仕様書との関係**: `docs/channel-wizard-spec.md` の §6.3 は旧形式（axes配列・`desc`・`ntr` 等のID）を含むため、実装は本プラン §7.4.1 のカタログを正とし、旧形式も読み替える。
+
+## 20. v1.8 再精査での追加修正
+
+v1.7 の指摘はすべて有効だったが、実装に落とすと不足する点が3つあったため補正した。
+
+1. **`open()` 失敗時のフォーカス復帰**
+   `trapFocus()` の後に `ensureDraft()` が失敗すると、モーダルを隠してもフォーカスが背面に戻らなかった。`releaseFocus()` と `stopPoll()` を catch に追加。
+
+2. **`/api/app-settings` 移設後の旧分岐削除**
+   外側 `with lock:` の手前に移すだけでは、元の内側分岐が到達不能な重複として残る。移設時に元の `if p == "/api/app-settings":` を必ず削除する旨を明記。
+
+3. **`do_POST` はパース済みの `p` を使う**
+   `self.path` の再分割ではなく、既に取得済みの `p = u.path` を `wizard_route` に渡すよう統一。
+
+あわせて、Antigravity 会話作成後の一覧同期を `await loadIdeSessions()` / `await refreshSessions()` にし、`wizard_tags()` を2回読む回帰テストと、`custom_ng` の重複プロパティ削除を追加した。
+
+---
+
+## 21. defaults/ 基盤（v1.9）
+
+### 21.1 目的
+
+`data/` を「初回起動に不要・私有・ユーザー変更データ」専用のまま維持し、配布する初期設定を置くための `defaults/` 基盤を追加した。
+
+今回は基盤のみで、`wizard_tags.json` の移動は次フェーズ。
+
+### 21.2 追加ファイル
+
+- `defaults/README.md`
+  - `defaults/` を Git 管理するための説明ファイル
+  - 読み取り専用、秘密情報禁止、`data/` 優先を明記
+- `test/test_defaults.py`
+  - defaults/data の解決順とフォールバックの単体テスト
+
+### 21.3 `server.py` の変更
+
+`DATA` の直後に定数を追加。
+
+```python
+DATA = os.environ.get("RPCHAT_DATA", os.path.join(ROOT, "data"))
+DEFAULTS = os.path.join(ROOT, "defaults")
+```
+
+`read_text()` の直後に解決ヘルパーを追加。
+
+```python
+def _seed_rel(rel):
+    """defaults/data 配下の相対パスを安全な形に正規化する。"""
+    s = str(rel or "").replace("\\", "/").strip()
+    if not s:
+        raise ValueError("empty defaults path")
+    if os.path.isabs(s) or s.startswith("/") or ":" in s.split("/", 1)[0]:
+        raise ValueError("absolute defaults path")
+    return s
+
+
+def _under(root, rel):
+    """root の外に出るパスを拒否して絶対パスを返す。"""
+    root_abs = os.path.abspath(root)
+    path = os.path.abspath(os.path.join(root_abs, _seed_rel(rel)))
+    try:
+        common = os.path.commonpath([root_abs, path])
+    except ValueError:
+        raise ValueError("invalid defaults path")
+    if os.path.normcase(common) != os.path.normcase(root_abs):
+        raise ValueError("invalid defaults path")
+    return path
+
+
+def defaults_path(rel):
+    """defaults/ 配下の絶対パスを返す（存在確認はしない）。"""
+    return _under(DEFAULTS, rel)
+
+
+def seed_path(rel):
+    """
+    ユーザー版 data/ があればそれを、無ければ defaults/ を返す。
+    どちらも無ければ空文字列。
+    """
+    user = _under(DATA, rel)
+    if os.path.isfile(user):
+        return user
+    default = defaults_path(rel)
+    if os.path.isfile(default):
+        return default
+    return ""
+
+
+def read_seed_json(rel, fallback):
+    """data/ 優先、無ければ defaults/、無ければ fallback。"""
+    path = seed_path(rel)
+    if not path:
+        return fallback
+    try:
+        return read_json(path, fallback)
+    except Exception:
+        return fallback
+
+
+def read_seed_text(rel, fallback=""):
+    """テキスト版。data/ 優先、無ければ defaults/、無ければ fallback。"""
+    path = seed_path(rel)
+    if not path:
+        return fallback
+    try:
+        value = read_text(path)
+        return fallback if value is None else value
+    except Exception:
+        return fallback
+```
+
+### 21.4 読み込み契約
+
+| 用途 | 使う関数 | 書き込み先 |
+|---|---|---|
+| ユーザー設定の読み込み | `seed_path()` / `read_seed_json()` / `read_seed_text()` | `data/` |
+| 配布カタログの読み込み | `defaults_path()` | なし |
+| ユーザー設定の保存 | 既存の `write_json()` | `data/` |
+| defaults への保存 | 禁止 | なし |
+
+- `data/` と `defaults/` の両方がある場合、`data/` を優先する。
+- `defaults/` は読み取り専用。
+- `wizard_tags.json` は配布カタログなので、将来は `defaults_path("wizard_tags.json")` を使う。
+- `wizard_tags.json` にユーザー上書きを許す場合は、別名（例: `wizard_tags.local.json`）にする。
+- v1.9 のフェーズでは `WIZARD_TAGS_PATH` を変更していない（§22 で変更済み）。
+
+### 21.5 テスト
+
+`test/test_defaults.py` を追加し、以下を検証する。
+
+- defaults のみ存在する場合
+- `data/` が `defaults/` を上書きする場合
+- 両方無い場合の fallback
+- テキストファイルの同じ解決
+- `../` による defaults 外参照の拒否
+- 絶対パスの拒否
+- Windows の `\` 区切りの正規化
+- 壊れた JSON の fallback
+- `defaults/README.md` の存在
+
+実行結果:
+
+```text
+python -m unittest test.test_defaults -v
+Ran 12 tests ... OK
+
+python -m unittest test.test_wizard_server -v
+Ran 47 tests ... OK
+
+python -m py_compile server.py
+OK
+```
+
+### 21.6 受け入れ
+
+- `git check-ignore -v defaults/README.md` が出力なし
+- `git status --short` で `data/` と `.gitignore` が変更されていない
+- 既存のウィザードテスト47件が成功
+- サーバー起動時に `defaults/` への書き込みが発生しない
+
+### 21.7 次フェーズ（実施済み）
+
+`wizard_tags.json` を `defaults/` へ移動し、`WIZARD_TAGS_PATH = defaults_path("wizard_tags.json")` に変更した。詳細は §22。
+
+`decensor.json`、`writing_style.md`、`char-presets.json` は `read_seed_json()` / `read_seed_text()` へ段階的に接続する。
+
+---
+
+## 22. `wizard_tags.json` の defaults 移行（v2.0）
+
+### 22.1 変更内容
+
+- `data/wizard_tags.json` を `defaults/wizard_tags.json` へ移動した。
+- `WIZARD_TAGS_PATH` を `defaults_path("wizard_tags.json")` に変更した。
+- `DATA` や `ROOT` 直下へのフォールバックは削除した。
+- `defaults_path()` を `WIZARD_TAGS_PATH` の初期化より前に定義した。
+  - 起動時に `wizard_tags.json` を読むため、`NameError` を避ける。
+
+```python
+WIZARD_TAGS_PATH = defaults_path("wizard_tags.json")
+```
+
+### 22.2 読み込み仕様
+
+- 配布カタログは `defaults/wizard_tags.json` を直接読む。
+- `data/wizard_tags.json` へのユーザー上書きは行わない。
+  - 将来ユーザー編集を許す場合は `wizard_tags.local.json` のような明示的な別名を追加する。
+- テストでは `WizardTestBase` が `WIZARD_TAGS_PATH` を一時ファイルへ差し替えるため、既存のテストは決定的なまま。
+
+### 22.3 回帰テスト
+
+`test/test_defaults.py` に以下を追加した。
+
+- `server.WIZARD_TAGS_PATH` が `defaults/wizard_tags.json` を指す
+- ファイルが存在する
+- `tags` が空でないリストである
+
+実行結果:
+
+```text
+python -m unittest test.test_defaults -v
+Ran 13 tests ... OK
+
+python -m unittest test.test_wizard_server -v
+Ran 47 tests ... OK
+
+python -m py_compile server.py
+OK
+```
+
+### 22.4 受け入れ
+
+- `data/wizard_tags.json` が存在しない
+- `defaults/wizard_tags.json` が存在し、JSON として読める
+- 新規 `RPCHAT_DATA` でもタグカタログが読める
+- `WIZARD_TAGS_PATH` が `defaults_path()` の結果と一致する
+- 既存のウィザードテスト47件が成功
 
 ---
 

@@ -105,8 +105,14 @@ function createTestEnvironment() {
     toast: new StubElement("toast"),
     toastIcon: new StubElement("toastIcon"),
     toastMsg: new StubElement("toastMsg"),
+    toastBackdrop: new StubElement("toastBackdrop"),
+    topNotice: new StubElement("topNotice"),
+    topNoticeIcon: new StubElement("topNoticeIcon"),
+    topNoticeMsg: new StubElement("topNoticeMsg"),
   };
   elements.toast.classList.add("hidden");
+  elements.toastBackdrop.classList.add("hidden");
+  elements.topNotice.classList.add("hidden");
 
   const sandbox = {
     console,
@@ -299,6 +305,40 @@ console.log("=== 4. dismissToast (タップ消去) とライフサイクル ==="
   console.log("  PASS: dismissToast と退場中・消去直後の再要求");
 }
 
+console.log("=== 4b. 長文モーダルの外側タップ ===");
+{
+  const { sandbox, elements, fakeTimers } = createTestEnvironment();
+
+  // 短文は中央モーダルではないので、外側を覆わない
+  sandbox.toast("短い通知", { kind: "ok" });
+  assert.strictEqual(elements.toastBackdrop.classList.contains("hidden"), true);
+
+  // 長文は外側クリック用の背景を出す
+  sandbox.toast("あ".repeat(49), { kind: "err" });
+  assert.strictEqual(elements.toast.dataset.long, "1");
+  assert.strictEqual(elements.toastBackdrop.classList.contains("hidden"), false, "長文モーダルでは外側の背景を出すこと");
+  assert.strictEqual(typeof elements.toastBackdrop.onclick, "function", "外側タップに dismissToast が登録されていること");
+
+  elements.toastBackdrop.onclick();
+  assert.strictEqual(elements.toastBackdrop.classList.contains("hidden"), true, "外側タップで背景が消えること");
+  assert.strictEqual(elements.toast.classList.contains("fade-out"), true, "外側タップでカードも閉じ始めること");
+  fakeTimers.advance(280);
+  assert.strictEqual(elements.toast.classList.contains("hidden"), true);
+
+  // 自動消去でも背景を残さない
+  sandbox.toast("い".repeat(49), { kind: "err", ms: 1000 });
+  assert.strictEqual(elements.toastBackdrop.classList.contains("hidden"), false);
+  fakeTimers.advance(1000);
+  assert.strictEqual(elements.toastBackdrop.classList.contains("hidden"), true, "自動消去で背景も消えること");
+
+  // 長文の後に短文が来たら背景は消える
+  sandbox.toast("う".repeat(49), { kind: "err" });
+  sandbox.toast("短い通知", { kind: "ok" });
+  assert.strictEqual(elements.toastBackdrop.classList.contains("hidden"), true);
+
+  console.log("  PASS: 長文モーダルの外側タップ / 自動消去 / 短文への切替");
+}
+
 console.log("=== 5. アクセシビリティ順序 (hidden 解除が本文代入より先行) ===");
 {
   const { sandbox, elements, operationsLog } = createTestEnvironment();
@@ -330,7 +370,7 @@ console.log("=== 6. 新規通知による旧タイマー破棄 ===");
   console.log("  PASS: 新規通知によるタイマー差し替え");
 }
 
-console.log("=== 7. decensorSig / checkDecensorDiff / announceDecensor 単体検証 ===");
+console.log("=== 7. decensorSig / checkDecensorDiff / 最上段の完了通知 ===");
 {
   const { sandbox, elements, fakeTimers } = createTestEnvironment();
 
@@ -346,7 +386,7 @@ console.log("=== 7. decensorSig / checkDecensorDiff / announceDecensor 単体検
   assert.notStrictEqual(sig1, sigSlot, "同一秒でも slot が変わればシグネチャが異なること");
   assert.notStrictEqual(sig1, sigTargetTs, "同一秒でも target_ts が変わればシグネチャが異なること");
 
-  // 7-2: checkDecensorDiff (初回 isFirst = true は発火しない)
+  // 7-2: 初回 isFirst = true は発火しない
   const state1 = {
     messages: [
       { id: "m1", role: "assistant", text_decensor: { applied: [{ from: "a", to: "b", count: 1 }] } }
@@ -354,41 +394,38 @@ console.log("=== 7. decensorSig / checkDecensorDiff / announceDecensor 単体検
   };
   sandbox.checkDecensorDiff(null, state1, true);
   fakeTimers.advance(1000);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), true, "初回読み込みではトーストが出ないこと");
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true, "初回読み込みでは通知しないこと");
 
-  // 7-3: 本文復元 1件（単数形文言）
+  // 7-3: 本文復元 1件（最上段の通知）
   const state2 = {
     messages: [
       { id: "m1", role: "assistant", text_decensor: { applied: [{ from: "a", to: "b", count: 1 }] } }
     ]
   };
   sandbox.checkDecensorDiff({ messages: [] }, state2, false);
-  fakeTimers.advance(799);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), true, "集約ウィンドウ (800ms) 内はまだ鳴らない");
-  fakeTimers.advance(1); // 800ms 経過
-  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
-  assert.strictEqual(elements.toastMsg.textContent, "婉曲表現を戻しました");
-  assert.strictEqual(elements.toast.dataset.kind, "ok");
-
+  fakeTimers.advance(299);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true, "集約ウィンドウ (300ms) 内はまだ出さない");
+  fakeTimers.advance(1); // 300ms 経過
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "婉曲表現を修正（1）");
+  assert.strictEqual(elements.topNotice.dataset.kind, "ok");
   fakeTimers.advance(2200 + 280); // 消えるのを待つ
-  assert.strictEqual(elements.toast.classList.contains("hidden"), true);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true);
 
   // 7-4: 本文＋候補の集約（複数件）
-  // ほぼ同時に本文(2件)と候補(1件)が到着
   const decBody = { applied: [{ from: "a", to: "b", count: 2 }] };
   const decChoices = { applied: [{ from: "c", to: "d", count: 1 }] };
   sandbox.announceDecensor(decBody);
-  fakeTimers.advance(300);
+  fakeTimers.advance(200);
   sandbox.announceDecensor(decChoices);
-  fakeTimers.advance(799);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), true, "2回目の到着から800msまでは待機");
-  fakeTimers.advance(1); // 800ms経過
-  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
-  assert.strictEqual(elements.toastMsg.textContent, "婉曲表現を3か所 戻しました", "800ms 以内に届いた件数が合算されること");
+  fakeTimers.advance(299);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true, "2回目の到着から300msまでは待機");
+  fakeTimers.advance(1);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "婉曲表現を修正（3）", "800ms 以内に届いた件数が合算されること");
+  fakeTimers.advance(2200 + 280);
 
-  fakeTimers.advance(2200 + 280); // 消去待機
-
-  // 7-4b: checkDecensorDiff で choices_decensor の単独検知
+  // 7-4b: choices_decensor の単独検知
   const stateChoicesOnly = {
     messages: [
       { id: "m_c1", role: "assistant", choices_decensor: { slot: "normal", applied: [{ from: "c", to: "d", count: 2 }] } }
@@ -396,13 +433,11 @@ console.log("=== 7. decensorSig / checkDecensorDiff / announceDecensor 単体検
   };
   sandbox.checkDecensorDiff({ messages: [] }, stateChoicesOnly, false);
   fakeTimers.advance(800);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
-  assert.strictEqual(elements.toastMsg.textContent, "婉曲表現を2か所 戻しました");
-  assert.strictEqual(elements.toast.dataset.kind, "ok");
-
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "婉曲表現を修正（2）");
   fakeTimers.advance(2200 + 280);
 
-  // 7-4c: checkDecensorDiff で 1つのメッセージに text_decensor と choices_decensor が同時に到着
+  // 7-4c: 同一メッセージ内の本文・候補復元を合算
   const stateBoth = {
     messages: [
       {
@@ -415,41 +450,55 @@ console.log("=== 7. decensorSig / checkDecensorDiff / announceDecensor 単体検
   };
   sandbox.checkDecensorDiff({ messages: [] }, stateBoth, false);
   fakeTimers.advance(800);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
-  assert.strictEqual(elements.toastMsg.textContent, "婉曲表現を4か所 戻しました", "同一メッセージ内の本文・候補復元が合算されること");
-
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "婉曲表現を修正（4）");
   fakeTimers.advance(2200 + 280);
 
-  // 7-4d: 複数アシスタント発言の復元合算
-  const stateMulti = {
-    messages: [
-      { id: "m_asst_1", role: "assistant", text_decensor: { applied: [{ from: "a", to: "b", count: 1 }] } },
-      { id: "m_asst_2", role: "assistant", text_decensor: { applied: [{ from: "x", to: "y", count: 1 }] } },
-    ]
-  };
-  sandbox.checkDecensorDiff({ messages: [] }, stateMulti, false);
-  fakeTimers.advance(800);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
-  assert.strictEqual(elements.toastMsg.textContent, "婉曲表現を2か所 戻しました");
-
-  fakeTimers.advance(2200 + 280);
-
-  // 7-5: resetDecensorToast によるキャンセル
-  sandbox.announceDecensor({ applied: [{ from: "x", to: "y", count: 1 }] });
-  sandbox.resetDecensorToast();
-  fakeTimers.advance(1000);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), true, "resetDecensorToast で保留中の通知がキャンセルされること");
-
-  // 7-5b: 表示中のトーストがある状態での resetDecensorToast（チャンネル切替時の即座退場）
-  sandbox.toast("切替前通知", { kind: "ok" });
-  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
-  assert.strictEqual(elements.toast.classList.contains("fade-out"), false);
-  sandbox.resetDecensorToast();
-  assert.strictEqual(elements.toast.classList.contains("fade-out"), true, "resetDecensorToast で表示中トーストが即座に fade-out すること");
+  // 7-5: 返答完了→選択肢生成完了は、同じ最上段で順番に出す（重ならない）
+  sandbox.topNotice("✅ 返答完了", { ms: 1800, tag: "body" });
+  sandbox.topNotice("✅ 選択肢生成完了", { ms: 2200, tag: "choices" });
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "✅ 返答完了");
+  fakeTimers.advance(1800);
+  assert.strictEqual(elements.topNotice.classList.contains("fade-out"), true);
   fakeTimers.advance(280);
-  assert.strictEqual(elements.toast.classList.contains("hidden"), true, "280ms 後に完全に hidden になること");
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "✅ 選択肢生成完了", "前の通知が消えてから次を出すこと");
+  fakeTimers.advance(2200 + 280);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true);
 
-  console.log("  PASS: decensorSig / checkDecensorDiff / 800ms 集約 / resetDecensorToast");
+  // 7-5b: 3つ連続しても上書きせず、すべて順番に見せる
+  sandbox.topNotice("✅ 返答完了", { ms: 500, tag: "body" });
+  sandbox.topNotice("✅ 選択肢生成完了", { ms: 500, tag: "choices" });
+  sandbox.topNotice("婉曲表現を修正（1）", { ms: 500, tag: "decensor" });
+  assert.strictEqual(elements.topNoticeMsg.textContent, "✅ 返答完了");
+  fakeTimers.advance(500);
+  assert.strictEqual(elements.topNotice.classList.contains("fade-out"), true);
+  fakeTimers.advance(280);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "✅ 選択肢生成完了", "1つ目が消えたら2つ目を出すこと");
+  fakeTimers.advance(500);
+  assert.strictEqual(elements.topNotice.classList.contains("fade-out"), true);
+  fakeTimers.advance(280);
+  assert.strictEqual(elements.topNoticeMsg.textContent, "婉曲表現を修正（1）", "2つ目が消えたら3つ目を出すこと");
+  fakeTimers.advance(500 + 280);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true);
+
+  // 7-6: resetDecensorToast は無関係なトーストを消さず、婉曲の最上段通知だけ消す
+  sandbox.toast("切替前通知", { kind: "ok" });
+  sandbox.topNotice("婉曲表現を修正（1）", { ms: 2200, tag: "decensor" });
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), false);
+  sandbox.resetDecensorToast();
+  assert.strictEqual(elements.topNotice.classList.contains("fade-out"), true, "表示中の婉曲通知は閉じる");
+  assert.strictEqual(elements.toast.classList.contains("fade-out"), false, "無関係なトーストは消さない");
+  fakeTimers.advance(280);
+  assert.strictEqual(elements.topNotice.classList.contains("hidden"), true);
+  assert.strictEqual(elements.toast.classList.contains("hidden"), false);
+
+  // 7-7: 実装が最上段通知を使っていること
+  assert.ok(appJs.includes("topNotice") && appJs.includes("topNotice(\"返答完了\"") && appJs.includes("topNotice(\"選択肢生成完了\""));
+  assert.ok(appJs.includes("婉曲表現を修正（${total}）"), "婉曲修正も同じ最上段通知で出すこと");
+
+  console.log("  PASS: decensorSig / 300ms 集約 / 連続通知の順番表示 / resetDecensorToast");
 }
 
 console.log("=== 8. エッジケース検証 (null/undefined/未知kind/非assistant無視/復元消失) ===");

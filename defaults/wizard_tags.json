@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "axes": {
+    "relation": { "label": "関係性", "max": 3 },
+    "world": { "label": "世界観", "max": 2 },
+    "tone": { "label": "雰囲気", "max": 2 },
+    "kink": { "label": "特殊要素", "max": 4 },
+    "role": { "label": "あなたの立場", "max": 2 }
+  },
+  "tags": [
+    { "id": "rel_pure", "label": "純愛", "axis": "relation", "description": "相手を大切にする、まっすぐな恋愛。", "effects": { "relationship": ["純愛"], "tone": ["穏やか"] }, "image_tags": ["romantic", "gentle lighting"] },
+    { "id": "rel_childhood", "label": "幼馴染", "axis": "relation", "description": "子どもの頃から一緒の、遠慮のない関係。", "effects": { "relationship": ["幼馴染"] }, "image_tags": ["childhood friend", "warm light"] },
+    { "id": "rel_lover", "label": "恋人", "axis": "relation", "description": "すでに付き合っている二人。", "effects": { "relationship": ["恋人"] }, "image_tags": ["couple", "close distance"] },
+    { "id": "rel_rival", "label": "ライバル", "axis": "relation", "description": "負けたくない相手。反発と惹かれ合い。", "effects": { "relationship": ["ライバル"] }, "image_tags": ["rival", "tension"] },
+    { "id": "rel_family", "label": "家族", "axis": "relation", "description": "家族として暮らす二人。", "effects": { "relationship": ["家族"] }, "image_tags": ["family", "home"] },
+
+    { "id": "world_school", "label": "学園", "axis": "world", "description": "学校を舞台にした日常。", "effects": { "world": ["学園"] }, "image_tags": ["classroom", "after school"] },
+    { "id": "world_office", "label": "オフィス", "axis": "world", "description": "仕事場での関係。", "effects": { "world": ["オフィス"] }, "image_tags": ["office", "city night"] },
+    { "id": "world_fantasy", "label": "ファンタジー", "axis": "world", "description": "魔法や剣のある世界。", "effects": { "world": ["ファンタジー"] }, "image_tags": ["fantasy castle", "magic"] },
+
+    { "id": "tone_gentle", "label": "穏やか", "axis": "tone", "description": "静かでやさしい空気。", "effects": { "tone": ["穏やか"] }, "image_tags": ["soft lighting"] },
+    { "id": "tone_dark", "label": "ダーク", "axis": "tone", "description": "重く、影のある雰囲気。", "effects": { "tone": ["ダーク"] }, "image_tags": ["dark lighting", "shadow"] },
+    { "id": "tone_comedy", "label": "コメディ", "axis": "tone", "description": "軽快で笑いのある会話。", "effects": { "tone": ["コメディ"] }, "image_tags": ["bright lighting"] },
+
+    { "id": "kink_ntr", "label": "NTR", "axis": "kink", "description": "第三者が絡む背徳的な関係。", "effects": { "kinks": ["NTR"], "tone": ["背徳"] }, "conflicts_ng": ["ng_ntr"] },
+    { "id": "kink_gore", "label": "グロ", "axis": "kink", "description": "流血や残酷な描写を含む。", "effects": { "kinks": ["グロ"], "tone": ["凄惨"] }, "conflicts_ng": ["ng_gore"] },
+    { "id": "kink_bondage", "label": "拘束", "axis": "kink", "description": "拘束や主従の要素。", "effects": { "kinks": ["拘束"], "intensity": ["hard"] }, "image_tags": ["restrained"] },
+    { "id": "kink_public", "label": "公開", "axis": "kink", "description": "人目につく場所での緊張感。", "effects": { "kinks": ["公開"], "intensity": ["medium"] }, "image_tags": ["public place"] },
+
+    { "id": "role_hero", "label": "主人公", "axis": "role", "description": "物語の中心になる立場。", "effects": { "player_role": ["主人公"] } },
+    { "id": "role_teacher", "label": "教師", "axis": "role", "description": "教える側の立場。", "effects": { "player_role": ["教師"] } },
+    { "id": "role_senior", "label": "先輩", "axis": "role", "description": "一歩先を行く立場。", "effects": { "player_role": ["先輩"] } }
+  ],
+  "ng_presets": [
+    { "id": "ng_minor", "label": "未成年", "locked": true },
+    { "id": "ng_ntr", "label": "NTR" },
+    { "id": "ng_gore", "label": "グロ・流血" },
+    { "id": "ng_scat", "label": "排泄" },
+    { "id": "ng_ryona", "label": "リョナ" }
+  ],
+  "examples": [
+    "幼馴染と、放課後の教室で秘密の関係を始める",
+    "事故で同居することになった年上の上司との、ぎこちない日常",
+    "魔法学院のライバル同士が、共同任務で距離を縮める"
+  ]
+}

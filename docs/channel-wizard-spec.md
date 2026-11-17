@@ -1,6 +1,6 @@
 # AIチャンネル作成ウィザード 仕様書
 
-- 対象: `public/index.html` / `public/app.js` / `public/wizard.js`（新規） / `public/wizard.css`（新規） / `server.py` / `wizard_tags.json`（新規）
+- 対象: `public/index.html` / `public/app.js` / `public/wizard.js`（新規） / `public/wizard.css`（新規） / `server.py` / `defaults/wizard_tags.json`（新規）
 - 状態: 実装前（本仕様で確定）
 - 前提: 既存の「＋」ボタン（`#newSession`）と `/api/session/new` は残す
 
@@ -443,7 +443,7 @@ AI質問の `invalidates` も同じ仕組みで適用する。ユーザーが明
 
 ### 6.3 タグカタログ
 
-`wizard_tags.json`（リポジトリ直下、ソース管理）に置く。
+`defaults/wizard_tags.json`（ソース管理、読み取り専用）に置く。
 サーバーが起動時に読み、`/api/wizard/meta` で配信する。
 
 ```json

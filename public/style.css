@@ -43,6 +43,23 @@ header h1#title { cursor: pointer; }
 .mobile-fab { display: none; }
 .settings-top-bar { display: none; }
 /* --- 上部中央トースト --- */
+/* 長文エラーのモーダル表示中だけ、カードの外側を覆う。ここをタップすると閉じる */
+#toastBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 68;
+  background: rgba(6, 6, 10, .42);
+  cursor: pointer;
+  animation: toastBackdropIn .16s ease forwards;
+}
+#toastBackdrop.hidden { display: none; }
+@keyframes toastBackdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #toastBackdrop { animation: none; }
+}
 #toast {
   position: fixed;
   left: 50%;
@@ -60,9 +77,9 @@ header h1#title { cursor: pointer; }
 
   background: rgba(28, 30, 42, .94);
   color: #f0f0f5;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  line-height: 1.4;
+  line-height: 1.5;
   text-align: left;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -89,7 +106,7 @@ header h1#title { cursor: pointer; }
   display: inline-block;
   width: 13px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
   font-weight: 700;
 }
@@ -102,16 +119,34 @@ header h1#title { cursor: pointer; }
 #toast[data-kind="warn"] { border-color: rgba(255, 210, 122, .30); }
 #toast[data-kind="err"] { border-color: rgba(255, 153, 153, .34); }
 
-/* 既存の長文エラーは上部ピルに収まらないので、従来どおり下部に出す */
+/* 長文エラーは画面中央に出す（下部だと入力欄や候補に重なるため） */
 #toast[data-long="1"] {
-  top: auto;
-  bottom: 90px;
-  z-index: 61;
+  top: 50%;
+  bottom: auto;
+  z-index: 69;
+  width: min(560px, calc(100vw - 32px));
   max-width: min(560px, calc(100vw - 32px));
-  padding: 10px 14px;
-  border-radius: 12px;
+  max-height: min(60dvh, 420px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 14px 16px;
+  border-radius: 14px;
   align-items: flex-start;
   text-align: left;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .55);
+  animation: toastCenterIn .2s cubic-bezier(.16, 1, .3, 1) forwards;
+}
+#toast[data-long="1"].fade-out {
+  animation: toastCenterOut .24s cubic-bezier(.16, 1, .3, 1) forwards;
+}
+@keyframes toastCenterIn {
+  0% { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(.97); }
+  100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes toastCenterOut {
+  0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, calc(-50% + 6px)) scale(.98); }
 }
 #toast[data-long="1"] .toast-icon {
   margin-top: 2px;
@@ -138,6 +173,65 @@ header h1#title { cursor: pointer; }
 }
 @keyframes toastSpin { to { transform: rotate(360deg); } }
 
+/* 完了系（返答・選択肢・婉曲修正）だけは、入力待機・日時と同じ最上段の中央に出す。
+   本文の上には重ねず、位置も毎回ここで統一する。 */
+#topNotice {
+  position: fixed;
+  left: 50%;
+  top: max(10px, env(safe-area-inset-top));
+  z-index: 70;   /* 長文エラーの背景より上に置き、連続通知が隠れないようにする */
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 35px;
+  max-width: min(420px, calc(100vw - 170px));
+  padding: 7px 13px;
+  border-radius: 13px;
+  background: rgba(23, 69, 42, .97);
+  color: #dfffe9;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  border: 1px solid rgba(143, 218, 172, .55);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, .55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  animation: topNoticeIn .2s cubic-bezier(.16, 1, .3, 1) forwards;
+}
+#topNotice.hidden { display: none; }
+#topNotice.fade-out {
+  animation: topNoticeOut .24s cubic-bezier(.16, 1, .3, 1) forwards;
+  pointer-events: none;
+}
+#topNotice .top-notice-icon {
+  flex: 0 0 auto;
+  color: #9af0b6;
+  font-size: 13px;
+  line-height: 1;
+}
+#topNotice .top-notice-msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes topNoticeIn {
+  from { opacity: 0; transform: translate(-50%, -4px) scale(.96); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes topNoticeOut {
+  to { opacity: 0; transform: translate(-50%, -4px) scale(.97); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #topNotice, #topNotice.fade-out { animation: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   #toast { animation: none; }
   #toast.fade-out { animation: none; opacity: 0; }
@@ -152,7 +246,8 @@ header h1#title { cursor: pointer; }
   pre, code, table, .table-scroll, .code-scroll,
   [data-no-drawer-swipe] { touch-action: auto; }
 
-  header { display: none !important; }
+  /* アプリのヘッダーだけを隠す。ウィザードの <header class="wizard-head"> まで消さない */
+  #app > header { display: none !important; }
 
   /* ドロワー本体：display/left ではなく transform で制御（F-23） */
   #sidebar {
@@ -544,16 +639,71 @@ footer { flex-shrink: 0; }
 .typing span:nth-child(2) { animation-delay: .2s; } .typing span:nth-child(3) { animation-delay: .4s; }
 @keyframes blink { 0%,80%,100% { opacity: .2 } 40% { opacity: 1 } }
 /* 応答待ちのあいだ、担当の Antigravity 会話がしていること */
-.progress { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; max-width: 100%; }
+.progress {
+  margin-top: 6px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px;
+  font-size: 13px; max-width: 100%; flex-shrink: 0; box-sizing: border-box;
+  /* 背景画像の上でも文字が読めるよう、薄いパネルを敷く（エラー行はさらに濃く） */
+  background: rgba(16, 16, 22, .68);
+  border: 1px solid rgba(255, 255, 255, .06);
+  border-radius: 10px;
+  padding: 6px 8px;
+}
 .progress .p-row { display: flex; gap: 6px; align-items: baseline; min-width: 0; color: #9a9aa6; }
 .progress .p-row .p-mark { flex-shrink: 0; width: 1.2em; text-align: center; }
-.progress .p-row .p-text { flex-shrink: 0; color: #c4c8d8; }
-.progress .p-row .p-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; font-size: 11px; color: #7d8296; }
+.progress .p-row .p-text { flex-shrink: 0; color: #e8eaf2; font-size: 13px; font-weight: 600; line-height: 1.4; }
+.progress .p-row .p-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; font-size: 12px; color: #b9bfce; line-height: 1.5; }
 .progress .p-row.now .p-mark { animation: blink 1.4s infinite both; color: #ffd27a; }
 .progress .p-row.now .p-text { color: #ffd27a; }
 .progress .p-row.error .p-text { color: #ff9999; }
-.progress .p-row.filter .p-mark, .progress .p-row.filter .p-text { color: #f59e0b; }
-.progress .p-note { color: #777; }
+.progress .p-row.filter .p-mark, .progress .p-row.filter .p-text { color: #ffc76b; }
+/* エラー行は説明を3行まで折り返す（1行省略だと対策文が読めないため） */
+.progress .p-row.error {
+  display: grid;
+  grid-template-columns: 1.2em minmax(0, 1fr);
+  align-items: start;
+  gap: 1px 6px;
+  background: rgba(56, 20, 28, .92);
+  border: 1px solid rgba(255, 153, 153, .24);
+  border-radius: 8px;
+  padding: 5px 7px;
+  margin: 0 -7px;
+}
+.progress .p-row.error .p-mark { grid-row: 1 / span 2; }
+.progress .p-row.error .p-text {
+  grid-column: 2;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.progress .p-row.error .p-detail {
+  grid-column: 2;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow: hidden;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #d5d8e2;
+}
+/* 待機行（返答待ち・選択肢生成中など「いま待っているもの」）はオレンジで統一 */
+.progress .p-row.wait .p-text { color: #ffd27a; }
+/* 3件の窓を1件ずつ進める（新しい項目だけ下から出す） */
+.progress .p-row.p-enter { animation: progressRowIn .24s cubic-bezier(.16, 1, .3, 1) both; }
+@keyframes progressRowIn {
+  from { opacity: 0; transform: translateY(9px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress .p-row.p-enter { animation: none; }
+}
 
 .gen-image { margin-top: 8px; max-width: 100%; }
 .gen-image img { max-width: 100%; max-height: 70vh; border-radius: 8px; cursor: zoom-in; display: block; border: 1px solid #38383f; }
@@ -2982,6 +3132,7 @@ button.rag-entry-pin.is-pinned {
   border-style: solid;
 }
 
+
 .choices-container .thumbs {
   order: 5;
   flex-basis: 100%;
@@ -4760,4 +4911,59 @@ button.rag-entry-pin.is-pinned {
   padding: 1px 6px;
   font-size: 11px;
   line-height: 1.2;
+}
+
+/* 長文モーダルは下部シートではなく、画面中央に余白付きで出す。
+   短い確認ダイアログは従来どおり下部シートのまま（親指で届くため）。 */
+@media (max-width: 768px) {
+  #textModal,
+  #ragHitsModal,
+  #favModelSheet,
+  #favPickerModal {
+    align-items: center;
+    padding: 16px;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+  #textModal > .modal-content.wide {
+    width: min(900px, 100%);
+    height: min(78dvh, 720px);
+    max-height: calc(var(--app-vvh, 100dvh) - 32px);
+    border-radius: 14px;
+    border: 1px solid #44444c;
+    padding: 16px 14px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    overflow: hidden;
+    animation: modalCenterIn .18s ease-out;
+  }
+  #textModal .modal-textarea { min-height: 0; }
+  #ragHitsModal > .rag-hits-modal-content {
+    width: min(580px, 100%);
+    max-width: 100%;
+    height: auto;
+    max-height: calc(var(--app-vvh, 100dvh) - 32px);
+    border-radius: 14px;
+    border: 1px solid #44444c;
+    animation: modalCenterIn .18s ease-out;
+  }
+  #favModelSheet .modal-content.compact.fav-model-sheet {
+    width: min(520px, 100%);
+    max-width: 100%;
+    max-height: calc(var(--app-vvh, 100dvh) - 32px);
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, .08);
+    animation: modalCenterIn .18s ease-out;
+  }
+  #favPickerModal .modal-content {
+    width: min(480px, 100%);
+    max-width: 100%;
+    max-height: calc(var(--app-vvh, 100dvh) - 32px);
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, .08);
+    animation: modalCenterIn .18s ease-out;
+  }
+}
+@keyframes modalCenterIn {
+  from { opacity: 0; transform: scale(.98); }
+  to { opacity: 1; transform: scale(1); }
 }

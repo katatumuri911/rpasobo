@@ -793,7 +793,9 @@ class TestParallelChoices(unittest.TestCase):
         self.assertTrue(os.path.isfile(choices_agents))
         with open(choices_agents, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("--ide choices-sess-uuid", content)
+        self.assertIn("wait_input.py", content)
+        self.assertIn("合図に書かれている", content)
+        self.assertNotIn("--ide choices-sess-uuid", content)  # 共有フォルダなので固定IDは書かない
         self.assertIn(f"channel={sid}_choices", content)
         self.assertIn("Agents Test RPG", content)
 
@@ -941,7 +943,7 @@ class TestParallelChoices(unittest.TestCase):
             self.assertTrue(os.path.isfile(choices_agents))
             with open(choices_agents, "r", encoding="utf-8") as f:
                 content = f.read()
-            self.assertIn(s1_after["setting"]["choices_ide_session"], content)
+            self.assertIn("合図に書かれている", content)
 
             # sid_off should NOT be paired
             s2_after = server.load(sid_off)

@@ -147,8 +147,8 @@ def image_prompt_guidelines_text(for_refine=False, brief=False):
         "   - ポーズタグは (3) の位置（行為・性器タグの直後、衣装より前）に置き、既存のポーズタグ（standing と lying 等）と矛盾する場合は古い方を必ず削除すること。\n\n"
         "11. 【小道具・装具・排泄のタグ化（必須）】\n"
         "   - state の equipped_items / body_fluids と、ユーザー発言・本文に出てきた物・装具・体液・排泄は、本文で描写を省略しても必ず実在の Danbooru タグにして含めること。\n"
-        "   - 変換例: アナルゼリー/アナルジェル→lubricant, anal, anal object insertion / ローション→lubricant / 浣腸・浣腸器→enema, anal object insertion / アナルビーズ→anal beads / アナルプラグ→butt plug / バイブ・電マ→vibrator / 縄・緊縛→bondage, rope / 目隠し→blindfold / 手錠→handcuffs / 口枷→gag / コンドーム→condom / 放尿・おしっこ→peeing, urine / うんち・脱糞→feces, pooping\n"
-        "   - 【重要】lubricant は「潤滑液・液体」のタグで、ゼリーや浣腸器そのものは描かれない。ジェル状のものを注入・排泄する場面では anal object insertion を、浣腸器・チューブを見せる場面では enema を必ず併記すること。\n"
+        "   - 変換例: アナルゼリー/アナルジェル→lubricant, anal, anal object insertion, anus, ass focus, pink liquid, translucent, dripping, slime (substance) / ローション→lubricant / 浣腸・浣腸器→enema, anal object insertion / アナルビーズ→anal beads / アナルプラグ→butt plug / バイブ・電マ→vibrator / 縄・緊縛→bondage, rope / 目隠し→blindfold / 手錠→handcuffs / 口枷→gag / コンドーム→condom / 放尿・おしっこ→peeing, urine / うんち・脱糞→feces, pooping\n"
+        "   - 【重要】lubricant は「潤滑液・液体」のタグで、ゼリーや浣腸器そのものは描かれない。ゼリーの透明感・ピンク色・垂れは pink liquid, translucent, dripping, slime (substance) で補い、肛門からの排出は anus, ass focus を併記する。ジェル状のものを注入・排泄する場面では anal object insertion を、浣腸器・チューブを見せる場面では enema を必ず併記すること。\n"
         "   - 造語タグ（anal jelly, anal gel, lube 等）や日本語のままのタグは画像モデルに伝わらないため禁止。既に近いタグがある場合は重複させず実在タグに置き換えること。\n"
         "   - 前のターンにあった物・行為でも、もう終わった・抜いた・出し終えたものはタグを削除し、新しい状態（after anal, empty 等ではなく単にタグを消す）に合わせること。\n\n"
         "12. 【state の pose / expression / place / camera のタグ化（必須）】\n"
@@ -171,7 +171,7 @@ def state_tag_guidelines_text():
         "- image.prompt はサーバーが state から自動生成するため出力不要（image.characters のみ指定）。\n"
         "- pose / action / expression / background / camera は造語や日本語を避け、実在の Danbooru 英語タグで記述すること（outfit / outerwear / underwear / equipped_items / body_fluids / situation / inner は日本語で記述）。\n"
         "- 体勢(pose): I字バランス→standing split, leg up / M字開脚→spread legs, knees up, sitting / V字バランス→sitting, legs up / 四つん這い→all fours / 逆立ち→handstand / うつ伏せ→lying, on stomach / 仰向け→lying, on back / 正座→seiza / 片足立ち→standing on one leg / お姫様抱っこ→princess carry\n"
-        "- 行為・装具・排泄(action): 口淫→fellatio, deepthroat / 挿入→vaginal penetration, anal penetration / アナルゼリー→lubricant, anal, anal object insertion / 浣腸→enema, anal object insertion / アナルビーズ→anal beads / アナルプラグ→butt plug / バイブ→vibrator / 緊縛→bondage, rope / 目隠し→blindfold / 手錠→handcuffs / 口枷→gag / 放尿→peeing, urine / 脱糞→feces, pooping\n"
+        "- 行為・装具・排泄(action): 口淫→fellatio, deepthroat / 挿入→vaginal penetration, anal penetration / アナルゼリー→lubricant, anal, anal object insertion, anus, ass focus, pink liquid, translucent, dripping, slime (substance) / 浣腸→enema, anal object insertion / アナルビーズ→anal beads / アナルプラグ→butt plug / バイブ→vibrator / 緊縛→bondage, rope / 目隠し→blindfold / 手錠→handcuffs / 口枷→gag / 放尿→peeing, urine / 脱糞→feces, pooping\n"
         "- 解剖・終了処理: 露出・接触中の部位（pussy, anus, erect nipples）は action 等に反映し、画面内に男性器が写る時のみ penis_present: true にする。終了した行為・脱いだ服・外した装具は必ず「なし」（equipped_items は []）で上書きすること。"
     )
 

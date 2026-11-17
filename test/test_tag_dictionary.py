@@ -180,6 +180,21 @@ class TestTagDictionary(unittest.TestCase):
         finally:
             server.DATA = orig_data
 
+    def test_15_anal_jelly_emits_visible_pink_jelly_tags(self):
+        """アナルゼリーの言及で、透明ピンクのゼリーが肛門から出るタグが付く"""
+        st = [{"name": "A", "body_fluids": "透明なピンク色のアナルゼリー",
+               "situation": ["肛門からアナルゼリーが溢れている"]}]
+        res = server.sanitize_prompt("1girl", state=st, allow_inject=True)
+        for tag in ("anal", "anus", "ass focus", "lubricant", "pink liquid",
+                    "translucent", "dripping", "slime (substance)"):
+            self.assertIn(tag, res)
+        # 本文だけの言及でも同じタグが付く
+        res2 = server.sanitize_prompt(
+            "1girl", context_text="透明なピンク色のアナルゼリーがお尻から出てきた",
+            allow_inject=True)
+        for tag in ("anus", "pink liquid", "translucent", "dripping", "slime (substance)"):
+            self.assertIn(tag, res2)
+
     def test_09_order_preserved(self):
         """先頭エントリがJSONの先頭と一致する（並び順が保たれる）"""
         with open(server.TAG_DICT_PATH, encoding="utf-8") as f:

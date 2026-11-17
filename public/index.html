@@ -6,7 +6,8 @@
 <title>RP Image Chat {{PORT}}</title>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="apple-touch-icon" href="icon-maskable-512.png">
-<link rel="stylesheet" href="style.css?v=161">
+<link rel="stylesheet" href="style.css?v=173">
+<link rel="stylesheet" href="wizard.css?v=1">
 </head>
 <body>
 <aside id="sidebar">
@@ -242,6 +243,35 @@
         <label class="check" title="「＋」で新しいチャンネルを作ったら、session フォルダに Antigravity の新規会話も作って担当にする。分岐で作ったチャンネルは元の会話を分岐するので別"><input type="checkbox" id="app_new_channel_ide"> 新しいチャンネルには Antigravity の新規会話を自動で作る</label>
         <div class="row tight"><button id="appSave" type="button" class="sub">アプリ設定を保存</button><span id="appMsg" class="muted"></span></div>
         <div class="box">
+          <div class="box-title">チャンネル作成AI</div>
+          <div class="muted">ウィザードの質問と設定生成に使います。本文AIとは別です。賢いモデルを推奨します。</div>
+          <label class="wizard-check">
+            <input type="checkbox" id="f_wizard_enabled" checked> ウィザードを使う
+          </label>
+          <label class="wizard-label">プロバイダー
+            <select id="f_wizard_provider" class="wizard-input">
+              <option value="google">Google AI Studio</option>
+              <option value="vertex">Vertex AI</option>
+              <option value="antigravity">Antigravity</option>
+            </select>
+          </label>
+          <label class="wizard-label">モデル
+            <input id="f_wizard_model" class="wizard-input" placeholder="例: gemini-2.5-pro">
+          </label>
+          <label class="wizard-label">思考の深さ
+            <select id="f_wizard_thinking_level" class="wizard-input">
+              <option value="high">high（推奨）</option>
+              <option value="xhigh">xhigh（Gemini 4 Hydrogen 系のみ）</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+              <option value="minimal">minimal</option>
+            </select>
+          </label>
+          <label class="wizard-check">
+            <input type="checkbox" id="f_wizard_confirm" checked> 作成前にプレビューを確認する
+          </label>
+        </div>
+        <div class="box">
           <div class="box-title">候補の婉曲表現 → 直接表現</div>
           <div class="muted">1行1組「婉曲=直接」。# でコメント。長い語から先に置換します。<br>
             「語|手がかり1,手がかり2=直接語」と書くと、近く（前後16文字以内）に手がかりがあるときだけその訳になります。<br>
@@ -352,9 +382,15 @@
 </div>
 <!-- スマホでチャンネル一覧を開いているとき、右側（一覧の外）をタップすると閉じる -->
 <div id="sideBackdrop"></div>
+<div id="toastBackdrop" class="hidden" aria-hidden="true"></div>
 <div id="toast" class="hidden" data-kind="info" role="status" aria-live="polite" aria-atomic="true">
   <span id="toastIcon" class="toast-icon" aria-hidden="true"></span>
   <span id="toastMsg" class="toast-msg"></span>
+</div>
+<!-- 完了系だけは、入力待機・日時と同じ最上段の中央に出す -->
+<div id="topNotice" class="hidden" role="status" aria-live="polite" aria-atomic="true" title="タップで閉じる">
+  <span id="topNoticeIcon" class="top-notice-icon" aria-hidden="true"></span>
+  <span id="topNoticeMsg" class="top-notice-msg"></span>
 </div>
 
 <div id="lightbox" class="hidden"><img id="lightboxImg" alt=""></div>
@@ -954,8 +990,25 @@
     </div>
   </div>
 </div>
+<div id="wizardRoot" class="wizard-root hidden" aria-hidden="true">
+  <div class="wizard-backdrop"></div>
+  <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizardTitle">
+    <header class="wizard-head">
+      <button type="button" id="wizardBack" aria-label="戻る">‹</button>
+      <div>
+        <h2 id="wizardTitle">新しいチャンネル</h2>
+        <div id="wizardProgress" class="wizard-progress"></div>
+      </div>
+      <button type="button" id="wizardModelChip" class="wizard-model-chip">AI: 未設定</button>
+      <button type="button" id="wizardClose" aria-label="閉じる">✕</button>
+    </header>
+    <main id="wizardBody" class="wizard-body"></main>
+    <footer id="wizardFoot" class="wizard-foot"></footer>
+  </div>
+</div>
 <script src="prompt_toolbar.js"></script>
-<script src="progress_labels.js?v=1"></script>
-<script src="app.js?v=137"></script>
+<script src="progress_labels.js?v=13"></script>
+<script src="app.js?v=168"></script>
+<script src="wizard.js?v=1"></script>
 </body>
 </html>

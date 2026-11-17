@@ -101,6 +101,97 @@ class TestProgressLabels(unittest.TestCase):
         self.assertEqual(items[-1]["filter_name"], "コンテンツ安全フィルタ")
         self.assertTrue(all("step" in i and "call" in i for i in items))
 
+    def test_friendly_error_capacity(self):
+        label, detail, kind = ide_poke.friendly_error(
+            "API error (attempt 7): UNAVAILABLE (code 503): "
+            "No capacity available for model gemini-3.8-flash-medium on the server")
+        self.assertEqual(label, "503エラー：モデルが混雑（容量不足）")
+        self.assertEqual(kind, "capacity")
+        self.assertIn("サーバーが混雑", detail)
+        self.assertIn("7/9回目", detail)
+        self.assertIn("待機するか、別のモデルに切り替えて下さい。", detail)
+        self.assertIn("別のプロバイダに切り替えてください。", detail)
+        self.assertNotIn("No capacity", detail)
+
+        label, detail, kind = ide_poke.friendly_error("Model unavailable, retrying in 167s (attempt 7/9)")
+        self.assertEqual(label, "モデルが一時的に利用不可")
+        self.assertEqual(kind, "capacity")
+        self.assertIn("167秒後", detail)
+        self.assertIn("7/9回目", detail)
+        self.assertIn("待機するか、別のモデルに切り替えて下さい。", detail)
+        self.assertIn("別のプロバイダに切り替えてください。", detail)
+        self.assertNotIn("Model unavailable", detail)
+
+        label, detail, kind = ide_poke.friendly_error("HTTP 400: bad request")
+        self.assertEqual(label, "400エラー：送信内容がAIに受け付けられませんでした")
+        self.assertEqual(kind, "")
+        self.assertIn("プロンプトが長すぎる", detail)
+        self.assertIn("別のモデルに切り替えてください。", detail)
+        self.assertNotIn("bad request", detail)
+
+        label, detail, kind = ide_poke.friendly_error(
+            "API error (code 401): UNAUTHENTICATED: Request had invalid authentication credentials")
+        self.assertEqual(label, "401エラー：認証が切れています")
+        self.assertIn("ログインし直す", detail)
+        self.assertIn("別のプロバイダに切り替えてください。", detail)
+        self.assertNotIn("UNAUTHENTICATED", detail)
+
+        label, detail, kind = ide_poke.friendly_error(
+            "API error (code 429): RESOURCE_EXHAUSTED: Quota exceeded for quota metric")
+        self.assertEqual(label, "429エラー：利用上限に達しました")
+        self.assertIn("1〜2分待って", detail)
+        self.assertIn("別のモデル", detail)
+        self.assertIn("別のプロバイダ", detail)
+        self.assertNotIn("RESOURCE_EXHAUSTED", detail)
+
+        label, detail, kind = ide_poke.friendly_error(
+            "API error (code 500): INTERNAL: Internal error encountered")
+        self.assertEqual(label, "500エラー：AIサーバーで問題が起きました")
+        self.assertIn("少し待って", detail)
+        self.assertIn("別のモデル", detail)
+        self.assertIn("別のプロバイダ", detail)
+        self.assertNotIn("INTERNAL", detail)
+
+        label, detail, kind = ide_poke.friendly_error(
+            "Something went wrong while contacting the model")
+        self.assertEqual(label, "通信エラーが起きました")
+        self.assertEqual(kind, "unknown")
+        self.assertIn("少し待って", detail)
+        self.assertIn("別のモデル", detail)
+        self.assertIn("別のプロバイダ", detail)
+        self.assertNotIn("Something went wrong", detail)
+
+    def test_progress_capacity_errors_are_merged(self):
+        """同じ容量不足の再試行は1行にまとめ、生の英語を出さない。"""
+        steps = [
+            {"type": "CORTEX_STEP_TYPE_USER_INPUT", "status": "CORTEX_STEP_STATUS_DONE"},
+        ]
+        for n in (1, 2, 3):
+            steps.append({
+                "type": "CORTEX_STEP_TYPE_ERROR_MESSAGE",
+                "errorMessage": {"error": {
+                    "shortError": f"API error (attempt {n}): UNAVAILABLE (code 503): "
+                                  "No capacity available for model gemini-3.8-flash-medium on the server"}},
+                "status": "CORTEX_STEP_STATUS_DONE",
+            })
+        with patch.object(ide_poke, "locate",
+                          return_value=(1, "tok", {"stepCount": len(steps),
+                                                   "lastUserInputStepIndex": 0,
+                                                   "status": "CASCADE_RUN_STATUS_RUNNING"})),              patch.object(ide_poke, "_call", return_value=(200, {"steps": steps})):
+            res, err = ide_poke.progress("cid")
+        self.assertIsNone(err)
+        items = res["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["kind"], "error")
+        self.assertEqual(items[0]["error_kind"], "capacity")
+        self.assertEqual(items[0]["attempt"], 3)
+        self.assertEqual(items[0]["filter_name"], "503エラー：モデルが混雑（容量不足）")
+        self.assertIn("3/9回目", items[0]["detail"])
+        self.assertIn("待機するか、別のモデルに切り替えて下さい。", items[0]["detail"])
+        self.assertIn("別のプロバイダに切り替えてください。", items[0]["detail"])
+        self.assertNotIn("No capacity", items[0]["detail"])
+        self.assertIn("No capacity", items[0]["raw_detail"])
+
     def test_progress_stop_reason_content_filter(self):
         """PLANNER_RESPONSE の stopReason == STOP_REASON_CONTENT_FILTER も error 行として filter_name が付く。"""
         steps = [
@@ -119,6 +210,34 @@ class TestProgressLabels(unittest.TestCase):
         self.assertEqual(len(res["items"]), 1)
         self.assertEqual(res["items"][0]["kind"], "error")
         self.assertEqual(res["items"][0]["filter_name"], "コンテンツフィルタ（生成停止）")
+
+    def test_progress_returns_previous_turn_history(self):
+        """ページを開いた直後でも3件窓を埋められるよう、直前ターンの最後の2件を返す。"""
+        steps = [
+            {"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+             "plannerResponse": {"toolCalls": [_tc("write_to_file",
+                                                   AbsolutePath=r"C:\app\outbox\a_reply_1.json")]},
+             "status": "CORTEX_STEP_STATUS_DONE"},
+            {"type": "CORTEX_STEP_TYPE_RUN_COMMAND", "status": "CORTEX_STEP_STATUS_DONE"},
+            {"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+             "plannerResponse": {"response": "前の返事"}, "status": "CORTEX_STEP_STATUS_DONE"},
+            {"type": "CORTEX_STEP_TYPE_USER_INPUT", "status": "CORTEX_STEP_STATUS_DONE"},
+            {"type": "CORTEX_STEP_TYPE_PLANNER_RESPONSE",
+             "plannerResponse": {"toolCalls": [_tc("run_command",
+                                                   CommandLine="python wait_input.py --ide x --wait 8")]},
+             "status": "CORTEX_STEP_STATUS_DONE"},
+        ]
+        with patch.object(ide_poke, "locate",
+                          return_value=(1, "tok", {"stepCount": len(steps),
+                                                   "lastUserInputStepIndex": 3,
+                                                   "status": "CASCADE_RUN_STATUS_RUNNING"})),              patch.object(ide_poke, "_call", return_value=(200, {"steps": steps})):
+            res, err = ide_poke.progress("cid")
+        self.assertIsNone(err)
+        self.assertEqual([i["kind"] for i in res["items"]], ["tool"])
+        self.assertTrue(res["items"][0]["internal"])
+        self.assertEqual([i["kind"] for i in res["history"]], ["tool", "reply"])
+        self.assertEqual(res["history"][0]["tool_kind"], "write")
+        self.assertTrue(all(i["done"] for i in res["history"]))
 
     def test_node_progress_labels_js(self):
         script = os.path.join(ROOT_DIR, "test", "test_progress_labels.cjs")

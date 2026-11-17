@@ -155,10 +155,12 @@ function isOverlayOpen() {
   const settingsOpen = !!($("settingsPanel") && !$("settingsPanel").classList.contains("hidden"));
   const lbEl = $("lightbox");
   const lightboxOpen = !!lbEl && !lbEl.classList.contains("hidden");
-  if (typeof document.querySelectorAll !== "function") return sideOpen || settingsOpen || lightboxOpen;
+  const wr = $("wizardRoot");
+  const wizardOpen = !!wr && !wr.classList.contains("hidden");
+  if (typeof document.querySelectorAll !== "function") return sideOpen || settingsOpen || lightboxOpen || wizardOpen;
   const modalOpen = document.querySelectorAll(".modal:not(.hidden)").length > 0;
   const moreSheetOpen = document.querySelectorAll(".more-sheet").length > 0;   // ★z66/67 も覆う
-  return sideOpen || settingsOpen || modalOpen || moreSheetOpen || lightboxOpen;
+  return sideOpen || settingsOpen || modalOpen || moreSheetOpen || lightboxOpen || wizardOpen;
 }
 // 中央の「送信」を押している間は true。押した瞬間に入力欄のフォーカスが外れても
 // 役割（送信/ツール）と見た目を変えないため、isFooterFocused でも入力中とみなす。
@@ -386,12 +388,14 @@ function updateFabState() {
   const hasOpenModal = typeof document.querySelectorAll === "function" && document.querySelectorAll(".modal:not(.hidden)").length > 0;
   const isSideOpen = !!(document.body && document.body.classList && document.body.classList.contains("side-open"));
   const isSettingsOpen = !!($("settingsPanel") && !$("settingsPanel").classList.contains("hidden"));
+  const wr = $("wizardRoot");
+  const wizardOpen = !!wr && !wr.classList.contains("hidden");
 
   // モーダル・シート・lightbox は自前の閉じる導線があるので、FAB は完全に消す。
   // 入力中は消さない（☰ を押せばそのままドロワーを開ける）
   // スクロール中は同じ場所に前/次（⌃⌄）を出すため、FAB は早めに退避し、先に戻す
   const scrolling = (typeof scrollUiFabHidden !== "undefined") && scrollUiFabHidden;
-  const visible = mobile && !moreSheet && !lightbox && !hasOpenModal && !scrolling;
+  const visible = mobile && !moreSheet && !lightbox && !hasOpenModal && !wizardOpen && !scrolling;
   const closeMode = isSettingsOpen || isSideOpen;
   if (fab) {
     fab.classList.toggle("fab-hidden", !visible);   // 未知クラス（RP色など）は保持
@@ -407,6 +411,15 @@ function updateFabState() {
 
 // FAB/Esc 共通: 最前面の開いているレイヤーを1つ閉じる。閉じたら true
 function closeTopmostLayer() {
+  const wr = $("wizardRoot");
+  if (wr && !wr.classList.contains("hidden")) {
+    if (window.RPWizard && typeof window.RPWizard.close === "function") {
+      window.RPWizard.close();
+    } else {
+      wr.classList.add("hidden");
+    }
+    return true;
+  }
   const hitsModal = $("ragHitsModal");
   if (hitsModal && !hitsModal.classList.contains("hidden")) {
     hitsModal.classList.add("hidden");
@@ -787,6 +800,12 @@ async function switchTo(id) {
   choicesNoticeToasted.clear();
   lastStepToastKey = "";
   replyToastTurnId = "";
+  choicesToastKey = "";
+  progressHistory = [];
+  progressUserTime = "";
+  lastProgressKey = "";
+  progressEpoch++;
+  clearTopNotices();
   displayChoicesMode.clear();
   $("charList").innerHTML = "";  // 前のチャンネルで編集中だった行は捨てる
   attaching = [];  // 添付は上げたチャンネルの発言にしか付けられない
@@ -804,6 +823,9 @@ async function switchTo(id) {
   updateHeaderAndSideStatus();
   if (typeof syncComposerModelChip === "function") syncComposerModelChip();
 }
+
+window.switchTo = switchTo;
+window.refreshSessions = refreshSessions;
 
 // ---------------------------------------------------------------- settings form
 const FIELDS = ["title", "project", "summary", "instructions", "memo", "user_name", "scenario", "first_message", "image_mode", "input_mode", "system_file",
@@ -1006,6 +1028,11 @@ async function loadOptions() {
   $("sysRoot").textContent = $("sysRoot").title = meta.app?.system_root || "";
   fillFolderRows(strList(meta.app?.file_folders));
   $("app_new_channel_ide").checked = meta.app?.new_channel_ide !== false;
+  if ($("f_wizard_enabled")) $("f_wizard_enabled").checked = meta.app?.wizard_enabled !== false;
+  if ($("f_wizard_provider")) $("f_wizard_provider").value = meta.app?.wizard_provider || "google";
+  if ($("f_wizard_model")) $("f_wizard_model").value = meta.app?.wizard_model || "";
+  if ($("f_wizard_thinking_level")) $("f_wizard_thinking_level").value = meta.app?.wizard_thinking_level || "high";
+  if ($("f_wizard_confirm")) $("f_wizard_confirm").checked = meta.app?.wizard_confirm !== false;
   await loadDecensor();
   showPhone(meta.phone || {});
   fillSelect($("presetSelect"), presets.map((x) => ({ value: x.id, label: x.name })), $("presetSelect").value, "プリセット…");
@@ -4291,7 +4318,13 @@ $("charPresetDelete").onclick = async () => {
 
 $("appSave").onclick = async () => {
   try {
-    await checked("/api/app-settings", { new_channel_ide: $("app_new_channel_ide").checked });
+    const payload = { new_channel_ide: $("app_new_channel_ide").checked };
+    if ($("f_wizard_enabled")) payload.wizard_enabled = $("f_wizard_enabled").checked;
+    if ($("f_wizard_provider")) payload.wizard_provider = $("f_wizard_provider").value;
+    if ($("f_wizard_model")) payload.wizard_model = $("f_wizard_model").value;
+    if ($("f_wizard_thinking_level")) payload.wizard_thinking_level = $("f_wizard_thinking_level").value;
+    if ($("f_wizard_confirm")) payload.wizard_confirm = $("f_wizard_confirm").checked;
+    await checked("/api/app-settings", payload);
     await loadOptions();
     $("appMsg").textContent = "保存しました";
     setTimeout(() => ($("appMsg").textContent = ""), 3000);
@@ -6038,7 +6071,7 @@ function render() {
       desiredChildren.push(p);
       if (!p.innerHTML) setTimeout(pollProgress, 0);  // 送った直後は2秒待たずに読む
     }
-  } else if (progressSid === s.id) { progressHtml = ""; lastStepToastKey = ""; }  // 次の入力で前のターンの表示が一瞬出ないように
+  } else if (progressSid === s.id) { progressHtml = ""; lastStepToastKey = ""; lastProgressKey = ""; }  // 次の入力で前のターンの表示が一瞬出ないように
 
   // Sync desired children with log DOM
   const desiredSet = new Set(desiredChildren);
@@ -6237,6 +6270,43 @@ function queueScrollUiSync() {
   raf(() => { scrollUiSyncQueued = false; syncActionControlsVisibility(); });
 }
 
+// 本文・選択肢が届いたその場で知らせる。poll() だけでなく /api/send の応答でも使う。
+function announceArrivals(prevState, s, first) {
+  if (!s || !Array.isArray(s.messages)) return;
+  const lastUserIdx = s.messages.reduce((acc, m, i) => (m.role === "user" ? i : acc), -1);
+  // 選択肢も、最後のユーザー入力より後ろの assistant のものだけを見る。
+  // 送信応答に前のターンの選択肢が含まれていても「生成完了」と誤認しない。
+  const latestChoicesMsg = s.messages.map((m, i) => ({ m, i })).reverse().find(({ m, i }) =>
+    i > lastUserIdx && m.role === "assistant" && m.id && (
+      (Array.isArray(m.choices) && m.choices.some((c) => c && typeof c.text === "string" && c.text.trim())) ||
+      (Array.isArray(m.choices_erotic) && m.choices_erotic.some((c) => c && typeof c.text === "string" && c.text.trim()))
+    ))?.m;
+  const choicesKey = latestChoicesMsg
+    ? `${latestChoicesMsg.id}|${latestChoicesMsg.choices_updated_ts || ""}|${latestChoicesMsg.choices_erotic_updated_ts || ""}|${(latestChoicesMsg.choices || []).length}|${(latestChoicesMsg.choices_erotic || []).length}`
+    : "";
+  if (!first && prevState && prevState.id === s.id) {
+    const wasWaiting = (prevState.messages || []).some((m) => m.role === "user" && (m.status === "pending" || m.status === "processing"));
+    const prevIds = new Set((prevState.messages || []).map((m) => m.id));
+    // 送信応答に前のターンの assistant が含まれていても、それを
+    // 「今回の返答完了」と誤認しない（必ず最後のユーザー入力より後を見る）。
+    const newAsst = s.messages.map((m, i) => ({ m, i })).reverse().find(({ m, i }) =>
+      i > lastUserIdx && m.role === "assistant" && m.id &&
+      (m.text || "").trim() && !prevIds.has(m.id))?.m;
+    if (wasWaiting && newAsst && replyToastTurnId !== newAsst.id) {
+      replyToastTurnId = newAsst.id;
+      topNotice("返答完了", { ms: 1200, tag: "body" });
+    }
+  }
+  const newSession = !prevState || prevState.id !== s.id;
+  if (first || newSession) {
+    choicesToastKey = choicesKey;
+  } else if (choicesKey !== choicesToastKey) {
+    choicesToastKey = choicesKey;
+    // 選択肢もキューに積み、表示中の通知が終わってから順番に出す
+    if (choicesKey) topNotice("選択肢生成完了", { ms: 1400, tag: "choices" });
+  }
+}
+
 async function poll() {
   if (!sid) return refreshSessions();
   const want = sid;
@@ -6300,18 +6370,9 @@ async function poll() {
           }
         }
       }
-      // 応答待ちだったターンに新しいAI応答が届いた瞬間、まだ完了トーストを出していなければ鳴らす
-      if (!first && prevState && prevState.id === s.id) {
-        const wasWaiting = (prevState.messages || []).some((m) => m.role === "user" && (m.status === "pending" || m.status === "processing"));
-        const nowWaiting = (s.messages || []).some((m) => m.role === "user" && (m.status === "pending" || m.status === "processing"));
-        const prevIds = new Set((prevState.messages || []).map((m) => m.id));
-        const newAsst = (s.messages || []).slice().reverse().find((m) => m.role === "assistant" && m.id && !prevIds.has(m.id));
-        if (wasWaiting && !nowWaiting && newAsst && replyToastTurnId !== newAsst.id) {
-          replyToastTurnId = newAsst.id;
-          toast("✅ 応答ができました", { kind: "ok", ms: 4000 });
-        }
-      }
       render();
+      // 本文・選択肢がDOMに出た時点で通知する
+      announceArrivals(prevState, s, first);
       if (first) {
         navHoldBottom = false;
         log.scrollTop = log.scrollHeight;
@@ -6332,8 +6393,8 @@ async function poll() {
 }
 
 // 応答待ちのあいだ、担当の Antigravity 会話がしていること（ツール呼び出し）を入力中の表示の下に映す
-let progressHtml = "", progressSid = "", progressBusy = false;
-let lastStepToastKey = "", stepToastSid = "", replyToastTurnId = "";
+let progressHtml = "", progressSid = "", progressBusy = false, lastProgressKey = "", progressHistory = [], progressUserTime = "", progressEpoch = 0;
+let lastStepToastKey = "", stepToastSid = "", stepToastUserTime = "", capacityToastPhase = "", capacityToastAttempt = -1, replyToastTurnId = "", choicesToastKey = "";
 
 // progress_labels.js が読めていなければ素通し（画面が壊れないように）
 const PL = (typeof ProgressLabels !== "undefined") ? ProgressLabels : {
@@ -6345,67 +6406,304 @@ const { stepLabel, stepDetail, stepRaw } = PL;
 
 // トーストは主要なステップだけ（送信・読み込み・書き込み・完了・エラー）。新しい行が出た瞬間に1回だけ
 const STEP_TOAST_KINDS = new Set(["read", "write"]);
-function notifyProgressStep(items) {
+const PROGRESS_WINDOW = 3;   // 進捗は直近3件だけ表示する（件数。1件が複数行でもよい）
+function notifyProgressStep(items, running, userTime) {
   const s = state;
   if (!s) return;
-  if (s.id !== stepToastSid) { stepToastSid = s.id; lastStepToastKey = ""; }
+  const ut = userTime || "";
+  if (s.id !== stepToastSid || ut !== stepToastUserTime) {
+    stepToastSid = s.id;
+    stepToastUserTime = ut;
+    lastStepToastKey = "";
+    capacityToastPhase = "";
+    capacityToastAttempt = -1;
+  }
   const it = [...items].reverse().find((x) =>
     x.kind === "reply" || x.kind === "error" ||
     (STEP_TOAST_KINDS.has(x.tool_kind) && !x.internal));
   if (!it) return;
+  const d = stepDetail(it);
+  // AIの返事がすでに届いているなら、容量不足の「終了」通知は出さない
+  // （ユーザー側の status 更新が一瞬遅れても、成功後にエラーを出さないため）。
+  const msgs = s.messages || [];
+  const lastMsg = msgs[msgs.length - 1];
+  const lastUserIdx = msgs.reduce((acc, m, i) => (m.role === "user" ? i : acc), -1);
+  // 直前のターンの assistant が残っているだけでは「今回成功」と判定しない。
+  // 最後の user より後ろに assistant があるときだけ、今回の応答が届いたとみなす。
+  const answered = !!(lastMsg && lastMsg.role === "assistant" && lastMsg.id &&
+    lastUserIdx >= 0 && lastUserIdx < msgs.length - 1);
+  const waitingUser = msgs.some((m) =>
+    m.role === "user" && (m.status === "pending" || m.status === "processing"));
+  // 容量不足の再試行は同じターン中に何度も来る。
+  // 1〜4回目は静かにし、5回目からは再試行のたびに長文で知らせる（5/9, 6/9, ...）。
+  // 自動再試行が終わったときは、最後に「終了」を1回だけ知らせる。
+  if (it.kind === "error" && it.error_kind === "capacity") {
+    if (answered && waitingUser) return;
+    const phase = running ? "retry" : "stopped";
+    const attempt = Number(it.attempt || 0) ||
+      Number((/（(\d+)\s*\/\s*\d+回目）/.exec(it.detail || "") || [])[1] || 0);
+    // 1〜4回目は、再試行中でも停止時でも通知しない（5回目から）
+    if (attempt > 0 && attempt < 5) return;
+    if (phase === "retry") {
+      if (attempt === capacityToastAttempt) return;
+      capacityToastAttempt = attempt;
+      capacityToastPhase = "retry";
+      lastStepToastKey = `capacity:retry:${attempt}`;
+      return toast(`${it.filter_name || "モデルが混雑"}
+${d}`, { kind: "warn", ms: 10000 });
+    }
+    if (capacityToastPhase === "stopped") return;
+    capacityToastPhase = "stopped";
+    lastStepToastKey = `capacity:stopped:${attempt}`;
+    return toast(`${it.filter_name || "モデルが混雑"}
+自動再試行が終了しました。設定で別のモデルに変えるか、プロバイダを切り替えてください。`,
+                 { kind: "err", ms: 12000 });
+  }
   // 0.8秒ごとの再描画で同じ行を出し直さない（step/call は会話の絶対位置なので安定）
   const key = `${it.step ?? ""}:${it.call ?? ""}:${it.kind}:${it.tool_kind || ""}:${it.filter_name || ""}`;
   if (key === lastStepToastKey) return;
   lastStepToastKey = key;
-  const d = stepDetail(it);
-  if (it.kind === "error")
-    return toast(it.filter_name ? `⛔ ${it.filter_name}で止まりました` : `⚠️ エラー${d ? ": " + d : ""}`,
+  if (it.kind === "error") {
+    if (it.error_kind === "unknown" || /^\d{3}エラー：/.test(it.filter_name || ""))
+      return toast(`${it.filter_name || "通信エラーが起きました"}
+${d}`, { kind: "err", ms: 10000 });
+    return toast(it.filter_name ? `${it.filter_name}で止まりました` : `エラー${d ? ": " + d : ""}`,
                  { kind: "err", ms: 8000 });
-  if (it.kind === "reply") {
-    const lastAsst = (s.messages || []).slice().reverse().find((m) => m.role === "assistant" && m.id);
-    if (lastAsst) replyToastTurnId = lastAsst.id;
-    return toast("✅ 応答ができました", { kind: "ok", ms: 4000 });
   }
-  if (it.tool_kind === "read") return toast(`📖 ${d || "ファイル"}を読み込んでいます`, { kind: "info", ms: 3000 });
-  if (it.tool_kind === "write") return toast(`✍️ ${d || "応答"}を書き込んでいます`, { kind: "info", ms: 3000 });
+  if (it.kind === "reply") {
+    capacityToastPhase = "";   // 次のターンでまた容量不足になったら、また知らせる
+    capacityToastAttempt = -1;
+    // 本文の到着通知は poll() 側で「返答完了」を出す（ここは進捗行だけ）
+    return;
+  }
+  // 通常の作業（read/write など）は窓に行が出るので、短文トーストは出さない。
+  // トーストは「異常（503/フィルタ/通信エラー）」だけに統一する。
+}
+
+function clearProgressPanel() {
+  progressHistory = [];
+  lastProgressKey = "";
+  progressHtml = "";
+  if ($("progress")) $("progress").innerHTML = "";
 }
 
 async function pollProgress() {
   const s = state;
   if ((typeof document !== "undefined" && document.hidden) || progressBusy || !s || s.id !== sid || !(s.setting?.ide_session || s.setting?.choices_ide_session || ["google", "vertex"].includes(s.setting?.ai_provider)) || !$("progress")) return;
+  // 待っていないなら、API が失敗していても最後の待機行を残さない。
+  const preMsgs = s.messages || [];
+  const preWaiting = preMsgs.some((m) =>
+    (m.role === "user" && (m.status === "pending" || m.status === "processing")) ||
+    m.choices_status === "pending" || m.choices_status === "processing" ||
+    m.image_refine_status === "pending" || m.image_refine_status === "processing");
+  if (!preWaiting) { clearProgressPanel(); return; }
   progressBusy = true;
+  const epoch = progressEpoch;
   try {
     const r = await api("/api/ide/progress?sid=" + encodeURIComponent(s.id));
+    if (epoch !== progressEpoch) return;   // 送信直後に古いターンの結果が返っても捨てる
     if (s.id !== sid) return;
-    const items = r.items || [];
-    // 同一カスケード内で複数ターン進んだ場合、最後の wait_input.py (internal) より前の過去ターンのステップは除外する
-    let lastWaitIdx = -1;
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i] && items[i].internal) { lastWaitIdx = i; break; }
+    // 応答が届いた後に、古いポーリング結果でエラーを出さない
+    // （タイムアウト後の再試行が成功した直後に「自動再試行が終了」が出るのを防ぐ）。
+    const cur = state;
+    if (!cur || cur.id !== s.id) return;
+    const msgs = cur.messages || [];
+    const lastMsg = msgs[msgs.length - 1];
+    const lastUserIdx = msgs.reduce((acc, m, i) => (m.role === "user" ? i : acc), -1);
+    const answered = !!(lastMsg && lastMsg.role === "assistant" && lastMsg.id &&
+      lastUserIdx >= 0 && lastUserIdx < msgs.length - 1);
+    // 本文が実際に届いているか。status が processing のまま残っていても、
+    // 「本文の返答を待っています」と「返答完了」を同時に出さないために使う。
+    const bodyDone = !!(lastMsg && lastMsg.role === "assistant" &&
+      lastUserIdx >= 0 && lastUserIdx < msgs.length - 1 &&
+      String(lastMsg.text || "").trim());
+    // 503の再試行トーストが出たまま本文が届いたら、成功後にエラーを残さない。
+    // （テスト用の部分実行では toast 系が無いので typeof で守る）
+    if (bodyDone && typeof toastLastKind !== "undefined" && toastLastKind === "warn" &&
+        /503|モデルが混雑|容量不足/.test(String(toastLastMsg || "")) &&
+        typeof dismissToast === "function") dismissToast();
+    const waitingUser = msgs.some((m) =>
+      m.role === "user" && (m.status === "pending" || m.status === "processing"));
+    const waitingChoices = msgs.some((m) =>
+      m.choices_status === "pending" || m.choices_status === "processing");
+    const waitingRefine = msgs.some((m) =>
+      m.image_refine_status === "pending" || m.image_refine_status === "processing");
+    const stillWaiting = waitingUser || waitingChoices || waitingRefine;
+    if (!stillWaiting) {
+      // 完了したのに最後の「待機」や「選択肢を生成しています」を残さない。
+      // 次に送信したときに古い行が出ないよう、履歴もここで捨てる。
+      clearProgressPanel();
+      return;
     }
-    const turnItems = lastWaitIdx >= 0 ? items.slice(lastWaitIdx + 1) : items;
-    const shown = turnItems.filter((it) => !it.internal);   // wait_input.py の行は画面に出さない
-    const rows = shown.map((it, i) => {
-      const last = i === shown.length - 1;
-      const now = !it.done && last;
-      const bad = it.kind === "error";
-      const mark = bad ? "✕" : it.kind === "think" ? "…" : it.done ? "✓" : now ? "●" : "・";
-      const cls = "p-row" + (now ? " now" : "") + (bad ? " error" : "") + (it.filter_name ? " filter" : "");
+    const items = r.items || [];
+    // 新しいユーザー入力（user_time が変わった）ら、前のターンの
+    // 「返答完了」「待機」行は持ち越さない。読み込みなどの作業行は残してよい。
+    const turnKey = String(r.user_time || "");
+    if (progressSid === s.id && turnKey && progressUserTime && turnKey !== progressUserTime) {
+      progressHistory = progressHistory.filter((x) => x.key !== "__reply_done__" && x.key !== "__waiting__");
+      lastProgressKey = "";
+    }
+    if (turnKey) progressUserTime = turnKey;
+    // 本文待ちのターンでは、たとえ user_time が取れなくても
+    // 前ターンの「返答完了」（合成行・実際の reply 行）を履歴から出さない。
+    // 送信直後に前の返事が「返答完了」として残るのを防ぐ。
+    if (waitingUser && !bodyDone) {
+      progressHistory = progressHistory.filter((x) =>
+        x.key !== "__reply_done__" && !String(x.key).includes(":reply:"));
+      // 新しい入力を待っている間に、前のターンのエラーを履歴から出さない
+      progressHistory = progressHistory.filter((x) =>
+        x.key !== "capacity" && !/class="p-row[^"]*error/.test(x.html));
+    }
+    // wait_input.py の行だけを隠す。以前は最後の wait_input より前を切り捨てていたが、
+    // それだと「読み込み→待機」の待機中に直前のステップが消えて1行だけになっていた。
+    // 窓は最後の3件なので、古いターンは自然に押し出される。
+    let shown = items.filter((it) => !it.internal);
+    // 本文をまだ待っているのに、前のターンの reply（返答完了）が
+    // 現在のステップとして返ってきても表示しない。プロンプトを渡した
+    // 「（待機）」だけは現在の進行として残す。
+    if (waitingUser && !bodyDone)
+      shown = shown.filter((it) => it.kind !== "reply" ||
+        /待機/.test(`${it.detail || ""} ${it.text || ""}`));
+    const capAttempt = (it) => {
+      if (!it || it.kind !== "error" || it.error_kind !== "capacity") return 0;
+      const n = Number(it.attempt || 0);
+      if (n) return n;
+      // attempt フィールドが無い古いデータでも、詳細の「2/9回目」から拾う
+      const m = /（(\d+)\s*\/\s*\d+回目）/.exec(it.detail || "");
+      return m ? Number(m[1]) : 0;
+    };
+    // 503の自動再試行は1〜4回目まで画面に出さない（5回目から、再試行のたびに表示）。
+    shown = shown.filter((it) => !(capAttempt(it) > 0 && capAttempt(it) < 5));
+    // AIの返事（assistant メッセージ）が届いているなら、そのターンは成功。
+    // タイムアウト後の再試行で成功したのに503の行が残るのを防ぐ。
+    // 進捗側の reply は「（待機）」のこともあるので、成功判定には使わない。
+    if (answered) shown = shown.filter((it) => it.kind !== "error");
+    if (progressSid !== s.id) { lastProgressKey = ""; progressHistory = []; }
+    // 以前のバージョンが履歴に入れた「次にすることを考えている」や古い注記は消す。
+    // 注記は現在の状態を毎回出し直すので、履歴には残さない（重複表示を防ぐ）。
+    progressHistory = progressHistory.filter((x) =>
+      !x.key.includes(":think:") && x.key !== "__waiting__" &&
+      x.key !== "__note_error__" && !String(x.key).startsWith("__note__:"));
+    // 1〜4回目の503は履歴にも残さない。いま2〜4回目なら、以前の5回目以降の行も消す
+    // （古い「5/9」と今の「2/9」が並んで、5回目以降だけ出す意図と食い違うため）。
+    const lowCapNow = items.some((it) => capAttempt(it) > 0 && capAttempt(it) < 5);
+    progressHistory = progressHistory.filter((x) => !(x.capacityAttempt > 0 && x.capacityAttempt < 5));
+    if (lowCapNow) progressHistory = progressHistory.filter((x) => !x.capacityAttempt);
+    // 返事が届いたターンでは、履歴に残っているエラー行も消す
+    // （窓を前の行で埋めると、成功したのに503が残って見えるため）。
+    if (answered)
+      progressHistory = progressHistory.filter((x) =>
+        x.key !== "capacity" && !/class="p-row[^"]*\berror\b/.test(x.html));
+    // 容量不足は再試行のたびに step が進むが、同じ行として扱う（毎回スクロールさせない）
+    const pkey = (it) => (it.kind === "error" && it.error_kind === "capacity")
+      ? "capacity"
+      : `${it.step ?? ""}:${it.call ?? ""}:${it.kind}:${it.tool_kind || ""}:${it.filter_name || ""}`;
+    const makeRow = (it, isLast, historical) => {
+      const now = !historical && !it.done && isLast;
+      const capacity = it.kind === "error" && it.error_kind === "capacity";
+      const bad = it.kind === "error" && !capacity;
+      const mark = capacity ? "⏳" : bad ? "×" : it.kind === "think" ? "…" : it.done ? "✓" : now ? "●" : "・";
+      // 容量不足も error を付けて、エラー行と同じ折り返し・背景にする
+      const cls = "p-row" + (now ? " now" : "") + (it.kind === "error" ? " error" : "") + (it.filter_name ? " filter" : "");
       const d = stepDetail(it), raw = stepRaw(it);
-      return `<div class="${cls}"${raw ? ` title="${esc(raw)}"` : ""}>`
-        + `<span class="p-mark">${mark}</span><span class="p-text">${esc(stepLabel(it))}</span>`
-        + (d ? `<span class="p-detail" title="${esc(raw)}">${esc(d)}</span>` : "") + "</div>";
-    });
-    const onlyWaiting = !!items.length && !shown.length;    // 待機コマンドだけで動いている
-    const lastShown = shown[shown.length - 1];
-    if (r.running && lastShown && lastShown.done && lastShown.kind !== "reply" && lastShown.kind !== "error")
-      rows.push(`<div class="p-row now"><span class="p-mark">●</span><span class="p-text">次にすることを考えている</span></div>`);
-    if (!rows.length && (onlyWaiting || (r.running && !r.note)))
-      rows.push(`<div class="p-row now"><span class="p-mark">●</span><span class="p-text">⏳ 応答を待っています</span></div>`);
-    if (!rows.length && r.note) rows.push(`<div class="p-note">${esc(r.note)}</div>`);
-    progressHtml = rows.join("");
+      return {
+        key: pkey(it),
+        capacityAttempt: capacity ? Number(it.attempt || 0) : 0,
+        html: `<div class="${cls}"${raw ? ` title="${esc(raw)}"` : ""}>`
+          + `<span class="p-mark">${mark}</span><span class="p-text">${esc(stepLabel(it))}</span>`
+          + (d ? `<span class="p-detail" title="${esc(raw)}">${esc(d)}</span>` : "") + "</div>",
+      };
+    };
+    let rows = shown.map((it, i) => makeRow(it, i === shown.length - 1, false));
+    // 旧サーバーの「会話は止まっている（合図を待っている）」も、意味が分かる文言に直す。
+    let note = (r.note === "会話は止まっている（合図を待っている）" || r.note === "AIの応答開始待ち")
+      ? "Antigravityの処理開始待ち" : r.note;
+    if (waitingChoices && !waitingUser && note === "Antigravityの処理開始待ち")
+      note = "Antigravityの選択肢生成待ち";
+    // サーバーが注記を返さない待機直後でも、Antigravity なら何を待っているかを出す
+    const isAntigravityProvider = !["google", "vertex"].includes(s.setting?.ai_provider || "antigravity");
+    if (!note && !shown.length && isAntigravityProvider && !waitingRefine) {
+      note = (waitingChoices && !waitingUser)
+        ? "Antigravityの選択肢生成待ち"
+        : "Antigravityの処理開始待ち";
+    }
+    // 待機の状態は常に「1行」で表す（注記と待機行を2行並べない）。
+    // 行の文言は、実際に待っている対象を優先する（注記で上書きしない）。
+    let waitLabel = "本文の返答を待っています";
+    if (waitingChoices) waitLabel = bodyDone
+      ? "💬 選択肢を生成しています"
+      : (waitingUser ? "本文と選択肢を生成しています" : "💬 選択肢を生成しています");
+    else if (waitingRefine && !waitingUser) waitLabel = "🖼️ 画像の推敲を待っています";
+    else if (bodyDone && waitingUser) waitLabel = "送信処理の完了を待っています";
+    // 「処理開始待ち」は、まだ作業行が1つも無いときだけ。
+    // 作業行が出たあとは「本文の返答を待っています」に切り替える
+    // （処理が始まっているのに『開始待ち』が残るのを防ぐ）。
+    else if (!shown.length && note === "Antigravityの処理開始待ち")
+      waitLabel = "Antigravityの処理開始を待っています";
+    else if (!shown.length && note) waitLabel = note;
+    // 「読めない」「503」などの注記は待機ではない。オレンジの待機行にせず、
+    // エラー行として出す（待っているように見える論理矛盾を避ける）。
+    const noteIsError = !!note &&
+      /(エラー|読めな|失敗|できません|停止|終了|混雑|容量不足|タイムアウト|timeout|Timeout)/.test(note);
+    const hasErrorRow = shown.some((it) => it.kind === "error");
+    if (noteIsError && !hasErrorRow)
+      rows.push({ key: "__note_error__", html: `<div class="p-row error"><span class="p-mark">⚠️</span><span class="p-text">${esc(note)}</span></div>` });
+    // 待機中は必ず現在の状態を1行出す。作業行があっても消さない
+    // （「考えている」だけになって、何を待っているか分からなくなるのを防ぐ）。
+    // ただしエラー行があるときは、待機ではなくエラーを優先する。
+    if (!noteIsError && !hasErrorRow)
+      rows.push({ key: "__waiting__", html: `<div class="p-row now wait"><span class="p-mark">●</span><span class="p-text">${esc(waitLabel)}</span></div>` });
+    // 本文を受け取ったあと選択肢だけ待っているときは、本文の完了も窓に残す
+    if (bodyDone && waitingChoices && rows.length < PROGRESS_WINDOW)
+      rows.unshift({ key: "__reply_done__", html: `<div class="p-row"><span class="p-mark">✓</span><span class="p-text">返答完了</span></div>` });
+    // ページを開いた直後はフロント側の履歴が空なので、サーバーが返す
+    // 直前ターンの最後の2件で3件窓を埋める（待機1行だけにならないように）。
+    if (!progressHistory.length && (r.history || []).length && rows.length < PROGRESS_WINDOW) {
+      const keys = new Set(rows.map((x) => x.key));
+      const need = PROGRESS_WINDOW - rows.length;
+      const hrows = (r.history || [])
+        .filter((it) => it && !it.internal && !keys.has(pkey(it)) &&
+          it.kind !== "think" &&
+          // 新しい入力を待っているのに、前のターンの返事を履歴から出さない
+          !(waitingUser && !bodyDone && it.kind === "reply") &&
+          !(waitingUser && !bodyDone && it.kind === "error") &&
+          !(answered && it.kind === "error") &&
+          !(capAttempt(it) > 0 && capAttempt(it) < 5))
+        .slice(-need)
+        .map((it) => makeRow(it, false, true));
+      rows = hrows.concat(rows);
+    }
+    // 全部残すと縦に伸びるので、直近3件だけの窓にする。新しい項目が来たら1件ずつ進める。
+    // 新しいターンで進捗が1件しかないときは、直前のターンの行で3件まで埋める
+    // （「応答を待っています」だけの1行にならないように）。
+    // 窓は1つだけ。注記・待機行も含めて、常に最大3行。
+    let windowRows;
+    if (rows.length >= PROGRESS_WINDOW) {
+      windowRows = rows.slice(-PROGRESS_WINDOW);
+    } else {
+      const keys = new Set(rows.map((x) => x.key));
+      const need = PROGRESS_WINDOW - rows.length;
+      const old = progressHistory.filter((x) => !keys.has(x.key)).slice(-need);
+      windowRows = old.concat(rows);
+    }
+    const lastKey = windowRows.length ? windowRows[windowRows.length - 1].key : "";
+    if (lastKey && lastKey !== lastProgressKey) {
+      const lastRow = windowRows[windowRows.length - 1];
+      if (lastRow.html.includes('class="p-row'))
+        lastRow.html = lastRow.html.replace(/class="([^"]*)"/, 'class="$1 p-enter"');
+    }
+    lastProgressKey = lastKey;
+    progressHistory = windowRows
+      .filter((x) => !x.key.includes(":think:") && x.key !== "__waiting__" &&
+        x.key !== "__note_error__" && !String(x.key).startsWith("__note__:"))
+      .map((x) => ({
+        key: x.key,
+        capacityAttempt: x.capacityAttempt || 0,
+        html: x.html.replace(/ p-enter/g, "").replace(/class="p-row now/, 'class="p-row'),
+      }));
+    progressHtml = windowRows.map((x) => x.html).join("");
     progressSid = s.id;
-    notifyProgressStep(shown);
+    notifyProgressStep(shown, r.running, r.user_time);
     const box = $("progress");
     if (box && box.innerHTML !== progressHtml) {
       const nearBottom = !navHoldBottom && !topAlignHold && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
@@ -6458,6 +6756,22 @@ async function send() {
   if (attaching.some((a) => !a.file)) return alert("添付をアップロード中です。終わってから送ってください");
   if ((!text && !attaching.length) || !sid) return;
   sending = true;
+  // 送信した瞬間に前のターンの完了通知・婉曲通知も消す。
+  // 前のターンの通知が新しい送信の直後に出ると、返答が来たように見えてしまう。
+  clearTopNotices();
+  resetDecensorToast();
+  dismissToast();
+  // 前のターンの容量不足フェーズやトーストの重複判定も持ち越さない
+  capacityToastPhase = "";
+  capacityToastAttempt = -1;
+  lastStepToastKey = "";
+  // 送信した瞬間に前のターンの「返答完了」や待機行を消す
+  progressHistory = [];
+  progressUserTime = "";
+  lastProgressKey = "";
+  progressHtml = "";
+  progressEpoch++;
+  if ($("progress")) $("progress").innerHTML = "";
   syncSendButton();
   try {
     const r = await post("/api/send", { text, files: attaching.map((a) => a.file) });
@@ -6466,8 +6780,7 @@ async function send() {
       const st = r.session?.setting || state?.setting || {};   // session が無い経路でも落ちない
       const api = ["google", "vertex"].includes(st.ai_provider || "antigravity");
       const par = !api && st.suggest_choices !== false && st.choices_ide_session && st.choices_ide_session !== st.ide_session;
-      replyToastTurnId = "";
-      toast(par ? "✅ 選択肢のAIに送信しました" : "✅ AIに送信しました", { kind: "ok", ms: 2500 });
+          toast(par ? "選択肢のAIに送信しました" : "AIに送信しました", { kind: "ok", ms: 2500 });
     }
     ta.value = "";
     autoResizeInput();
@@ -6476,10 +6789,14 @@ async function send() {
     attaching = [];
     renderAttach();
     if (r.session && r.session.id === sid) {
-      checkDecensorDiff(state, r.session, lastRev === -1);
+      const prevState = state;
+      const wasFirst = lastRev === -1;
       lastRev = r.session.id + ":" + r.session.rev;
       state = r.session;
       render();
+      // 画面に反映してから、本文・選択肢・婉曲修正の通知を出す
+      announceArrivals(prevState, r.session, wasFirst);
+      checkDecensorDiff(prevState, r.session, wasFirst);
       markSeen();
     } else {
       await poll();
@@ -6542,10 +6859,13 @@ async function stopTurn(id = "") {
     }
     // 通信が不安定でも止めた直後に画面から消えるよう、まず返ってきた状態を反映する
     if (r.session && r.session.id === sid) {
-      checkDecensorDiff(state, r.session, lastRev === -1);
+      const prevState = state;
+      const wasFirst = lastRev === -1;
       lastRev = r.session.id + ":" + r.session.rev;
       state = r.session;
       render();
+      announceArrivals(prevState, r.session, wasFirst);
+      checkDecensorDiff(prevState, r.session, wasFirst);
       markSeen();
     }
     await poll();
@@ -6676,6 +6996,7 @@ function choicesNoticeText(n) {
   const f = (n && n.filter_name) || "フィルタ";
   switch (n && n.kind) {
     case "filter": return `${ic} ${f}で1回停止 → 自動で回避して出力`;
+    case "refused": return `${ic} の候補: 生成できませんでした（${f}）`;
     case "suspect": return `${ic} の候補: 健全な内容に差し替わった可能性あり${n && n.filter_name ? "（" + n.filter_name + "）" : ""}`;
     case "placeholder": return `${ic} の候補: プレースホルダーを一部自動置換しました`;
     case "timeout": return `${ic} の候補: 生成がタイムアウト（応答が届いていません）`;
@@ -6743,7 +7064,9 @@ function choicesBox(m, targetContainer) {
       el.textContent = txt;
       el.title = notice.kind === "filter"
         ? "生成中に自動フィルタで1回止まりましたが、回避して出力しました"
-        : "生成結果についての注意です（候補はそのまま使えます）";
+        : notice.kind === "refused"
+          ? "モデルのコンテンツフィルタが候補生成を拒否しました。↻で再試行できます"
+          : "生成結果についての注意です（候補はそのまま使えます）";
       wrap.appendChild(el);
     }
   }
@@ -7395,6 +7718,7 @@ function toast(msg, opts = {}) {
 
   // 先に表示してから本文を入れる（live region を可視にしてから更新する）
   el.classList.remove("hidden", "fade-out");
+  setToastBackdrop(isLong);
   if (!same) {
     const msgEl = $("toastMsg");
     const iconEl = $("toastIcon");
@@ -7411,6 +7735,7 @@ function toast(msg, opts = {}) {
   if (ms > 0) {
     toastHideTimer = setTimeout(() => {
       el.classList.add("fade-out");
+      setToastBackdrop(false);
       toastFadeTimer = setTimeout(() => {
         el.classList.add("hidden");
         el.classList.remove("fade-out");
@@ -7420,7 +7745,15 @@ function toast(msg, opts = {}) {
   }
 }
 
+function setToastBackdrop(show) {
+  const b = $("toastBackdrop");
+  if (!b) return;
+  if (show) b.classList.remove("hidden");
+  else b.classList.add("hidden");
+}
+
 function dismissToast() {
+  setToastBackdrop(false);
   const el = $("toast");
   if (!el || el.classList.contains("hidden")) return;
   clearTimeout(toastHideTimer);
@@ -7435,12 +7768,102 @@ function dismissToast() {
   }, 280);
 }
 $("toast").onclick = dismissToast;
+{
+  const b = $("toastBackdrop");
+  if (b) b.onclick = dismissToast;
+}
+
+// 完了系（本文・選択肢・婉曲修正）専用の最上段通知。
+// 通常のトースト（エラー・進捗など）とは別要素にして、位置と優先度を混ぜない。
+const TOP_NOTICE_MS = 1400;
+const topNoticeQueue = [];
+let topNoticeBusy = false;
+let topNoticeTimer = 0;
+let topNoticeCurrentTag = "";
+
+function topNotice(msg, opts = {}) {
+  const o = (typeof opts === "number") ? { ms: opts } : (opts || {});
+  const text = String(msg == null ? "" : msg);
+  const ms = (o.ms !== undefined && o.ms > 0) ? o.ms : TOP_NOTICE_MS;
+  // 連続で届いた通知は上書きせず、1つずつ順番に見せる。
+  // 表示中の通知が消えてから次を出すので、どの通知も見えないままにはならない。
+  topNoticeQueue.push({ msg: text, ms, tag: o.tag || "" });
+  if (!topNoticeBusy) showTopNoticeNext();
+}
+
+function showTopNoticeNext() {
+  clearTimeout(topNoticeTimer);
+  topNoticeTimer = 0;
+  const el = $("topNotice");
+  if (!el || !topNoticeQueue.length) {
+    topNoticeBusy = false;
+    topNoticeCurrentTag = "";
+    return;
+  }
+  const item = topNoticeQueue.shift();
+  topNoticeBusy = true;
+  topNoticeCurrentTag = item.tag || "";
+  const msgEl = $("topNoticeMsg");
+  const iconEl = $("topNoticeIcon");
+  el.classList.remove("hidden", "fade-out");
+  if (msgEl) msgEl.textContent = item.msg;
+  else el.textContent = item.msg;
+  if (iconEl) iconEl.textContent = "✓";
+  el.dataset.kind = "ok";
+  topNoticeTimer = setTimeout(() => {
+    el.classList.add("fade-out");
+    topNoticeTimer = setTimeout(() => {
+      el.classList.add("hidden");
+      el.classList.remove("fade-out");
+      topNoticeBusy = false;
+      topNoticeCurrentTag = "";
+      showTopNoticeNext();
+    }, 280);
+  }, item.ms);
+}
+
+function dismissTopNotice() {
+  const el = $("topNotice");
+  if (!el || el.classList.contains("hidden")) return;
+  clearTimeout(topNoticeTimer);
+  topNoticeTimer = 0;
+  el.classList.add("fade-out");
+  topNoticeTimer = setTimeout(() => {
+    el.classList.add("hidden");
+    el.classList.remove("fade-out");
+    topNoticeBusy = false;
+    topNoticeCurrentTag = "";
+    showTopNoticeNext();
+  }, 280);
+}
+
+function clearTopNotices() {
+  topNoticeQueue.length = 0;
+  clearTimeout(topNoticeTimer);
+  topNoticeTimer = 0;
+  topNoticeBusy = false;
+  topNoticeCurrentTag = "";
+  const el = $("topNotice");
+  if (el) {
+    el.classList.add("hidden");
+    el.classList.remove("fade-out");
+  }
+}
+
+{
+  const el = $("topNotice");
+  if (el) el.onclick = dismissTopNotice;
+}
 
 function resetDecensorToast() {
   clearTimeout(decToastTimer);
   decToastCount = 0;
   decToastTimer = 0;
-  if (typeof dismissToast === "function") dismissToast();
+  // チャンネル切替時などに、まだ出していない婉曲修正だけを捨てる。
+  for (let i = topNoticeQueue.length - 1; i >= 0; i--) {
+    if (topNoticeQueue[i].tag === "decensor") topNoticeQueue.splice(i, 1);
+  }
+  if (topNoticeCurrentTag === "decensor") dismissTopNotice();
 }
 
 function announceDecensor(dec) {
@@ -7452,12 +7875,9 @@ function announceDecensor(dec) {
     const total = decToastCount;
     decToastCount = 0;
     decToastTimer = 0;
-    // 同じ件数が続いても、800ms を超えた別イベントなら鳴らす
-    toast(
-      total === 1 ? "婉曲表現を戻しました" : `婉曲表現を${total}か所 戻しました`,
-      { kind: "ok", ms: 2200, dedupe: false }
-    );
-  }, 800);
+    // 同じ件数が続いても、別イベントとして最上段に出す
+    topNotice(`婉曲表現を修正（${total}）`, { ms: 1400, tag: "decensor" });
+  }, 300);
 }
 
 function decensorSig(dec) {
@@ -9977,7 +10397,7 @@ if (eroticAutoEl) {
 }
 
 // 新規: 動作・画像設定のみを引き継いで、真っ白な新しいチャンネルを始める
-$("newSession").onclick = async () => {
+async function legacyNewSession() {
   let base = null;
   if (state && state.id === sid) {
     try { base = formSid === sid ? readForm() : JSON.parse(JSON.stringify(state.setting)); }
@@ -10000,6 +10420,20 @@ $("newSession").onclick = async () => {
     if (sid === r.sid) await poll();
     refreshSessions(); loadIdeSessions();
   } catch (e) { toast("チャンネルは作りましたが、Antigravity の新規会話は作れませんでした:\n" + e.message, { kind: "err", ms: 15000 }); }
+}
+
+window.callLegacyNewSession = legacyNewSession;
+
+$("newSession").onclick = async () => {
+  if (window.RPWizard && meta?.app?.wizard_enabled !== false) {
+    try {
+      await window.RPWizard.open();
+      return;
+    } catch (e) {
+      console.warn("[wizard]", e);
+    }
+  }
+  legacyNewSession();
 };
 $("dupBtn").onclick = async () => {
   const r = await api("/api/session/new", { copy_from: sid });
@@ -10014,6 +10448,7 @@ $("deleteSession").onclick = async () => {
   await post("/api/session/delete");
   sid = "";
   resetDecensorToast();
+  clearTopNotices();
   await refreshSessions();
 };
 $("lightbox").onclick = () => closeLightbox();

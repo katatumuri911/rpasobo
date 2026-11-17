@@ -924,6 +924,129 @@ def filter_label(text):
     return ""
 
 
+_CAPACITY_RE = re.compile(r"no capacity available for model ([^\s]+)", re.I)
+_ATTEMPT_RE = re.compile(r"attempt\s*(\d+)", re.I)
+_RETRY_IN_RE = re.compile(r"retrying in (\d+)s", re.I)
+_RETRY_FRAC_RE = re.compile(r"attempt\s*(\d+)\s*/\s*(\d+)", re.I)
+_CODE_RE = re.compile(r"(?:code\s*|HTTP\s*|status\s*)([45]\d\d)", re.I)
+_CODE_HINTS = {
+    "400": "送信内容がAIに受け付けられませんでした",
+    "401": "認証が切れています",
+    "403": "権限がありません",
+    "404": "モデルが見つかりません",
+    "429": "利用上限に達しました",
+    "500": "AIサーバーで問題が起きました",
+    "502": "AIに接続できませんでした",
+    "503": "AIが混雑しています",
+    "504": "AIの応答がタイムアウトしました",
+}
+_CODE_DETAILS = {
+    "400": ("AIへの送信内容が受け付けられませんでした。"
+            "プロンプトが長すぎるか、モデル設定に無効な値が含まれている可能性があります。"
+            "プロンプトを短くするか設定を確認して再送信してください。"
+            "直らない場合は別のモデルに切り替えてください。"),
+    "401": ("プロバイダの認証が切れているか、APIキーが正しくありません。"
+            "モデルを変えても解決しないことが多いです。"
+            "設定画面でプロバイダの接続を確認し、必要ならログインし直すかAPIキーを入れ直してください。"
+            "直らない場合は別のプロバイダに切り替えてください。"),
+    "403": ("このモデルやプロバイダを使う権限がありません。"
+            "設定のAPIキーやアカウントの権限を確認してください。"
+            "直らない場合は別のモデルか、別のプロバイダに切り替えてください。"),
+    "404": ("選択したモデルが見つかりません。"
+            "モデル設定を確認して、別のモデルを選んでください。"
+            "直らない場合は別のプロバイダに切り替えてください。"),
+    "429": ("短時間に送りすぎたか、APIの利用上限に達しています。"
+            "1〜2分待ってから再送信してください。"
+            "待っても直らない場合は、別のモデルに変えるか、別のプロバイダに切り替えてください。"),
+    "500": ("AIのサーバー側で一時的な問題が起きています。"
+            "少し待ってから再送信してください。"
+            "何度も続く場合は、別のモデルに変えるか、別のプロバイダに切り替えてください。"),
+    "502": ("AIへの接続が一時的に失敗しました。"
+            "少し待ってから再送信してください。"
+            "続く場合は、別のモデルに変えるか、別のプロバイダに切り替えてください。"),
+    "503": ("AIが混雑しているか、一時的に利用できません。"
+            "少し待ってから再送信してください。"
+            "続く場合は、別のモデルに変えるか、別のプロバイダに切り替えてください。"),
+    "504": ("AIからの応答が時間内に返ってきませんでした。"
+            "少し待ってから再送信してください。"
+            "続く場合は、別のモデルに変えるか、別のプロバイダに切り替えてください。"),
+}
+_MODEL_NAMES = {
+    "gemini-3.8-flash-medium": "Gemini 3.8 Flash (Medium)",
+    "gemini-3.8-flash-high": "Gemini 3.8 Flash (High)",
+    "gemini-3.8-flash-low": "Gemini 3.8 Flash (Low)",
+}
+
+
+def _http_code(text):
+    """エラー文から HTTP ステータス（400/503 など）を取り出す"""
+    m = _CODE_RE.search(str(text or ""))
+    if m:
+        return m.group(1)
+    m = re.search(r"(?<!\d)([45]\d\d)(?!\d)", str(text or ""))
+    return m.group(1) if m else ""
+
+
+def _attempt_no(text):
+    """'attempt 7' / 'attempt 7/9' から回数を取り出す（無ければ 0）"""
+    m = _ATTEMPT_RE.search(str(text or ""))
+    return int(m.group(1)) if m else 0
+
+
+def _attempt_total(text):
+    """'attempt 7/9' から上限を取り出す（無ければ 0）"""
+    m = _RETRY_FRAC_RE.search(str(text or ""))
+    return int(m.group(2)) if m else 0
+
+
+def friendly_error(msg):
+    """IDE の生エラーを、画面にそのまま出しても意味が分かる日本語にする。
+    (label, detail, error_kind) を返す。label は短い見出し、detail は説明。
+    error_kind="capacity" は「停止」ではなく自動再試行中の状態。
+    容量不足（503）はフィルタではないので、filter_label とは別に扱う。"""
+    raw = str(msg or "").strip()
+    low = raw.lower()
+    code = _http_code(raw)
+    prefix = f"{code}エラー：" if code else ""
+
+    m = _CAPACITY_RE.search(raw)
+    if m or ("unavailable" in low and "capacity" in low):
+        model = m.group(1) if m else ""
+        att = _ATTEMPT_RE.search(raw)
+        n = att.group(1) if att else ""
+        shown = _MODEL_NAMES.get(model, model)
+        name = f"「{shown}」" if shown else ""
+        detail = f"選択したモデル{name}は、いまサーバーが混雑していて使えません。"
+        if n:
+            total = _attempt_total(raw) or 9
+            detail += f"自動で再試行しています（{n}/{total}回目）。"
+        detail += "待機するか、別のモデルに切り替えて下さい。それでも続く場合は、別のプロバイダに切り替えてください。"
+        return f"{prefix}モデルが混雑（容量不足）", detail, "capacity"
+
+    if "model unavailable" in low or ("unavailable" in low and "503" in low):
+        sec = _RETRY_IN_RE.search(raw)
+        frac = _RETRY_FRAC_RE.search(raw)
+        detail = "選択したモデルを今は利用できません。"
+        if frac:
+            detail += f"自動で再試行中です（{frac.group(1)}/{frac.group(2)}回目"
+            detail += f"、次は約{sec.group(1)}秒後）。" if sec else "）。"
+        elif sec:
+            detail += f"自動で再試行中です（次は約{sec.group(1)}秒後）。"
+        detail += "待機するか、別のモデルに切り替えて下さい。それでも続く場合は、別のプロバイダに切り替えてください。"
+        return f"{prefix}モデルが一時的に利用不可", detail, "capacity"
+
+    # コンテンツフィルタは filter_label の表示を優先する（番号より理由が重要）
+    if filter_label(raw):
+        return "", raw, ""
+    if code:
+        hint = _CODE_HINTS.get(code, "APIエラー")
+        detail = _CODE_DETAILS.get(code, raw)
+        return f"{code}エラー：{hint}", detail, ""
+    return ("通信エラーが起きました",
+            "AIとの通信中に問題が起きました。少し待ってからもう一度送信してください。"
+            "直らない場合は、別のモデルに変えるか、別のプロバイダに切り替えてください。",
+            "unknown")
+
 def _tool_line(tc):
     """ツール呼び出し1つを {tool, tool_kind, text, detail, internal} にする"""
     raw = tc.get("argumentsJson") or "{}"
@@ -962,53 +1085,81 @@ def progress(cid, limit=10):
     n = int(s.get("stepCount") or 0)
     first = int(s.get("lastUserInputStepIndex") or 0)
     start = max(first, n - 40)  # 1つのターンで何件も受け取る使い方だとターンが長いので、最近の分だけ
+    # ページを開いた直後でも進捗の3件窓を埋められるよう、余裕があれば直前のターンの
+    # 最後の数ステップも同じ取得に含める（返す items は今のターンだけ、history は別）。
+    if first > 0 and start == first:
+        start = max(0, first - 4)
     code, d = _call(port, tok, "GetCascadeTrajectorySteps", {"cascadeId": cid, "stepOffset": start}, timeout=20)
     if code != 200:
         return None, f"会話を読めなかった（{code}）"
     items = []
+    history_items = []
     for j, x in enumerate(d.get("steps") or []):
         at = start + j
+        target = history_items if at < first else items
         t = (x.get("type") or "").replace("CORTEX_STEP_TYPE_", "")
         done = (x.get("status") or "").endswith("_DONE")
         if t == "PLANNER_RESPONSE":
             pr = x.get("plannerResponse") or {}
             calls = pr.get("toolCalls") or []
             for k, tc in enumerate(calls):
-                items.append(dict(_tool_line(tc), kind="tool", done=False, step=at, call=k))
+                target.append(dict(_tool_line(tc), kind="tool", done=False, step=at, call=k))
             if pr.get("stopReason") == "STOP_REASON_CONTENT_FILTER":
-                items.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
-                              "filter_name": filter_label("STOP_REASON_CONTENT_FILTER"),
-                              "text": "エラー", "detail": "STOP_REASON_CONTENT_FILTER",
-                              "done": True, "step": at, "call": len(calls)})
+                target.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
+                               "filter_name": filter_label("STOP_REASON_CONTENT_FILTER"),
+                               "text": "エラー", "detail": "STOP_REASON_CONTENT_FILTER",
+                               "done": True, "step": at, "call": len(calls)})
             elif not calls:
                 if pr.get("response", "").strip():
-                    items.append({"kind": "reply", "tool": "", "tool_kind": "", "internal": False,
-                                  "text": "返事を書いた", "detail": _short(pr["response"]),
-                                  "done": True, "step": at, "call": 0})
+                    target.append({"kind": "reply", "tool": "", "tool_kind": "", "internal": False,
+                                   "text": "返事を書いた", "detail": _short(pr["response"]),
+                                   "done": True, "step": at, "call": 0})
                 elif not done:
                     heads = re.findall(r"\*\*(.+?)\*\*", pr.get("thinking") or "")
-                    items.append({"kind": "think", "tool": "", "tool_kind": "", "internal": False,
-                                  "text": "考えている", "detail": _short(heads[-1] if heads else ""),
-                                  "done": False, "step": at, "call": 0})
+                    target.append({"kind": "think", "tool": "", "tool_kind": "", "internal": False,
+                                   "text": "考えている", "detail": _short(heads[-1] if heads else ""),
+                                   "done": False, "step": at, "call": 0})
         elif t == "ERROR_MESSAGE":
             e = (x.get("errorMessage") or {}).get("error") or {}
             msg = e.get("shortError") or e.get("userErrorMessage") or ""
-            items.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
-                          "filter_name": filter_label(msg),      # ★ どのフィルタか
-                          "text": "エラー", "detail": _short(msg), "done": True, "step": at, "call": 0})
+            label, detail, ekind = friendly_error(msg)
+            flabel = filter_label(msg)
+            if flabel:
+                fcode = _http_code(msg)
+                flabel = f"{fcode}エラー：{flabel}" if fcode else flabel
+            target.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
+                           "filter_name": flabel or label,   # ★ どのフィルタ/理由か
+                           "error_kind": ekind,
+                           "text": "エラー", "detail": detail, "raw_detail": msg,
+                           "attempt": _attempt_no(msg),
+                           "done": True, "step": at, "call": 0})
         elif t not in ("USER_INPUT", "CHECKPOINT", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE"):
             # ツールを実行したステップ（RUN_COMMAND / VIEW_FILE / CODE_ACTION など）。まだ終わっていない最初のツール行に当てる
-            tool = next((it for it in items if it["kind"] == "tool" and not it.get("ran")), None)
+            tool = next((it for it in target if it["kind"] == "tool" and not it.get("ran")), None)
             if tool:
                 tool["ran"], tool["done"] = True, done
-    for it in items:
+    for it in items + history_items:
         it.pop("ran", None)
+    # 同じ理由の再試行エラー（容量不足など）が何行も並ぶので、最後の1行にまとめる
+    def _compact(lst):
+        out = []
+        for it in lst:
+            if it.get("error_kind") == "capacity" and out and out[-1].get("error_kind") == "capacity":
+                out[-1] = it
+            else:
+                out.append(it)
+        return out
+    items = _compact(items)
+    history_items = _compact(history_items)
+    for it in history_items:
+        it["done"] = True   # 前のターンの行は完了扱い（点滅させない）
     running = s.get("status") == "CASCADE_RUN_STATUS_RUNNING"
     if not running:
         for it in items:
             it["done"] = True  # 止まった会話に「実行中」は残さない
     return {"running": running, "user_time": s.get("lastUserInputTime") or "",
-            "steps": n, "items": items[-limit:]}, None
+            "steps": n, "items": items[-limit:],
+            "history": [it for it in history_items if not it.get("internal")][-2:]}, None
 
 
 READ_TOOL_NAMES = {"view_file", "read_file", "open_file", "read_text_file", "view_file_content"}

@@ -1228,7 +1228,20 @@ function teardown(fx) {
     !/#sideBackdrop\s*\{[^}]*transition:\s*all/i.test(cssText);
   const backdropRules = /#sideBackdrop\s*\{[^}]*touch-action:\s*none/i.test(cssText) &&
     /#sideBackdrop\s*\{[^}]*display:\s*block/i.test(cssText);
-  t("T22: CSS スモーク", bodyNoTouchAction && sidebarTransform && noTransitionAll && backdropRules);
+  // 進捗はフレックスの子。overflow:hidden だと min-height が 0 になり、高さ0に潰れて見えなくなる
+  const progressVisible = /\.progress\s*\{[^}]*flex-shrink:\s*0/i.test(cssText) &&
+    !/\.progress\s*\{[^}]*overflow:\s*hidden/i.test(cssText);
+  const progressClamp3 = /\.progress \.p-row\.error \.p-detail\s*\{[^}]*-webkit-line-clamp:\s*3/i.test(cssText);
+  // 完了系の通知は、入力待機・日時と同じ最上段の中央に固定する
+  const topNoticeRow = /#topNotice\s*\{[^}]*position:\s*fixed/i.test(cssText) &&
+    /#topNotice\s*\{[^}]*top:\s*max\(10px,\s*env\(safe-area-inset-top\)\)/i.test(cssText) &&
+    /#topNotice\s*\{[^}]*left:\s*50%/i.test(cssText);
+  // 長文モーダルは、カードの外側（背景）をタップして閉じられる
+  const toastBackdropCss = /#toastBackdrop\s*\{[^}]*position:\s*fixed/i.test(cssText) &&
+    /#toastBackdrop\s*\{[^}]*inset:\s*0/i.test(cssText);
+  // 待機行（注記と統合した1行）はオレンジで統一する
+  const waitColor = /\.progress \.p-row\.wait \.p-text\s*\{[^}]*color:\s*#ffd27a/i.test(cssText);
+  t("T22: CSS スモーク", bodyNoTouchAction && sidebarTransform && noTransitionAll && backdropRules && progressVisible && progressClamp3 && topNoticeRow && toastBackdropCss && waitColor);
 }
 
 // --- T23: CSS スコープ（AC-25 の正） ---
