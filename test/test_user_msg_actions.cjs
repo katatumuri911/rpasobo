@@ -139,6 +139,10 @@ const sandbox = {
   toast: (...a) => { calls.push(["toast", ...a]); },
   openEdit: (...a) => { calls.push(["openEdit", ...a]); },
   toggleMoreMenu: (...a) => { calls.push(["toggleMoreMenu", ...a]); },
+  // 巻き戻しは確認ダイアログで止めたいので、$ は null を返し confirm は false を返す
+  $: () => null,
+  sid: "s1",
+  confirm: (msg) => { calls.push(["confirm", msg]); return false; },
   isOverlayOpen: () => false,
   moreOpen: { cur: null },
   state: { messages: [] },
@@ -168,14 +172,15 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     ok(box.className === "msg-hover-actions", "コンテナのクラスが msg-hover-actions");
     ok(box.attrs["role"] === "group", "role=group");
     ok(box.attrs["aria-label"] === "この発言の操作", "aria-label=この発言の操作");
-    ok(box.children.length === 3, "子が 3 つ（編集・コピー・⋯）", box.children.length);
+    ok(box.children.length === 3, "子が 3 つ（巻き戻し・コピー・⋯）", box.children.length);
 
-    // 順序: 編集 -> コピー -> ⋯
-    const [edit, copy, more] = box.children;
-    ok(edit.classList.contains("msg-action-btn"), "編集ボタンに msg-action-btn");
-    ok(edit.title === "この入力を編集して再送", "編集ボタンの title", edit.title);
-    ok(edit.attrs["aria-label"] === "この入力を編集して再送", "編集ボタンの aria-label", edit.attrs["aria-label"]);
-    ok(edit.innerHTML.includes('aria-hidden="true"') && edit.innerHTML.includes('focusable="false"'), "編集アイコン SVG 属性");
+    // 順序: 巻き戻し -> コピー -> ⋯
+    const [rewind, copy, more] = box.children;
+    ok(rewind.classList.contains("msg-action-btn"), "巻き戻しボタンに msg-action-btn");
+    ok(rewind.title === "この発言とこれ以降を削除して、入力欄に戻す", "巻き戻しボタンの title", rewind.title);
+    ok(rewind.attrs["aria-label"] === "この発言とこれ以降を削除して、入力欄に戻す", "巻き戻しボタンの aria-label", rewind.attrs["aria-label"]);
+    ok(rewind.innerHTML.includes('aria-hidden="true"') && rewind.innerHTML.includes('focusable="false"'), "巻き戻しアイコン SVG 属性");
+    ok(rewind.innerHTML.includes("M280-200"), "巻き戻しアイコンは undo のパス");
 
     ok(copy.classList.contains("msg-action-btn"), "コピーボタンに msg-action-btn");
     ok(copy.title === "本文をコピー", "コピーボタンの title", copy.title);
@@ -190,8 +195,9 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // クリックイベント
     calls.length = 0;
-    edit.onclick({ stopPropagation: () => {} });
-    ok(calls.some((c) => c[0] === "openEdit" && c[1] === user), "編集クリックで openEdit(m)");
+    rewind.onclick({ stopPropagation: () => {} });
+    ok(calls.some((c) => c[0] === "confirm" && String(c[1]).includes("入力欄に戻しますか")),
+      "巻き戻しクリックで確認ダイアログ", calls);
 
     calls.length = 0;
     copy.onclick({ stopPropagation: () => {} });
@@ -201,6 +207,15 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     calls.length = 0;
     more.onclick();
     ok(calls.some((c) => c[0] === "toggleMoreMenu" && c[1] === more && c[2] === user), "⋯ クリックで toggleMoreMenu");
+  }
+
+  console.log("\n[A2] buildMsgHoverActions (最新の発言なので巻き戻しを出さない)");
+  {
+    const latest = { id: "u3", role: "user", text: "最新の発言" };
+    const box = sandbox.buildMsgHoverActions(latest, true, { setting: {} });
+    ok(box.children.length === 2, "最新の発言はコピーと ⋯ の 2 つ", box.children.length);
+    ok(!box.children.some((c) => String(c.title || "").includes("この発言とこれ以降を削除")),
+      "最新の発言に巻き戻しボタンは無い");
   }
 
   console.log("\n[B] buildMsgHoverActions (本文空の発言)");

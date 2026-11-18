@@ -23,9 +23,11 @@ body.wizard-open #toast { z-index: 1300; }  /* ウィザード表示中もトー
      その position:absolute / 透過 / pointer-events:none を打ち消して通常のフッターに戻す */
   position: static; left: auto; right: auto; bottom: auto; z-index: auto;
   pointer-events: auto; background: var(--bg, #1e1f22);
-  display: flex; gap: 8px; justify-content: flex-end; padding: 12px 14px;
+  display: flex; gap: 8px; justify-content: flex-start; padding: 12px 14px;
   border-top: 1px solid var(--line, #3a3d42); flex-wrap: wrap;
 }
+.wizard-back { margin-right: auto; }
+#wizardFoot { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
 .wizard-card { display: flex; flex-direction: column; gap: 10px; }
 .wizard-card h3 { margin: 4px 0; font-size: 15px; }
 .wizard-card.center { text-align: center; align-items: center; padding: 24px 0; }
@@ -67,6 +69,7 @@ body.wizard-open #toast { z-index: 1300; }  /* ウィザード表示中もトー
 .wizard-why { font-size: 11px; color: var(--muted, #9aa0a6); margin: 0; }
 .wizard-grid2 { display: grid; grid-template-columns: 1fr 100px; gap: 8px; }
 .wizard-warn { border: 1px solid #7a5a1e; background: rgba(245,194,107,.08); color: #f5c26b; border-radius: 10px; padding: 8px 10px; font-size: 11px; line-height: 1.5; }
+.wizard-warn:empty { display: none; }
 .wizard-err { border: 1px solid #7a2e2e; background: rgba(255,120,120,.08); color: #ff9d9d; border-radius: 10px; padding: 10px; font-size: 12px; }
 .wizard-msg { font-size: 11px; color: var(--muted, #9aa0a6); min-height: 1em; }
 .wizard-details { border: 1px solid var(--line, #3a3d42); border-radius: 10px; padding: 8px 10px; }
@@ -76,12 +79,28 @@ body.wizard-open #toast { z-index: 1300; }  /* ウィザード表示中もトー
 .wizard-spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid rgba(255,255,255,.15); border-top-color: var(--accent, #8ab4f8); animation: wiz-spin .9s linear infinite; }
 @keyframes wiz-spin { to { transform: rotate(360deg); } }
 .wizard-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+/* 独自の確認ダイアログ（window.confirm の置き換え） */
+.wizard-confirm { position: absolute; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.wizard-confirm-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.5); }
+.wizard-confirm-box {
+  position: relative; width: 100%; max-width: 380px;
+  background: var(--bg, #1e1f22); color: var(--fg, #e8eaed);
+  border: 1px solid var(--line, #3a3d42); border-radius: 16px; padding: 16px;
+  box-shadow: 0 18px 48px rgba(0,0,0,.5);
+}
+.wizard-confirm-box h3 { margin: 0 0 8px; font-size: 15px; }
+.wizard-confirm-box:focus { outline: none; }
+.wizard-confirm-msg { margin: 0 0 14px; font-size: 13px; line-height: 1.6; }
+.wizard-confirm-btns { display: flex; flex-direction: column; gap: 8px; }
+.wizard-confirm-btns .wizard-btn { width: 100%; }
+.wizard-confirm-btns .wizard-btn.danger { color: #ff9d9d; border-color: #7a2e2e; }
+.wizard-confirm-btns .wizard-btn.danger:hover { background: rgba(255,120,120,.1); }
 .hidden { display: none !important; }
 
 @media (max-width: 640px) {
   .wizard-root { align-items: stretch; justify-content: stretch; }
   .wizard-modal { width: 100vw; max-height: 100dvh; height: 100dvh; border-radius: 0; border: 0; }
   .wizard-body { padding: 14px 14px calc(14px + env(safe-area-inset-bottom)); }
-  .wizard-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .wizard-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); row-gap: 8px; }
   .wizard-grid2 { grid-template-columns: 1fr 80px; }
 }

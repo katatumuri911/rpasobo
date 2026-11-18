@@ -548,6 +548,22 @@ class TestJobsAndSweep(WizardTestBase):
         self.assertTrue(r["resumed"])
         self.assertEqual(r["draft"]["id"], d["id"])
 
+    def test_start_reuses_empty_draft_without_prompt(self):
+        # 何も入力していない下書きは「前回の続きから再開しますか？」を出さず、黙って使い回す
+        r1 = server.wizard_start({"base_sid": ""})
+        self.assertFalse(r1["resumed"])
+        r2 = server.wizard_start({"base_sid": ""})
+        self.assertFalse(r2["resumed"])
+        self.assertEqual(r2["draft"]["id"], r1["draft"]["id"])
+
+    def test_start_resumes_after_any_input(self):
+        d = self.new_draft()
+        server.wslot_set(d, "rough_idea", "海辺の町", "user")
+        server.wizard_save(d)
+        r = server.wizard_start({"base_sid": ""})
+        self.assertTrue(r["resumed"])
+        self.assertEqual(r["draft"]["id"], d["id"])
+
     def test_ai_disabled_uses_template(self):
         d = self.new_draft()
         d["model"] = {"provider": "none", "model": "", "ai_enabled": False}
@@ -561,6 +577,261 @@ class TestJobsAndSweep(WizardTestBase):
             payload = server.wizard_models_payload("antigravity")
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["models"][0]["id"], "m1")
+
+
+class FakeHandler:
+    def __init__(self, path="/", body=None):
+        self.path = path
+        self._body = body or {}
+        self.status = 200
+        self.result = None
+
+    def blocked(self, u, post=False):
+        return False
+
+    def body(self):
+        return self._body
+
+    def send_json(self, data, code=200):
+        self.status = code
+        self.result = data
+        return data
+
+
+class TestJobCancelAndWorkerRecheck(WizardTestBase):
+    def post(self, path, body):
+        h = FakeHandler(path, body)
+        server.wizard_route(h, path, body, "POST")
+        return h.status, h.result
+
+    def test_job_cancel_with_draft_id_clears_last_job_and_bumps_rev(self):
+        d = self.new_draft()
+        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+            job, _ = server.wizard_start_job(d, "compose")
+            orig_d = server.wizard_load(d["id"])
+            self.assertEqual(orig_d["last_job"], job["job_id"])
+            self.assertEqual(orig_d["status"], "composing")
+            old_rev = orig_d["rev"]
+
+            status, res = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"], "draft_id": d["id"]})
+            self.assertEqual(status, 200)
+            self.assertTrue(res["ok"])
+            self.assertTrue(res["canceled"])
+            self.assertEqual(res["draft"]["last_job"], "")
+            self.assertEqual(res["draft"]["status"], "interview")
+            self.assertEqual(res["draft"]["step"], "tags")
+            self.assertEqual(res["draft"]["rev"], old_rev + 1)
+
+            saved = server.wizard_load(d["id"])
+            self.assertEqual(saved["last_job"], "")
+            self.assertEqual(saved["status"], "interview")
+            self.assertEqual(saved["step"], "tags")
+            self.assertEqual(saved["rev"], old_rev + 1)
+
+    def test_job_cancel_with_existing_setting_restores_ready_and_preview(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+            job, _ = server.wizard_start_job(d, "compose")
+            status, res = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"], "draft_id": d["id"]})
+            self.assertEqual(status, 200)
+            self.assertEqual(res["draft"]["status"], "ready")
+            self.assertEqual(res["draft"]["step"], "preview")
+            saved = server.wizard_load(d["id"])
+            self.assertEqual(saved["status"], "ready")
+            self.assertEqual(saved["step"], "preview")
+
+    def test_cancel_causes_old_rev_slots_to_return_409(self):
+        d = self.new_draft()
+        base_rev = d["rev"]
+        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+            job, _ = server.wizard_start_job(d, "compose")
+
+        status, _ = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"], "draft_id": d["id"]})
+        self.assertEqual(status, 200)
+
+        status, res = self.post("/api/wizard/slots", {
+            "draft_id": d["id"],
+            "rev": base_rev,
+            "slots": {"work": {"value": "作品名", "source": "user"}}
+        })
+        self.assertEqual(status, 409)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], "rev")
+
+    def test_wizard_job_running_is_false_after_cancel(self):
+        d = self.new_draft()
+        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+            job, _ = server.wizard_start_job(d, "compose")
+            self.assertTrue(server.wizard_job_running(job["job_id"]))
+            self.assertTrue(server.wizard_job_running(server.wizard_load(d["id"])["last_job"]))
+
+            status, _ = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"], "draft_id": d["id"]})
+            self.assertEqual(status, 200)
+            self.assertFalse(server.wizard_job_running(job["job_id"]))
+            saved = server.wizard_load(d["id"])
+            self.assertFalse(server.wizard_job_running(saved["last_job"]))
+
+    def test_cleaned_up_job_idempotent_cancel(self):
+        d = self.new_draft()
+        jid = "wj_cleanedup01"
+        d["last_job"] = jid
+        d["status"] = "composing"
+        d["step"] = "creating"
+        server.wizard_save(d, bump=False)
+        base_rev = d["rev"]
+
+        server.wizard_jobs.pop(jid, None)
+
+        status, res = self.post("/api/wizard/job_cancel", {"job_id": jid, "draft_id": d["id"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["canceled"])
+        self.assertEqual(res["draft"]["last_job"], "")
+        self.assertEqual(res["draft"]["status"], "interview")
+        self.assertEqual(res["draft"]["step"], "tags")
+        self.assertEqual(res["draft"]["rev"], base_rev + 1)
+
+        saved = server.wizard_load(d["id"])
+        self.assertEqual(saved["last_job"], "")
+        self.assertEqual(saved["rev"], base_rev + 1)
+
+        # Idempotent: call cancel again
+        status2, res2 = self.post("/api/wizard/job_cancel", {"job_id": jid, "draft_id": d["id"]})
+        self.assertEqual(status2, 200)
+        self.assertTrue(res2["ok"])
+        self.assertFalse(res2["canceled"])
+        self.assertEqual(res2["draft"]["last_job"], "")
+        self.assertEqual(res2["draft"]["rev"], base_rev + 1)
+
+    def test_legacy_job_cancel_without_draft_id(self):
+        d = self.new_draft()
+        base_rev = d["rev"]
+        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+            job, _ = server.wizard_start_job(d, "compose")
+
+        status, res = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(res, {"ok": True})
+        self.assertNotIn("draft", res)
+        self.assertNotIn("canceled", res)
+
+        saved = server.wizard_load(d["id"])
+        self.assertEqual(saved["rev"], base_rev)
+        self.assertTrue(job["cancel"])
+        self.assertEqual(job["status"], "canceled")
+
+    def test_non_ai_compose_canceled_before_final_save_does_not_resurrect_job(self):
+        d = self.new_draft()
+        d["model"] = {"provider": "none", "model": "", "ai_enabled": False}
+        server.wizard_save(d)
+        job = {
+            "job_id": "wj_comp_cancel",
+            "draft_id": d["id"],
+            "kind": "compose",
+            "status": "running",
+            "cancel": False,
+            "base_rev": d["rev"],
+        }
+        server.wizard_jobs[job["job_id"]] = job
+        d["last_job"] = job["job_id"]
+        d["status"] = "composing"
+        server.wizard_save(d, bump=False)
+
+        orig_template_compose = server.wizard_template_compose
+        def hook(draft):
+            # Cancel job right before final save in wizard_do_compose
+            server.wizard_route(FakeHandler("/api/wizard/job_cancel"),
+                                "/api/wizard/job_cancel",
+                                {"job_id": job["job_id"], "draft_id": d["id"]}, "POST")
+            return orig_template_compose(draft)
+
+        with mock.patch.object(server, "wizard_template_compose", side_effect=hook):
+            with self.assertRaises(server.WizardError) as cm:
+                server.wizard_do_compose(job)
+            self.assertIn(cm.exception.code, ("canceled", "stale"))
+
+        saved = server.wizard_load(d["id"])
+        self.assertEqual(saved["last_job"], "")
+        self.assertIsNone(saved.get("compose"))
+        self.assertEqual(saved["status"], "interview")
+
+    def test_non_ai_questions_done_branch_canceled_does_not_save(self):
+        d = self.new_draft()
+        d["model"] = {"provider": "none", "model": "", "ai_enabled": False}
+        server.wizard_save(d)
+        job = {
+            "job_id": "wj_ques_cancel",
+            "draft_id": d["id"],
+            "kind": "questions",
+            "status": "running",
+            "cancel": False,
+            "base_rev": d["rev"],
+        }
+        server.wizard_jobs[job["job_id"]] = job
+        d["last_job"] = job["job_id"]
+        server.wizard_save(d, bump=False)
+
+        orig_ai_enabled = server.wizard_ai_enabled
+        def hook(draft):
+            server.wizard_route(FakeHandler("/api/wizard/job_cancel"),
+                                "/api/wizard/job_cancel",
+                                {"job_id": job["job_id"], "draft_id": d["id"]}, "POST")
+            return orig_ai_enabled(draft)
+
+        with mock.patch.object(server, "wizard_ai_enabled", side_effect=hook):
+            with self.assertRaises(server.WizardError) as cm:
+                server.wizard_do_questions(job)
+            self.assertIn(cm.exception.code, ("canceled", "stale"))
+
+        saved = server.wizard_load(d["id"])
+        self.assertEqual(saved["last_job"], "")
+        self.assertFalse(saved.get("done_questions"))
+
+    def test_run_canceled_error_handling(self):
+        d = self.new_draft()
+        # When wizard_do_compose raises WizardError(code="canceled"), run() sets status to "canceled", not "error"
+        with mock.patch.object(server, "wizard_do_compose", side_effect=server.WizardError("キャンセルしました", code="canceled")):
+            job, _ = server.wizard_start_job(d, "compose")
+            time.sleep(0.1)
+            self.assertEqual(job["status"], "canceled")
+            self.assertIsNone(job["error"])
+
+        # When an unexpected Exception occurs after cancel is set, run() sets status to "canceled", not "error"
+        d2 = self.new_draft()
+        def fail_with_cancel(j):
+            j["cancel"] = True
+            j["status"] = "canceled"
+            raise RuntimeError("unexpected boom after cancel")
+
+        with mock.patch.object(server, "wizard_do_compose", side_effect=fail_with_cancel):
+            job2, _ = server.wizard_start_job(d2, "compose")
+            time.sleep(0.1)
+            self.assertEqual(job2["status"], "canceled")
+            self.assertIsNone(job2["error"])
+
+    def test_run_pre_canceled_does_not_run(self):
+        d = self.new_draft()
+        run_func = []
+        def intercept_thread(target, daemon=True):
+            run_func.append(target)
+            m = mock.MagicMock()
+            m.start = lambda: None
+            return m
+
+        with mock.patch("threading.Thread", side_effect=intercept_thread):
+            job, _ = server.wizard_start_job(d, "compose")
+            self.assertTrue(run_func)
+            job["status"] = "canceled"
+            job["cancel"] = True
+            run_func[0]()
+            self.assertEqual(job["status"], "canceled")
+            self.assertIsNone(job["error"])
+
+    def test_invalid_draft_id_returns_400(self):
+        status, res = self.post("/api/wizard/job_cancel", {"job_id": "wj_test", "draft_id": "invalid/id"})
+        self.assertEqual(status, 400)
+        self.assertEqual(res["code"], "bad_request")
 
 
 if __name__ == "__main__":

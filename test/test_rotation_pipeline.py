@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import urllib.request
+import urllib.error
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -311,6 +312,61 @@ class TestRotationPipeline(unittest.TestCase):
         s_loaded = server.load(s["id"])
         # 15 - 12 = 3ターン削除 -> 35 - 3 = 32
         self.assertEqual(s_loaded["setting"]["total_turns"], 32)
+
+    # -------------------------------------------------------------
+    # T9b: drop=true の truncate（巻き戻し）はそのユーザー発言ごと消して本文・添付を返す
+    # -------------------------------------------------------------
+    def test_T9b_truncate_drop_removes_user_message(self):
+        s = self._create_dummy_session(user_turns=15)
+        s["setting"]["total_turns"] = 35
+        target_u = [m for m in s["messages"] if m.get("role") == "user"][11]  # 12th user msg
+        target_u["files"] = [{"name": "pic.png", "path": "p1.png", "type": "image/png", "size": 10}]
+        server.save(s)
+
+        resp = self._post("/api/message/truncate", {"sid": s["id"], "id": target_u["id"], "drop": True})
+        self.assertTrue(resp.get("ok"))
+        self.assertTrue(resp.get("drop"))
+        self.assertEqual(resp.get("text"), target_u["text"])
+        self.assertEqual([f["name"] for f in resp.get("files")], ["pic.png"])
+
+        s_loaded = server.load(s["id"])
+        ids = [m["id"] for m in s_loaded["messages"]]
+        self.assertNotIn(target_u["id"], ids)          # その発言も消える
+        self.assertEqual(ids[-1], "a_11")               # 直前の AI 応答までが残る
+        self.assertEqual(len(ids), 22)
+        self.assertEqual(s_loaded["setting"]["total_turns"], 31)  # 35 - 4（u_12〜u_15 を丸ごと消す）
+
+    # -------------------------------------------------------------
+    # T9c: drop=true はユーザー発言だけ / 応答待ちがある間は 409
+    # -------------------------------------------------------------
+    def test_T9c_truncate_drop_guards(self):
+        s = self._create_dummy_session(user_turns=15)
+        asst = [m for m in s["messages"] if m.get("role") == "assistant"][5]
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self._post("/api/message/truncate", {"sid": s["id"], "id": asst["id"], "drop": True})
+        self.assertEqual(cm.exception.code, 400)
+
+        s = server.load(s["id"])
+        target_u = [m for m in s["messages"] if m.get("role") == "user"][11]
+        last_user = [m for m in s["messages"] if m.get("role") == "user"][-1]
+        last_user["status"] = "processing"
+        server.save(s)
+        with self.assertRaises(urllib.error.HTTPError) as cm2:
+            self._post("/api/message/truncate", {"sid": s["id"], "id": target_u["id"], "drop": True})
+        self.assertEqual(cm2.exception.code, 409)
+        s_loaded = server.load(s["id"])
+        self.assertIn(target_u["id"], [m["id"] for m in s_loaded["messages"]])  # 消えていない
+
+    # -------------------------------------------------------------
+    # T9d: drop しない truncate は従来どおり（その発言は残る）
+    # -------------------------------------------------------------
+    def test_T9d_truncate_keeps_message_without_drop(self):
+        s = self._create_dummy_session(user_turns=4)
+        target_u = [m for m in s["messages"] if m.get("role") == "user"][1]
+        resp = self._post("/api/message/truncate", {"sid": s["id"], "id": target_u["id"]})
+        self.assertTrue(resp.get("ok"))
+        s_loaded = server.load(s["id"])
+        self.assertEqual([m["id"] for m in s_loaded["messages"]], ["u_1", "a_1", "u_2"])
 
     # -------------------------------------------------------------
     # T10: _rot_cutover は未応答があると切り替えない（I7）
@@ -904,13 +960,16 @@ class TestRotationPipeline(unittest.TestCase):
         self.assertEqual(st["ide_session"], "conv-main-new")
         self.assertEqual(st["choices_ide_session"], "conv-cho-new")
 
-        # choices/AGENTS.md が更新され conv-cho-new を含んでいること
+        # choices/AGENTS.md が更新されていること
+        # （共有フォルダなので会話IDは書かない。選択肢会話も初回以降はスペース合図で動く前提の文言）
         c_folder = os.path.join(server.channel_folder(s_final), "choices")
         c_path = os.path.join(c_folder, server.AGENTS_NAME)
         self.assertTrue(os.path.exists(c_path))
         with open(c_path, "r", encoding="utf-8") as f:
             c_agents_content = f.read()
-        self.assertIn("conv-cho-new", c_agents_content)
+        self.assertIn(f"channel={sid}_choices", c_agents_content)
+        self.assertNotIn("--ide conv-cho-new", c_agents_content)  # 固定IDは書かない
+        self.assertIn("合図が半角スペース1文字だけなら", c_agents_content)
 
     # -------------------------------------------------------------
     # T24: /api/message/alter（アシスタント発言編集）でも回転が中止されること

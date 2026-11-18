@@ -802,8 +802,10 @@ async function switchTo(id) {
   replyToastTurnId = "";
   choicesToastKey = "";
   progressHistory = [];
-  progressUserTime = "";
-  lastProgressKey = "";
+  progressStateLabel = "";
+  progressStateKey = "";
+  progressTurnId = "";
+  progressSeenKeys = new Set();
   progressEpoch++;
   clearTopNotices();
   displayChoicesMode.clear();
@@ -973,10 +975,6 @@ function fillForm(st, force = false) {
   }
   if ($("f_image") && canSet("f_image")) $("f_image").value = JSON.stringify(st.image || {}, null, 2);
 
-  const et = st.elapsed_time || {};
-  if ($("f_elapsed_day") && canSet("f_elapsed_day")) $("f_elapsed_day").value = et.day || 1;
-  if ($("f_elapsed_period") && canSet("f_elapsed_period")) $("f_elapsed_period").value = et.period || "午前";
-
   fillFileOptions(st);
 }
 function readForm() {
@@ -1001,10 +999,6 @@ function readForm() {
   if ($("refList")) st.ref_files = [...$("refList").querySelectorAll("input:checked")].map((x) => x.value);
   st.folder_files = readFolderFiles();
   if ($("f_files_extra")) st.files_extra = $("f_files_extra").value;
-
-  st.elapsed_time = st.elapsed_time || {};
-  if ($("f_elapsed_day")) st.elapsed_time.day = parseInt($("f_elapsed_day").value, 10) || 1;
-  if ($("f_elapsed_period")) st.elapsed_time.period = $("f_elapsed_period").value || "午前";
 
   return st;
 }
@@ -4673,14 +4667,12 @@ function buildMoreMenu(m, isLast, s) {
   sep();
 
   // 取り消しにくい操作はまとめて一番下に置く
-  if (!isLast) {
-    item("⏪ 巻き戻し", async () => {
-      if (!confirm("このメッセージより後の会話を消して、ここまで戻しますか？（控えは data/trash に残ります）")) return;
-      const ch = sid;
-      let r;
-      try { r = await checked("/api/message/truncate", { sid, id: m.id }); await poll(); }
-      catch (e) { alert(e.message); return; }
-      await revertIde(r, ch);
+  // 巻き戻しはユーザー発言だけ（この発言とこれ以降を消して、入力欄に戻す）。
+  // AI応答側は 🔄 再生成 と □ 修正で足りるので出さない。
+  if (m.role === "user" && !isLast) {
+    item("巻き戻し", () => rewindUserMessage(m), {
+      icon: MSG_ICON_UNDO,
+      title: "この発言とこれ以降を削除して、この発言を入力欄に戻す",
     });
   }
   item("🗑️ 削除", async () => {
@@ -4743,13 +4735,16 @@ function toggleMoreMenu(anchorBtn, m, isLast, s, opts = {}) {
 
 // ---- ユーザー発言カードの操作（テスト抽出開始）
 // ユーザー発言カードの操作アイコン（Material Symbols Outlined / Apache License 2.0）
-const MSG_ICON_EDIT =
-  '<svg viewBox="0 -960 960 960" aria-hidden="true" focusable="false">' +
-  '<path d="M200-200h57l391-391-57-57-391 391v57Zm-80 80v-170l528-527q12-11 26.5-17t30.5-6q16 0 31 6t26 18l55 56q12 11 17.5 26t5.5 30q0 16-5.5 30.5T817-647L290-120H120Zm640-584-56-56 56 56Zm-141 85-28-29 57 57-29-28Z"/>' +
-  '</svg>';
 const MSG_ICON_COPY =
   '<svg viewBox="0 -960 960 960" aria-hidden="true" focusable="false">' +
   '<path d="M360-240q-33 0-56.5-23.5T280-320v-480q0-33 23.5-56.5T360-880h360q33 0 56.5 23.5T800-800v480q0 33-23.5 56.5T720-240H360Zm0-80h360v-480H360v480ZM200-80q-33 0-56.5-23.5T120-160v-560h80v560h440v80H200Zm160-240v-480 480Z"/>' +
+  '</svg>';
+// 巻き戻し（この発言とこれ以降を削除して、入力欄に戻す）。
+// Material Symbols Outlined の "undo"（Apache License 2.0）。
+// https://fonts.google.com/icons?selected=Material+Symbols+Outlined:undo
+const MSG_ICON_UNDO =
+  '<svg viewBox="0 -960 960 960" aria-hidden="true" focusable="false">' +
+  '<path d="M280-200v-80h284q63 0 109.5-40T720-420q0-60-46.5-100T564-560H312l104 104-56 56-200-200 200-200 56 56-104 104h252q97 0 166.5 63T800-420q0 94-69.5 157T564-200H280Z"/>' +
   '</svg>';
 
 // 送信中（■ 停止 が見えている間）のユーザー発言か。
@@ -4797,6 +4792,64 @@ async function copyMessageText(m) {
   toast(ok ? "コピーしました" : "コピーできませんでした", ok ? { kind: "ok" } : { kind: "err", ms: 4000 });
 }
 
+// 巻き戻し: このユーザー発言とこれ以降の会話を削除して、本文（と添付）を入力欄に戻す。
+// サーバー側の /api/message/truncate {drop:true} が本文・添付を返す。
+async function rewindUserMessage(m) {
+  if (!m || m.role !== "user") return;
+  const busyTurn = isBusyUserMsg(m)
+    || (typeof hasWaitingInput === "function" && hasWaitingInput())
+    || (typeof sending !== "undefined" && sending)
+    || (typeof stopping !== "undefined" && stopping);
+  if (busyTurn) {
+    toast("応答中は巻き戻せません。停止してから操作してください。", 4000);
+    return;
+  }
+  const ta = $("messageInput");
+  const hasDraft = !!(ta && String(ta.value || "").trim())
+    || (typeof attaching !== "undefined" && attaching.length > 0);
+  const ask = "この発言とこれ以降の会話を削除して、この発言を入力欄に戻しますか？\n"
+    + "（控えは data/trash に残ります）"
+    + (hasDraft ? "\n\n※ 入力欄の下書き（本文・添付）は置き換わります。" : "");
+  if (typeof confirm === "function" && !confirm(ask)) return;
+  const ch = sid;
+  let r;
+  try {
+    r = await checked("/api/message/truncate", { sid: ch, id: m.id, drop: true });
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  if (!r || !r.drop) {
+    // drop 未対応の旧サーバー: 本文が返らないので入力欄は触らない（下書きを消さない）
+    toast("サーバーを再起動すると巻き戻しが使えます（この発言は戻せませんでした）", { kind: "warn", ms: 9000 });
+    await poll();
+    return;
+  }
+  // 通信が続いても本文を失わないよう、先に入力欄へ戻す
+  if (sid === ch) {
+    const box = $("messageInput");
+    if (box) {
+      box.value = String(r.text || "");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      if (typeof autoResizeInput === "function") autoResizeInput();
+      box.focus();
+      const len = box.value.length;
+      if (typeof box.setSelectionRange === "function") box.setSelectionRange(len, len);
+    }
+    if (typeof attaching !== "undefined") {
+      attaching = (Array.isArray(r.files) ? r.files : []).map((f) => ({
+        name: f.name || "file",
+        preview: /^image\//.test(f.type || "") ? uploadUrl(f.path) : "",
+        file: f,
+      }));
+      if (typeof renderAttach === "function") renderAttach();
+    }
+  }
+  await poll();
+  await revertIde(r, ch);
+  toast("巻き戻しました（この発言を入力欄に戻しました）", { kind: "ok" });
+}
+
 function makeMoreButton(m, isLast, s) {
   const moreBtn = document.createElement("button");
   moreBtn.type = "button";
@@ -4818,17 +4871,21 @@ function buildMsgHoverActions(m, isLast, s) {
   const text = String(m && m.text ? m.text : "").trim();
 
   if (text) {
-    const edit = document.createElement("button");
-    edit.type = "button";
-    edit.className = "msg-action-btn";
-    edit.title = "この入力を編集して再送";
-    edit.setAttribute("aria-label", "この入力を編集して再送");
-    edit.innerHTML = MSG_ICON_EDIT;       // 固定の SVG 文字列だけ
-    edit.onclick = (e) => {
-      if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-      openEdit(m);
-    };
-    box.appendChild(edit);
+    // 巻き戻し（この発言とこれ以降を消して、入力欄に戻す）。
+    // 最新の発言は ■ 停止 が担当するので出さない。
+    if (!isLast) {
+      const rewind = document.createElement("button");
+      rewind.type = "button";
+      rewind.className = "msg-action-btn";
+      rewind.title = "この発言とこれ以降を削除して、入力欄に戻す";
+      rewind.setAttribute("aria-label", "この発言とこれ以降を削除して、入力欄に戻す");
+      rewind.innerHTML = MSG_ICON_UNDO;     // 固定の SVG 文字列だけ
+      rewind.onclick = (e) => {
+        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+        rewindUserMessage(m);
+      };
+      box.appendChild(rewind);
+    }
 
     const copy = document.createElement("button");
     copy.type = "button";
@@ -5284,7 +5341,8 @@ function createMessageWrap(m, isLast, s) {
     bar.appendChild(th);
   }
 
-  // ユーザー発言の「✏️ 編集して再送」は ⋯ の中に集約した（ツールバーには出さない）
+  // ユーザー発言の「✏️ 編集して再送」は ⋯ の中に集約した（ツールバーには出さない）。
+  // ツールバー（ホバー）に出るのは「巻き戻し / コピー / ⋯」
 
   // エラー状態のユーザー発言にはエラーバッジと再送ボタンを表示
   if (m.role === "user" && m.status === "error") {
@@ -5477,8 +5535,6 @@ async function saveElapsedModal() {
   } finally { if (btn) btn.disabled = false; }
   state.setting = newSetting;
   updateElapsedTimeUI(newSetting.elapsed_time);
-  if ($("f_elapsed_day")) { $("f_elapsed_day").value = day; dirtyFields.delete("f_elapsed_day"); }
-  if ($("f_elapsed_period")) { $("f_elapsed_period").value = period; dirtyFields.delete("f_elapsed_period"); }
   closeElapsedModal();
   await poll();
   toast(`時間を「${day}日目・${period}」に変更しました`);   // flash() は設定パネル内で見えない
@@ -5492,8 +5548,8 @@ function modelResetText(r) {
 // Antigravity の利用枠は週（weekly）を使う。古い応答などで週が無ければ 5 時間の枠で代用する
 function modelQuota(r) {
   if (!r) return null;
-  if (r.weekly && typeof r.weekly.left === "number") return { left: r.weekly.left, reset: r.weekly.reset || "", weekly: true };
-  if (typeof r.left === "number") return { left: r.left, reset: r.reset || "", weekly: false };
+  if (r.weekly && typeof r.weekly.left === "number" && !Number.isNaN(r.weekly.left)) return { left: r.weekly.left, reset: r.weekly.reset || "", weekly: true };
+  if (typeof r.left === "number" && !Number.isNaN(r.left)) return { left: r.left, reset: r.reset || "", weekly: false };
   return null;
 }
 function modelQuotaText(r) {
@@ -5502,10 +5558,20 @@ function modelQuotaText(r) {
   if (q.left > 0) return `残り${Math.max(1, Math.round(q.left * 100))}%`;
   return `使い切り${q.reset ? modelResetText(q) : ""}`;
 }
+// 送信ボタン内の「残り x%」オーバーレイ層を取得
+function getSendQuotaLayer() {
+  if (typeof document !== "undefined" && typeof document.querySelector === "function") {
+    const el = document.querySelector("#sendBtn .send-quota-layer");
+    if (el) return el;
+  }
+  return typeof $ === "function" ? ($("sendQuotaLayer") || $("agQuotaBadge")) : null;
+}
+
 // 入力欄の中の「残り x%」。今使うモデルのグループの週の枠だけを出す（Antigravity のときだけ）
 function updateAgQuotaBadge() {
-  const el = $("agQuotaBadge");
-  if (!el) return;
+  const layer = getSendQuotaLayer();
+  if (!layer) return;
+  const pctEl = (typeof layer.querySelector === "function" ? layer.querySelector(".send-quota-pct") : null) || layer;
   const prov = state?.setting?.ai_provider || "antigravity";
   const cur = typeof currentModelConfig === "function" ? currentModelConfig() : null;
   const model = String(cur?.main || "").replace(/^ag:/, "") || (prov === "antigravity" ? ideModels?.default || "" : "");
@@ -5514,21 +5580,119 @@ function updateAgQuotaBadge() {
     : null;
   const q = modelQuota(r);
   if (!q) {
-    el.classList.add("hidden");
-    el.textContent = "";
-    el.removeAttribute("title");
+    layer.classList.add("hidden");
+    if (pctEl !== layer) pctEl.textContent = "";
+    else layer.textContent = "";
+    layer.removeAttribute("title");
     return;
   }
-  const pct = Math.max(1, Math.round(q.left * 100));
+  const pct = Math.max(0, Math.min(100, Math.round(q.left * 100)));
   const label = r?.label || model;
   const reset = q.reset ? modelResetText(q) : "";
-  el.textContent = q.left > 0 ? `${pct}%` : "使い切り";
-  el.classList.toggle("is-low", q.left <= 0 || pct <= 15);
-  el.title = (q.weekly ? `Antigravity の今週の残り（${label}）` : `Antigravity の残り（${label}）`)
-    + (q.left > 0 ? reset : `。${reset.replace(/^・/, "")}`)
-    + "。タップで読み直す";
-  el.setAttribute("aria-label", `${q.left > 0 ? `今週の残り ${pct}%` : "使い切り"}（${label}）。タップで読み直す`);
-  el.classList.remove("hidden");
+  const pctText = `${pct}%`;
+  pctEl.textContent = pctText;
+  if (layer.style) {
+    layer.style.setProperty("--quota-pct", pct);
+    layer.style.setProperty("--quota-color", (pct <= 15 || q.left <= 0) ? "#f87171" : "#38bdf8");
+  }
+  layer.classList.toggle("is-low", q.left <= 0 || pct <= 15);
+  layer.title = (q.weekly ? `Antigravity の今週の残り（${label}）` : `Antigravity の残り（${label}）`)
+    + (q.left > 0 ? reset : `。${reset.replace(/^・/, "")}`);
+  layer.setAttribute("aria-label", `${q.left > 0 ? `今週の残り ${pctText}` : "使い切り"}（${label}）`);
+  layer.classList.remove("hidden");
+}
+
+// 残量ゲージは常時は出さない。入力欄にフォーカスしたときは 3.5 秒見せてフェードアウト、
+// 入力（タイピング）開始後は 1.0 秒でフェードアウト、フォーカスが外れたときや送信時は即座に消す。
+const AG_QUOTA_PEEK_MS = 3500;
+const AG_QUOTA_TYPE_MS = 1000;
+const AG_QUOTA_FADE_MS = 320;
+const AG_QUOTA_COOLDOWN_MS = 25000;
+let agQuotaPeekTimer = null;   // フェードアウトを開始するタイマー
+let agQuotaFadeTimer = null;   // フェード完了処理タイマー
+let lastAgQuotaFetchTime = 0;  // 前回の /api/ag_quota 取得時刻
+let agQuotaFetching = false;   // 多重リクエスト防止フラグ
+
+function clearAgQuotaTimers() {
+  if (agQuotaPeekTimer) { clearTimeout(agQuotaPeekTimer); agQuotaPeekTimer = null; }
+  if (agQuotaFadeTimer) { clearTimeout(agQuotaFadeTimer); agQuotaFadeTimer = null; }
+}
+
+// 即座に消す（フォーカスが外れたとき・送信時など）。アニメーションはさせない
+function hideAgQuota() {
+  clearAgQuotaTimers();
+  const layer = getSendQuotaLayer();
+  if (!layer) return;
+  layer.classList.remove("is-peek", "is-fading");
+}
+
+// 背景で /api/ag_quota を非同期取得して次回表示用に更新する（クールダウン 25秒）
+async function backgroundFetchAgQuota() {
+  const now = Date.now();
+  if (lastAgQuotaFetchTime > 0 && now - lastAgQuotaFetchTime < AG_QUOTA_COOLDOWN_MS) return;
+  if (agQuotaFetching) return;
+  const prov = state?.setting?.ai_provider || "antigravity";
+  if (prov !== "antigravity") return;
+  agQuotaFetching = true;
+  lastAgQuotaFetchTime = now;
+  try {
+    const res = await fetch("/api/ag_quota");
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.models)) {
+        ideModels = data;
+        updateAgQuotaBadge();
+      }
+    }
+  } catch (err) {
+    console.warn("background fetch /api/ag_quota failed:", err);
+  } finally {
+    agQuotaFetching = false;
+  }
+}
+
+// 放置またはタイピング後にフェードアウトを開始する
+function fadeAgQuota() {
+  const layer = getSendQuotaLayer();
+  if (!layer || !layer.classList.contains("is-peek")) return;
+  if (agQuotaPeekTimer) { clearTimeout(agQuotaPeekTimer); agQuotaPeekTimer = null; }
+  layer.classList.add("is-fading");
+  agQuotaFadeTimer = setTimeout(() => {
+    hideAgQuota();
+    backgroundFetchAgQuota().catch(() => {});
+  }, AG_QUOTA_FADE_MS);
+}
+
+// 残量を一定時間見せる（フォーカス時は 3.5秒、選択肢クリック時は 1.0秒）
+function peekAgQuota(duration = AG_QUOTA_PEEK_MS) {
+  const sendBtn = typeof $ === "function" ? $("sendBtn") : null;
+  if (sendBtn && (sendBtn.classList?.contains("hidden") || sendBtn.disabled)) return;
+  const layer = getSendQuotaLayer();
+  if (!layer || layer.classList.contains("hidden")) return;
+  const pctEl = typeof layer.querySelector === "function" ? layer.querySelector(".send-quota-pct") : null;
+  if (pctEl && !pctEl.textContent.trim()) return;
+  clearAgQuotaTimers();
+  layer.classList.remove("is-fading");
+  layer.classList.remove("is-peek");
+  if (typeof layer.offsetWidth !== "undefined") {
+    void layer.offsetWidth;   // 連続で呼んでもアニメーションを最初からやり直す
+  }
+  layer.classList.add("is-peek");
+  agQuotaPeekTimer = setTimeout(fadeAgQuota, duration);
+}
+
+// 入力欄にタイピングされたとき（input イベント）は 1.0 秒後にフェードアウト
+function onAgQuotaTyping() {
+  const layer = getSendQuotaLayer();
+  if (!layer || !layer.classList.contains("is-peek") || layer.classList.contains("is-fading")) return;
+  if (agQuotaPeekTimer) { clearTimeout(agQuotaPeekTimer); agQuotaPeekTimer = null; }
+  agQuotaPeekTimer = setTimeout(fadeAgQuota, AG_QUOTA_TYPE_MS);
+}
+
+// クォータが現在表示中かどうか
+function isAgQuotaVisible() {
+  const layer = getSendQuotaLayer();
+  return Boolean(layer && layer.classList.contains("is-peek"));
 }
 function modelLeftText(r) {
   const q = modelQuota(r);
@@ -6071,7 +6235,7 @@ function render() {
       desiredChildren.push(p);
       if (!p.innerHTML) setTimeout(pollProgress, 0);  // 送った直後は2秒待たずに読む
     }
-  } else if (progressSid === s.id) { progressHtml = ""; lastStepToastKey = ""; lastProgressKey = ""; }  // 次の入力で前のターンの表示が一瞬出ないように
+  } else if (progressSid === s.id) { progressHtml = ""; lastStepToastKey = ""; progressSeenKeys = new Set(); }  // 次の入力で前のターンの表示が一瞬出ないように
 
   // Sync desired children with log DOM
   const desiredSet = new Set(desiredChildren);
@@ -6393,8 +6557,28 @@ async function poll() {
 }
 
 // 応答待ちのあいだ、担当の Antigravity 会話がしていること（ツール呼び出し）を入力中の表示の下に映す
-let progressHtml = "", progressSid = "", progressBusy = false, lastProgressKey = "", progressHistory = [], progressUserTime = "", progressEpoch = 0;
+let progressHtml = "", progressSid = "", progressBusy = false, progressSeenKeys = new Set(), progressHistory = [], progressTurnId = "", progressEpoch = 0;
+// いま積んである「状態（待機）」の文言。変わったときだけ新しい行を積む
+let progressStateLabel = "", progressStateSeq = 0, progressStateKey = "";
+// 進捗の文言に出すプロバイダー名（Antigravity 固定にしない）
+const PROGRESS_PROVIDER_NAMES = { google: "Google API", vertex: "Vertex AI", antigravity: "Antigravity" };
 let lastStepToastKey = "", stepToastSid = "", stepToastUserTime = "", capacityToastPhase = "", capacityToastAttempt = -1, replyToastTurnId = "", choicesToastKey = "";
+
+// 状態行の見え方を付け直す：いまの状態＝●（最下段なら点滅）、終わった状態＝✓、
+// 停止（失敗で終わった）＝✋。ログの並びは動かさない。
+function markStateRows() {
+  const last = progressHistory[progressHistory.length - 1];
+  for (const row of progressHistory) {
+    if (!row.state) continue;
+    const current = row.label === progressStateLabel;
+    const live = current && row === last;
+    // 停止行は点滅させない（もう動かないので）
+    const cls = "p-row" + (live && !row.stop ? " now" : "") + (row.stop ? " error stop" : " wait");
+    const mark = row.stop ? "✋" : (current ? "●" : "✓");
+    row.html = `<div class="${cls}"><span class="p-mark">${mark}</span>`
+      + `<span class="p-text">${esc(row.label)}</span></div>`;
+  }
+}
 
 // progress_labels.js が読めていなければ素通し（画面が壊れないように）
 const PL = (typeof ProgressLabels !== "undefined") ? ProgressLabels : {
@@ -6406,7 +6590,8 @@ const { stepLabel, stepDetail, stepRaw } = PL;
 
 // トーストは主要なステップだけ（送信・読み込み・書き込み・完了・エラー）。新しい行が出た瞬間に1回だけ
 const STEP_TOAST_KINDS = new Set(["read", "write"]);
-const PROGRESS_WINDOW = 3;   // 進捗は直近3件だけ表示する（件数。1件が複数行でもよい）
+// 進捗カードに何行見えるかは CSS の高さ（3行分）が決める。
+// ここで件数を数えてまとめない（行は時系列に積むだけ）。
 function notifyProgressStep(items, running, userTime) {
   const s = state;
   if (!s) return;
@@ -6482,7 +6667,9 @@ ${d}`, { kind: "err", ms: 10000 });
 
 function clearProgressPanel() {
   progressHistory = [];
-  lastProgressKey = "";
+  progressSeenKeys = new Set();
+  progressStateLabel = "";
+  progressStateKey = "";
   progressHtml = "";
   if ($("progress")) $("progress").innerHTML = "";
 }
@@ -6496,7 +6683,14 @@ async function pollProgress() {
     (m.role === "user" && (m.status === "pending" || m.status === "processing")) ||
     m.choices_status === "pending" || m.choices_status === "processing" ||
     m.image_refine_status === "pending" || m.image_refine_status === "processing");
-  if (!preWaiting) { clearProgressPanel(); return; }
+  if (!preWaiting) {
+    // 失敗で終わったターンは、原因の行を残して「停止しました」を出す。
+    // 成功で終わったとき（と、残す行が無いとき）は今までどおり消す。
+    const preFailed = preMsgs.some((m) =>
+      (m.role === "user" && m.status === "error") ||
+      m.choices_status === "error" || m.image_refine_status === "error");
+    if (!preFailed || !progressHistory.length) { clearProgressPanel(); return; }
+  }
   progressBusy = true;
   const epoch = progressEpoch;
   try {
@@ -6529,37 +6723,43 @@ async function pollProgress() {
     const waitingRefine = msgs.some((m) =>
       m.image_refine_status === "pending" || m.image_refine_status === "processing");
     const stillWaiting = waitingUser || waitingChoices || waitingRefine;
+    // 失敗で終わったターン（送信エラー / 選択肢のエラー）は、原因の行を残したまま
+    // 最後に「停止」を1行出して、作り直し中か終わりかを分かるようにする。
+    // 成功で終わったときは今までどおり消す。
+    let stoppedText = "";
     if (!stillWaiting) {
-      // 完了したのに最後の「待機」や「選択肢を生成しています」を残さない。
-      // 次に送信したときに古い行が出ないよう、履歴もここで捨てる。
-      clearProgressPanel();
-      return;
+      const failedUser = msgs.find((m) => m.role === "user" && m.status === "error");
+      const failedChoices = msgs.find((m) => m.choices_status === "error");
+      const reason = failedUser ? String(failedUser.error || "送信エラー（再送してください）")
+        : failedChoices ? String(failedChoices.choices_error || "選択肢の生成エラー")
+        : "";
+      if (!reason || !progressHistory.length) {
+        clearProgressPanel();
+        return;
+      }
+      stoppedText = `停止しました: ${reason}`;
     }
     const items = r.items || [];
-    // 新しいユーザー入力（user_time が変わった）ら、前のターンの
-    // 「返答完了」「待機」行は持ち越さない。読み込みなどの作業行は残してよい。
-    const turnKey = String(r.user_time || "");
-    if (progressSid === s.id && turnKey && progressUserTime && turnKey !== progressUserTime) {
-      progressHistory = progressHistory.filter((x) => x.key !== "__reply_done__" && x.key !== "__waiting__");
-      lastProgressKey = "";
+    // ターンの識別は「最後のユーザー発言のID」で行う（IDE の user_time ではない）。
+    // フィルタ停止などでサーバーが自動で作り直すと IDE 側は新しい入力になるが、
+    // 利用者から見れば同じターン。user_time で消すと、止まった理由の行が消えてしまう。
+    const lastUserMsg = [...msgs].reverse().find((m) => m.role === "user");
+    const turnKey = lastUserMsg ? String(lastUserMsg.id || "") : "";
+    if (progressSid === s.id && turnKey && progressTurnId && turnKey !== progressTurnId) {
+      progressHistory = [];
+      progressSeenKeys = new Set();
+      progressStateLabel = "";
+      progressStateKey = "";
     }
-    if (turnKey) progressUserTime = turnKey;
-    // 本文待ちのターンでは、たとえ user_time が取れなくても
-    // 前ターンの「返答完了」（合成行・実際の reply 行）を履歴から出さない。
-    // 送信直後に前の返事が「返答完了」として残るのを防ぐ。
-    if (waitingUser && !bodyDone) {
-      progressHistory = progressHistory.filter((x) =>
-        x.key !== "__reply_done__" && !String(x.key).includes(":reply:"));
-      // 新しい入力を待っている間に、前のターンのエラーを履歴から出さない
-      progressHistory = progressHistory.filter((x) =>
-        x.key !== "capacity" && !/class="p-row[^"]*error/.test(x.html));
-    }
+    if (turnKey) progressTurnId = turnKey;
+    // エラー行もログの一部なので消さない（積んだ位置に残して上へ流す）。
+    // 消してよいのは「返事が届いたターンのエラー」だけ（下の answered の処理）。
     // wait_input.py の行だけを隠す。以前は最後の wait_input より前を切り捨てていたが、
     // それだと「読み込み→待機」の待機中に直前のステップが消えて1行だけになっていた。
     // 窓は最後の3件なので、古いターンは自然に押し出される。
     let shown = items.filter((it) => !it.internal);
     // 本文をまだ待っているのに、前のターンの reply（返答完了）が
-    // 現在のステップとして返ってきても表示しない。プロンプトを渡した
+    // 現在のステップとして返ってきても表示しない。本文を渡した
     // 「（待機）」だけは現在の進行として残す。
     if (waitingUser && !bodyDone)
       shown = shown.filter((it) => it.kind !== "reply" ||
@@ -6578,11 +6778,12 @@ async function pollProgress() {
     // タイムアウト後の再試行で成功したのに503の行が残るのを防ぐ。
     // 進捗側の reply は「（待機）」のこともあるので、成功判定には使わない。
     if (answered) shown = shown.filter((it) => it.kind !== "error");
-    if (progressSid !== s.id) { lastProgressKey = ""; progressHistory = []; }
-    // 以前のバージョンが履歴に入れた「次にすることを考えている」や古い注記は消す。
-    // 注記は現在の状態を毎回出し直すので、履歴には残さない（重複表示を防ぐ）。
+    if (progressSid !== s.id) { progressSeenKeys = new Set(); progressHistory = []; progressStateLabel = ""; progressStateKey = ""; }
+    // 以前のバージョンが履歴に入れた古い注記は消す（注記は現在の状態を毎回出し直すので、
+    // 履歴には残さない＝重複表示を防ぐ）。思考行は履歴に残す（にする）と
+    // 次のポーリングで行が消えず、下に積まれていく流れになる。
     progressHistory = progressHistory.filter((x) =>
-      !x.key.includes(":think:") && x.key !== "__waiting__" &&
+      !String(x.key).startsWith("__waiting__") &&
       x.key !== "__note_error__" && !String(x.key).startsWith("__note__:"));
     // 1〜4回目の503は履歴にも残さない。いま2〜4回目なら、以前の5回目以降の行も消す
     // （古い「5/9」と今の「2/9」が並んで、5回目以降だけ出す意図と食い違うため）。
@@ -6598,6 +6799,29 @@ async function pollProgress() {
     const pkey = (it) => (it.kind === "error" && it.error_kind === "capacity")
       ? "capacity"
       : `${it.step ?? ""}:${it.call ?? ""}:${it.kind}:${it.tool_kind || ""}:${it.filter_name || ""}`;
+    // 担当（本文/選択肢/推敲/記憶）によって「書いた」中身が変わるので言い換える。
+    // Antigravity がやっているのは outbox の JSON を書くことで、プロンプトの用意ではない。
+    const TASK_WRITE = {
+      choices: "✍️ 選択肢を書いた",
+      image_refine: "✍️ 画像プロンプトを書いた",
+      memory_extract: "✍️ 記憶を書き出した",
+      consolidation: "✍️ 記憶を統合した",
+    };
+    const TASK_END = {
+      choices: "選択肢を渡した",
+      image_refine: "画像プロンプトを渡した",
+      memory_extract: "記憶を渡した",
+      consolidation: "記憶を渡した",
+    };
+    const rowLabel = (it) => {
+      const task = r.task || "";
+      const isTurnEnd = it.kind === "reply" && TASK_END[task] &&
+        /^[（(]?\s*待機\s*[）)]?$/i.test(String(it.detail || "").trim());
+      if (isTurnEnd) return TASK_END[task];
+      if (TASK_WRITE[task] && it.kind === "tool" && it.tool_kind === "write" && !it.internal)
+        return TASK_WRITE[task];
+      return stepLabel(it);
+    };
     const makeRow = (it, isLast, historical) => {
       const now = !historical && !it.done && isLast;
       const capacity = it.kind === "error" && it.error_kind === "capacity";
@@ -6608,99 +6832,133 @@ async function pollProgress() {
       const d = stepDetail(it), raw = stepRaw(it);
       return {
         key: pkey(it),
+        kind: it.kind,
+        // フィルタで止まった行か（「作り直し中」か「失敗で終わり」かの判断に使う）
+        filterStop: (it.kind === "error" && it.is_filter) ? (it.filter_name || "コンテンツフィルタ") : "",
         capacityAttempt: capacity ? Number(it.attempt || 0) : 0,
         html: `<div class="${cls}"${raw ? ` title="${esc(raw)}"` : ""}>`
-          + `<span class="p-mark">${mark}</span><span class="p-text">${esc(stepLabel(it))}</span>`
+          + `<span class="p-mark">${mark}</span><span class="p-text">${esc(rowLabel(it))}</span>`
           + (d ? `<span class="p-detail" title="${esc(raw)}">${esc(d)}</span>` : "") + "</div>",
       };
     };
-    let rows = shown.map((it, i) => makeRow(it, i === shown.length - 1, false));
+    // 行は「追記型のログ」として持つ（古い→新しい）。ここが時系列の唯一の正。
+    // shown はサーバーが返す「今のターンの行の一覧」なので、未登録のものだけ末尾に足す。
+    // 一度出た行は、shown から消えても並びから抜かない（時系列が巻き戻らない）。
+    const logged = new Map(progressHistory.map((x, i) => [x.key, i]));
+    const freshKeys = [];
+    shown.forEach((it, i) => {
+      const row = makeRow(it, i === shown.length - 1, false);
+      if (logged.has(row.key)) {
+        // 同じ行の状態が進んだ（待機 → 完了など）。並びは動かさず中身だけ差し替える
+        progressHistory[logged.get(row.key)] = row;
+      } else {
+        progressHistory.push(row);
+        logged.set(row.key, progressHistory.length - 1);
+        freshKeys.push(row.key);
+      }
+    });
+    // 新しい行が来たら、まだ shown に残っていない古い行の「実行中」表示は止める
+    if (freshKeys.length) {
+      const alive = new Set(shown.map((it) => pkey(it)));
+      for (const r of progressHistory)
+        if (!alive.has(r.key)) r.html = String(r.html).replace(/p-row now/g, "p-row");
+    }
+    // 待機の文言に出すプロバイダー名。Antigravity 固定にしない
+    // （Google API / Vertex AI のときは「Antigravity」とは書かない）
+    const providerId = s.setting?.ai_provider || "antigravity";
+    const isAntigravityProvider = !["google", "vertex"].includes(providerId);
+    const providerName = PROGRESS_PROVIDER_NAMES[providerId] || providerId;
     // 旧サーバーの「会話は止まっている（合図を待っている）」も、意味が分かる文言に直す。
     let note = (r.note === "会話は止まっている（合図を待っている）" || r.note === "AIの応答開始待ち")
-      ? "Antigravityの処理開始待ち" : r.note;
-    if (waitingChoices && !waitingUser && note === "Antigravityの処理開始待ち")
-      note = "Antigravityの選択肢生成待ち";
-    // サーバーが注記を返さない待機直後でも、Antigravity なら何を待っているかを出す
-    const isAntigravityProvider = !["google", "vertex"].includes(s.setting?.ai_provider || "antigravity");
-    if (!note && !shown.length && isAntigravityProvider && !waitingRefine) {
-      note = (waitingChoices && !waitingUser)
-        ? "Antigravityの選択肢生成待ち"
-        : "Antigravityの処理開始待ち";
+      ? `${providerName}の処理開始待ち` : r.note;
+    if (waitingChoices && !waitingUser && note === `${providerName}の処理開始待ち`)
+      note = `${providerName}の選択肢生成待ち`;
+    // 待機の状態は常に「1行」。状態を合成しない（1件ずつ時系列に出す）。
+    // 判定の順番が重要：
+    //   送信直後は choices_status も pending になるので、待機の判定で
+    //   「選択肢待ち」を先に見ると、1件目に「本文の返答を待っています」が出てしまう
+    //   （AIはまだ何も書き始めていないのに本文待ちはおかしい）。
+    //   → 「作業行がまだ1つも無い」を最優先で見て「処理開始待ち」にする。
+    const nothingYet = !shown.length;
+    // 担当が「（待機）」を返したか＝作業を渡し終えたか。渡すまでは「処理開始待ち」のまま
+    const handedOver = progressHistory.some((x) => x.kind === "reply");
+    // このターンでフィルタに止められた回数（＝自動の作り直しが何回走ったか）
+    const filterStops = progressHistory.filter((x) => x.filterStop);
+    const filterName = filterStops.length ? filterStops[filterStops.length - 1].filterStop : "";
+    let waitLabel;
+    if (stoppedText) {
+      waitLabel = stoppedText;
+    } else if (waitingRefine && !waitingUser) {
+      waitLabel = "🖼️ 画像の推敲を待っています";
+    } else if (!bodyDone && filterStops.length) {
+      // フィルタで止められた直後：まだ待っている＝サーバーが自動で作り直す
+      waitLabel = `🔄 ${filterName}で止まりました。自動で作り直します（${filterStops.length}回目）`;
+    } else if (!bodyDone && !isAntigravityProvider) {
+      // API 系はサーバーの注記がそのまま現在の状態
+      waitLabel = note || `${providerName}で生成中`;
+    } else if (!bodyDone && (nothingYet || !handedOver)) {
+      // 動き出す前〜作業中（まだ本文を渡し終えていない）。プロバイダー名は設定に合わせる
+      waitLabel = `${providerName}の処理開始を待っています`;
+    } else if (waitingChoices && bodyDone) {
+      waitLabel = "💬 選択肢を生成しています";
+    } else if (bodyDone && waitingUser) {
+      waitLabel = "送信処理の完了を待っています";
+    } else {
+      waitLabel = "本文の返答を待っています";
     }
-    // 待機の状態は常に「1行」で表す（注記と待機行を2行並べない）。
-    // 行の文言は、実際に待っている対象を優先する（注記で上書きしない）。
-    let waitLabel = "本文の返答を待っています";
-    if (waitingChoices) waitLabel = bodyDone
-      ? "💬 選択肢を生成しています"
-      : (waitingUser ? "本文と選択肢を生成しています" : "💬 選択肢を生成しています");
-    else if (waitingRefine && !waitingUser) waitLabel = "🖼️ 画像の推敲を待っています";
-    else if (bodyDone && waitingUser) waitLabel = "送信処理の完了を待っています";
-    // 「処理開始待ち」は、まだ作業行が1つも無いときだけ。
-    // 作業行が出たあとは「本文の返答を待っています」に切り替える
-    // （処理が始まっているのに『開始待ち』が残るのを防ぐ）。
-    else if (!shown.length && note === "Antigravityの処理開始待ち")
-      waitLabel = "Antigravityの処理開始を待っています";
-    else if (!shown.length && note) waitLabel = note;
     // 「読めない」「503」などの注記は待機ではない。オレンジの待機行にせず、
     // エラー行として出す（待っているように見える論理矛盾を避ける）。
     const noteIsError = !!note &&
       /(エラー|読めな|失敗|できません|停止|終了|混雑|容量不足|タイムアウト|timeout|Timeout)/.test(note);
     const hasErrorRow = shown.some((it) => it.kind === "error");
-    if (noteIsError && !hasErrorRow)
-      rows.push({ key: "__note_error__", html: `<div class="p-row error"><span class="p-mark">⚠️</span><span class="p-text">${esc(note)}</span></div>` });
-    // 待機中は必ず現在の状態を1行出す。作業行があっても消さない
-    // （「考えている」だけになって、何を待っているか分からなくなるのを防ぐ）。
-    // ただしエラー行があるときは、待機ではなくエラーを優先する。
-    if (!noteIsError && !hasErrorRow)
-      rows.push({ key: "__waiting__", html: `<div class="p-row now wait"><span class="p-mark">●</span><span class="p-text">${esc(waitLabel)}</span></div>` });
-    // 本文を受け取ったあと選択肢だけ待っているときは、本文の完了も窓に残す
-    if (bodyDone && waitingChoices && rows.length < PROGRESS_WINDOW)
-      rows.unshift({ key: "__reply_done__", html: `<div class="p-row"><span class="p-mark">✓</span><span class="p-text">返答完了</span></div>` });
-    // ページを開いた直後はフロント側の履歴が空なので、サーバーが返す
-    // 直前ターンの最後の2件で3件窓を埋める（待機1行だけにならないように）。
-    if (!progressHistory.length && (r.history || []).length && rows.length < PROGRESS_WINDOW) {
-      const keys = new Set(rows.map((x) => x.key));
-      const need = PROGRESS_WINDOW - rows.length;
-      const hrows = (r.history || [])
-        .filter((it) => it && !it.internal && !keys.has(pkey(it)) &&
-          it.kind !== "think" &&
-          // 新しい入力を待っているのに、前のターンの返事を履歴から出さない
-          !(waitingUser && !bodyDone && it.kind === "reply") &&
-          !(waitingUser && !bodyDone && it.kind === "error") &&
-          !(answered && it.kind === "error") &&
-          !(capAttempt(it) > 0 && capAttempt(it) < 5))
-        .slice(-need)
-        .map((it) => makeRow(it, false, true));
-      rows = hrows.concat(rows);
+    // 本文は完了 は「本文が届いた時点」の行。1回だけ、その時点の位置に差し込む。
+    // ・本文の生成が終わった同じポーリングで選択肢側の行が来ていたら、その行より前に入れる
+    //   （後ろに足すと「考えている → 本文は完了」と逆転する）
+    // ・以降はログに残るので、新しい行が下に積まれて自然に上へ流れる
+    if (bodyDone && waitingChoices &&
+        !progressHistory.some((x) => x.key === "__reply_done__")) {
+      const at0 = freshKeys.length
+        ? progressHistory.findIndex((x) => x.key === freshKeys[0]) : -1;
+      const at = (r.task === "choices" && at0 >= 0) ? at0 : progressHistory.length;
+      progressHistory.splice(at, 0, {
+        key: "__reply_done__",
+        html: `<div class="p-row"><span class="p-mark">✓</span><span class="p-text">本文は完了</span></div>`,
+      });
     }
-    // 全部残すと縦に伸びるので、直近3件だけの窓にする。新しい項目が来たら1件ずつ進める。
-    // 新しいターンで進捗が1件しかないときは、直前のターンの行で3件まで埋める
-    // （「応答を待っています」だけの1行にならないように）。
-    // 窓は1つだけ。注記・待機行も含めて、常に最大3行。
-    let windowRows;
-    if (rows.length >= PROGRESS_WINDOW) {
-      windowRows = rows.slice(-PROGRESS_WINDOW);
-    } else {
-      const keys = new Set(rows.map((x) => x.key));
-      const need = PROGRESS_WINDOW - rows.length;
-      const old = progressHistory.filter((x) => !keys.has(x.key)).slice(-need);
-      windowRows = old.concat(rows);
+    // 状態（待機）も「1行の履歴」。文言が変わったときだけ新しい行として積み、
+    // 前の状態の行は消さない（上に流れていく）。毎回作り直すと、前の状態が
+    // 消えて時系列が分からなくなるため。
+    const stopRow = !!stoppedText;
+    // エラー行があると待機行は出さないのが基本。ただし「フィルタで止まった後の作り直し中」は
+    // 次に何が起きるかを伝える行なので、エラー行があっても出す
+    const retrying = !bodyDone && filterStops.length > 0;
+    if ((stopRow || retrying || (!hasErrorRow && !noteIsError)) && waitLabel !== progressStateLabel) {
+      progressStateSeq += 1;
+      progressStateKey = `__state__:${progressStateSeq}`;
+      progressHistory.push({ key: progressStateKey, state: true, stop: stopRow, label: waitLabel, html: "" });
+      progressStateLabel = waitLabel;
     }
-    const lastKey = windowRows.length ? windowRows[windowRows.length - 1].key : "";
-    if (lastKey && lastKey !== lastProgressKey) {
-      const lastRow = windowRows[windowRows.length - 1];
-      if (lastRow.html.includes('class="p-row'))
-        lastRow.html = lastRow.html.replace(/class="([^"]*)"/, 'class="$1 p-enter"');
+    markStateRows();
+    // 注記エラーは「いまの異常」なので積まずに毎回出し直す（最下段）
+    let statusRow = null;
+    if (!stopRow && noteIsError && !hasErrorRow)
+      statusRow = { key: "__note_error__", html: `<div class="p-row error"><span class="p-mark">⚠️</span><span class="p-text">${esc(note)}</span></div>` };
+    // 行は時系列に積むだけ（件数でまとめない）。何行見えるかはカードの高さ
+    // （CSSで3行分）が決める。はみ出した古い行は上で切れる。
+    let windowRows = progressHistory.slice();
+    if (statusRow) windowRows = windowRows.concat([statusRow]);
+    // 新しく増えた行のうち一番下のものだけをアニメさせる（古い行は動かさない）。
+    // 状態行はキーにラベルを含むので、状態が変わったときもアニメする。
+    for (let i = windowRows.length - 1; i >= 0; i -= 1) {
+      if (progressSeenKeys.has(windowRows[i].key)) continue;
+      // ログの行は書き換えない（毎回アニメが付くのを防ぐ）。表示用に複製してクラスを足す
+      const row = windowRows[i];
+      if (row.html.includes('class="p-row'))
+        windowRows[i] = { key: row.key, html: row.html.replace(/class="([^"]*)"/, 'class="$1 p-enter"') };
+      break;
     }
-    lastProgressKey = lastKey;
-    progressHistory = windowRows
-      .filter((x) => !x.key.includes(":think:") && x.key !== "__waiting__" &&
-        x.key !== "__note_error__" && !String(x.key).startsWith("__note__:"))
-      .map((x) => ({
-        key: x.key,
-        capacityAttempt: x.capacityAttempt || 0,
-        html: x.html.replace(/ p-enter/g, "").replace(/class="p-row now/, 'class="p-row'),
-      }));
+    progressSeenKeys = new Set(windowRows.map((x) => x.key));
+    progressHistory = progressHistory.slice(-40);
     progressHtml = windowRows.map((x) => x.html).join("");
     progressSid = s.id;
     notifyProgressStep(shown, r.running, r.user_time);
@@ -6708,6 +6966,31 @@ async function pollProgress() {
     if (box && box.innerHTML !== progressHtml) {
       const nearBottom = !navHoldBottom && !topAlignHold && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
       box.innerHTML = progressHtml;
+      // 高さの決め方：ふつうは3行分（CSS）。
+      // エラー行が窓（最後の3行）に入っているときだけ、その行から下が丸ごと見える
+      // 高さまで広げる。行の途中で切れて文字が半分見えるのを避けるため。
+      // エラーが上に流れたら 3行窓に戻る（同じスクロール法則のまま）。
+      const clsOf = (row) => (/^<div class="([^"]*)"/.exec(row.html) || [])[1] || "";
+      const tail3 = windowRows.slice(-3);
+      const hasErr = tail3.some((x) => /(^| )error( |$)/.test(clsOf(x)));
+      if (box.classList && box.classList.toggle) box.classList.toggle("has-error", hasErr);
+      if (!hasErr) {
+        if (box.style) box.style.maxHeight = "";
+      } else if (box.querySelectorAll) {
+        const els = Array.prototype.slice.call(box.querySelectorAll(".p-row"));
+        let at = -1;
+        for (let i = Math.max(0, els.length - 3); i < els.length; i += 1)
+          if (els[i].classList && els[i].classList.contains("error")) at = i;
+        if (at >= 0) {
+          // エラー行の上2行までは残す（何が起きてから失敗したか分かるように）
+          const rest = els.slice(Math.max(0, at - 2));
+          const need = rest.reduce((n, el) => n + el.getBoundingClientRect().height, 0)
+            + 4 * Math.max(0, rest.length - 1) + 12 + 2;
+          if (box.style) box.style.maxHeight = Math.min(Math.ceil(need), 320) + "px";
+        }
+      }
+      // カードは3行分の高さなので、古い行は上に隠れる。常に最新の行が見えるよう下端へ寄せる
+      if (box.scrollHeight > box.clientHeight) box.scrollTop = box.scrollHeight;
       if (nearBottom) { log.scrollTop = log.scrollHeight; pinnedBottom = true; }
     }
   } catch { /* 読めないときは前の表示のまま */ }
@@ -6749,6 +7032,7 @@ function syncSendButton(waiting = hasWaitingInput()) {
 }
 
 async function send() {
+  hideAgQuota();
   closeChoicesAccordions();
   if (sending || stopping || hasWaitingInput()) return;
   const ta = $("messageInput");
@@ -6765,10 +7049,12 @@ async function send() {
   capacityToastPhase = "";
   capacityToastAttempt = -1;
   lastStepToastKey = "";
-  // 送信した瞬間に前のターンの「返答完了」や待機行を消す
+  // 送信した瞬間に前のターンの行を全部消す（ターンをまたいで混ぜない）。
   progressHistory = [];
-  progressUserTime = "";
-  lastProgressKey = "";
+  progressStateLabel = "";
+  progressStateKey = "";
+  progressTurnId = "";
+  progressSeenKeys = new Set();
   progressHtml = "";
   progressEpoch++;
   if ($("progress")) $("progress").innerHTML = "";
@@ -7005,6 +7291,43 @@ function choicesNoticeText(n) {
   }
 }
 
+// このチャンネルの既定（次のターンから🔞の候補だけを作るか）を保存する。
+// 設定パネルのチェックボックスと候補ヘッダーのチップが同じ経路を通るようにしてある。
+// 成功したら true。失敗時は理由を flash に出して false（呼び出し側で見た目を戻す）。
+async function setChoicesEroticAuto(nextValue) {
+  const next = !!nextValue;
+  const cur = (typeof state !== "undefined" && state && state.setting) ? state.setting : null;
+  if (!cur) return false;
+  // 8択の生成そのものがオフなら、既定を変えても何も起きない
+  if (next && cur.suggest_choices === false) {
+    if (typeof flash === "function") flash("「返答候補（8択）を生成する」がオフなので、先にオンにしてください");
+    return false;
+  }
+  const st = JSON.parse(JSON.stringify(cur));
+  st.choices_erotic_auto = next;
+  try {
+    await post("/api/setting", { setting: st });
+  } catch (e) {
+    if (typeof flash === "function") flash("保存できませんでした: " + ((e && e.message) || e));
+    return false;
+  }
+  state.setting = st;
+  if (typeof dirtyFields !== "undefined" && dirtyFields) dirtyFields.delete("f_choices_erotic_auto");
+  const chk = (typeof $ === "function") ? $("f_choices_erotic_auto") : null;
+  if (chk) chk.checked = next;
+  // 先読みは「選択肢担当の会話」で走るので、未設定なら効かないことを伝える
+  const par = !!(st.choices_ide_session && st.choices_ide_session !== st.ide_session);
+  if (typeof toast === "function") {
+    if (next && !par) {
+      toast("🔞を既定にしましたが、「選択肢担当の会話」が未設定のため効きません", { kind: "warn", ms: 9000, dedupe: false });
+    } else {
+      toast(next ? "次のターンから🔞選択肢のみ作成" : "次のターンから💬選択肢のみ作成", { kind: "ok", dedupe: false });
+    }
+  }
+  if (typeof poll === "function") { try { await poll(); } catch { /* 保存自体は成功している */ } }
+  return true;
+}
+
 function choicesBox(m, targetContainer) {
   const norm = (arr) => (arr || []).filter((c) => c && typeof c === "object" && typeof c.text === "string" && c.text.trim());
   const normalChoices = norm(m.choices);
@@ -7131,14 +7454,64 @@ function choicesBox(m, targetContainer) {
   spacer.className = "choices-head-sp";
   headRow.appendChild(rerollBtn);
   headRow.appendChild(spacer);
-  // このチャンネルが「🔞を最初から作る」設定かどうかを、その場で分かるように出す
-  if (autoErotic) {
-    const badge = document.createElement("span");
-    badge.className = "choices-auto-badge";
-    badge.textContent = "🔞既定";
-    badge.title = "このチャンネルは新しいターンでも🔞の候補を作ります（設定で変更）";
-    headRow.appendChild(badge);
-  }
+
+  // このチャンネルの既定（次のターンから🔞だけ作るか）を、オン/オフどちらでも常に出す。
+  // 押すと切り替え＝設定パネルを開かなくてもその場で変えられる。
+  // スイッチ（＝この返答の表示）とは役割が違うので、ノブの無い平たいピルにして形で区別する。
+  const autoChip = document.createElement("button");
+  autoChip.type = "button";
+  autoChip.className = "choices-auto-chip" + (autoErotic ? " is-erotic" : "");
+  autoChip.setAttribute("role", "switch");
+  autoChip.setAttribute("aria-checked", autoErotic ? "true" : "false");
+  autoChip.setAttribute("aria-label", autoErotic ? "このチャンネルは🔞既定" : "このチャンネルは💬既定");
+  const chipIc = document.createElement("span");
+  chipIc.className = "choices-auto-ic";
+  chipIc.textContent = autoErotic ? "🔞" : "💬";
+  chipIc.setAttribute("aria-hidden", "true");
+  const chipLb = document.createElement("span");
+  chipLb.className = "choices-auto-lb";
+  chipLb.textContent = "既定";
+  chipLb.setAttribute("aria-hidden", "true");
+  autoChip.appendChild(chipIc);
+  autoChip.appendChild(chipLb);
+  // 生成中と「8択の生成そのものがオフ」のときは押せない（スイッチと同じ条件）
+  const suggestOff = !!(typeof state !== "undefined" && state && state.setting && state.setting.suggest_choices === false);
+  autoChip.disabled = isPending || !!m.choices_status || suggestOff;
+  // 押した瞬間に見た目を切り替える。保存は往復するので、それを待ってから描き直すと
+  // 押しても何も起きないように見えていた（state.setting の更新＝再描画待ちだった）。
+  let chipOn = autoErotic;
+  let chipBusy = false;
+  const chipTitle = (on) => on
+    ? "このチャンネルの既定：次のターンから🔞の候補だけを作ります（押すと💬に戻す）／今の返答の表示は右のスイッチで切り替え"
+    : "このチャンネルの既定：次のターンは💬の候補を作ります（押すと🔞だけに切り替え）／今の返答の表示は右のスイッチで切り替え";
+  const paintChip = () => {
+    autoChip.classList.toggle("is-erotic", chipOn);
+    autoChip.setAttribute("aria-checked", chipOn ? "true" : "false");
+    autoChip.setAttribute("aria-label", chipOn ? "このチャンネルは🔞既定" : "このチャンネルは💬既定");
+    chipIc.textContent = chipOn ? "🔞" : "💬";
+    autoChip.title = (isPending || m.choices_status)
+      ? "生成中です"
+      : suggestOff
+        ? "「返答候補（8択）を生成する」がオフのため切り替えられません"
+        : chipTitle(chipOn);
+  };
+  paintChip();
+  autoChip.addEventListener("click", async (e) => {
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    if (autoChip.disabled || chipBusy) return;
+    chipBusy = true;
+    const next = !chipOn;
+    chipOn = next;
+    paintChip();                 // 1) 先に見た目だけ切り替える
+    try {
+      // 表示モード（スイッチ）はあえて動かさない：「次のターンは🔞、今回は💬を見たい」を壊さないため
+      const ok = await setChoicesEroticAuto(next);
+      if (!ok) { chipOn = !next; paintChip(); }   // 2) 保存に失敗したら見た目を戻す
+    } finally {
+      chipBusy = false;
+    }
+  });
+  headRow.appendChild(autoChip);
   headRow.appendChild(sw);
 
   async function startChoicesRegen(kind) {
@@ -7242,6 +7615,7 @@ function choicesBox(m, targetContainer) {
         document.querySelectorAll(".choice-item-btn.is-selected").forEach((b) => b.classList.remove("is-selected"));
       }
       listEl.querySelectorAll(".choice-item-btn").forEach((b) => b.classList.toggle("is-selected", b === itemBtn));
+      if (typeof peekAgQuota === "function") peekAgQuota(1000);
     });
     listEl.appendChild(itemBtn);
   });
@@ -9067,7 +9441,33 @@ async function saveRagEntry() {
   } catch (e) { alert(e.message); }
 }
 
-$("sendBtn").onclick = send;
+if ($("sendBtn")) {
+  const handleSendPointerDown = (e) => {
+    const ta = $("messageInput");
+    const isEmpty = !ta || (!ta.value.trim() && (!attaching || !attaching.length));
+    if (isAgQuotaVisible() && isEmpty) {
+      if (e && typeof e.preventDefault === "function") e.preventDefault();
+      if (ta && typeof ta.focus === "function" && typeof document !== "undefined" && document.activeElement !== ta) {
+        ta.focus();
+      }
+    }
+  };
+  $("sendBtn").addEventListener("pointerdown", handleSendPointerDown);
+  $("sendBtn").addEventListener("mousedown", handleSendPointerDown);
+  $("sendBtn").addEventListener("touchstart", handleSendPointerDown, { passive: false });
+  $("sendBtn").onclick = (e) => {
+    const ta = $("messageInput");
+    const isEmpty = !ta || (!ta.value.trim() && (!attaching || !attaching.length));
+    if (isAgQuotaVisible() && isEmpty) {
+      if (e && typeof e.preventDefault === "function") e.preventDefault();
+      if (ta && typeof ta.focus === "function" && typeof document !== "undefined" && document.activeElement !== ta) {
+        ta.focus();
+      }
+      return;
+    }
+    send();
+  };
+}
 if ($("stopBtn")) $("stopBtn").onclick = () => stopTurn();
 // マイク: 音声入力はこれから（用意だけ。押したら準備中と出す）
 if ($("micBtn")) {
@@ -9104,15 +9504,7 @@ if ($("favModelBtn")) {
   });
 }
 if ($("favModelSheetClose")) $("favModelSheetClose").onclick = closeFavModelSheet;
-// 入力欄の「残り x%」: タップでモデル一覧と週の枠を読み直す
-if ($("agQuotaBadge")) {
-  $("agQuotaBadge").onclick = async () => {
-    const el = $("agQuotaBadge");
-    if (el) el.classList.add("is-loading");
-    try { await loadModels(); } catch (e) { console.warn("quota reload failed:", e); }
-    if (el) el.classList.remove("is-loading");
-  };
-}
+
 if ($("favOpenAiModalBtn")) $("favOpenAiModalBtn").onclick = openAiModalFromFavSheet;
 if ($("favEmptyOpenSettings")) $("favEmptyOpenSettings").onclick = openAiModalFromFavSheet;
 if ($("favUndoBtn")) $("favUndoBtn").onclick = restoreDeletedFavorite;
@@ -9213,6 +9605,7 @@ $("messageInput").addEventListener("keydown", (e) => {
 $("messageInput").addEventListener("input", () => {
   autoResizeInput();
   syncActionControlsVisibility();   // 中央ボタンを「ツール」↔「送信」に切り替える
+  onAgQuotaTyping();
   if (selectedChoiceMap.size > 0 && $("messageInput").value !== lastSelectedChoiceText) {
     selectedChoiceMap.clear();
     lastSelectedChoiceText = "";
@@ -9249,10 +9642,12 @@ $("messageInput").addEventListener("focus", () => {
   setComposerExpanded();
   setTypingInput(true);
   updateFabState();
+  peekAgQuota();
 });
 $("messageInput").addEventListener("blur", () => {
   inputIsComposing = false;
   if (inputComposingTimer) { clearTimeout(inputComposingTimer); inputComposingTimer = null; }
+  hideAgQuota();   // フォーカスが外れたら残量バッジも引っ込める（畳んだ入力欄に取り残さない）
   setComposerExpanded();
   setTypingInput(false);
   updateFabState();
@@ -9947,9 +10342,10 @@ const RP_TIERS = {
   "inline":      { F: 0.20, C: 0.30, U: 0.55, rgb: "0, 0, 0" },
   "file":        { F: 0.35, C: 1.00, U: 1.00, rgb: "44, 44, 50" },
   "tool":        { F: 0.40, C: 0.85, U: 0.95, rgb: "30, 30, 38" },
-  "tool-alt":    { F: 0.40, C: 0.70, U: 0.95, rgb: "30, 30, 38" },
   "input":       { F: 0.60, C: 1.00, U: 1.00, rgb: "43, 43, 51" },
-  "input-focus": { F: 0.60, C: 1.00, U: 1.00, rgb: "48, 48, 58" },
+  // 入力欄のフォーカスは色を変えない（拡大の途中と見分けがつかず「色味が違う」と見えるため）。
+  // tier 自体はスライダーに追従させて残す（値は input と同じ）。
+  "input-focus": { F: 0.60, C: 1.00, U: 1.00, rgb: "43, 43, 51" },
   "chip":        { F: 0.60, C: 1.00, U: 1.00, rgb: "51, 51, 61" },
   "attach":      { F: 0.60, C: 1.00, U: 1.00, rgb: "44, 44, 50" },
 };
@@ -10364,35 +10760,13 @@ if (memoAsInitialEl) {
 }
 // 🔞を既定にするフラグは「切り替えたらすぐ効く」ように、その場で保存する
 // （保存ボタンを押し忘れて「通常の候補が出る」と混乱しやすいため）
+// 保存本体は setChoicesEroticAuto。候補ヘッダーのチップと同じ経路を通す。
 const eroticAutoEl = $("f_choices_erotic_auto");
 if (eroticAutoEl) {
   eroticAutoEl.addEventListener("change", async () => {
-    if (!state || state.id !== sid) return;
-    if (eroticAutoEl.checked && state.setting && state.setting.suggest_choices === false) {
-      eroticAutoEl.checked = false;
-      flash("「返答候補（8択）を生成する」がオフなので、先にオンにしてください");
-      return;
-    }
-    const next = JSON.parse(JSON.stringify(state.setting || {}));
-    next.choices_erotic_auto = !!eroticAutoEl.checked;
-    // 先読みは「選択肢担当の会話」で走るので、未設定なら効かないことを伝える
-    const par = !!(next.choices_ide_session && next.choices_ide_session !== next.ide_session);
-    try {
-      await post("/api/setting", { setting: next });
-      state.setting = next;
-      dirtyFields.delete("f_choices_erotic_auto");
-      if (next.choices_erotic_auto && !par) {
-        flash("オンにしました。ただし「選択肢担当の会話」が未設定のため、いまは効きません");
-      } else {
-        flash(next.choices_erotic_auto
-          ? "🔞の候補を最初から作る：オン（通常の候補は作りません）"
-          : "🔞の候補を最初から作る：オフ");
-      }
-      await poll();
-    } catch (e) {
-      eroticAutoEl.checked = !eroticAutoEl.checked;
-      flash("保存できませんでした: " + e.message);
-    }
+    const want = !!eroticAutoEl.checked;
+    // 失敗時は見た目を戻す（成功時はヘルパーが checked を合わせる）
+    if (!(await setChoicesEroticAuto(want))) eroticAutoEl.checked = !want;
   });
 }
 
@@ -11294,6 +11668,7 @@ if (typeof window !== 'undefined') {
   updateFooterHeight();
   updateFabState();
   updateHeaderAndSideStatus();
+  updateAgQuotaBadge();
   initPushNotifications();
   initUserMsgLongPress();
   await loadOptions();

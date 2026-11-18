@@ -8,7 +8,8 @@
   const STEP_LABELS = {
     command: "⚙️ コマンドを実行",
     read: "📖 ファイルを読み込み",
-    write: "✍️ プロンプトを用意",
+    // 中身は「本文（outbox の JSON）をファイルに書く」作業。担当によって呼び名は app.js が変える
+    write: "✍️ 本文を書いた",
     search: "🔍 中身を検索",
     list: "📁 フォルダを確認",
     plan: "🧭 段取りを整理",
@@ -27,7 +28,8 @@
     if (it.kind === "reply") {
       // このエージェントは「（待機）」を返してプロンプトを渡し、次の生成を待つことがある。
       const d = String(it.detail || "").trim();
-      if (/^[（(]?\s*待機\s*[）)]?$/i.test(d)) return "プロンプトを渡した";
+      // 「（待機）」はターン終了の合図（本文/選択肢を書き終えて渡した状態）
+      if (/^[（(]?\s*待機\s*[）)]?$/i.test(d)) return "本文を渡した";
       return "返答完了";
     }
     if (it.kind === "think") return "考えている";

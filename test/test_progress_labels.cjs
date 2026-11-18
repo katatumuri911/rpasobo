@@ -5,13 +5,13 @@ const path = require("path");
 const L = require(path.join(__dirname, "..", "public", "progress_labels.js"));
 
 assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "read", text: "view file" }), "📖 ファイルを読み込み");
-assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "write", text: "write" }), "✍️ プロンプトを用意");
+assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "write", text: "write" }), "✍️ 本文を書いた");
 assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "search", text: "grep" }), "🔍 中身を検索");
 assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "list", text: "list_dir" }), "📁 フォルダを確認");
 assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "plan", text: "update_plan" }), "🧭 段取りを整理");
 assert.strictEqual(L.stepLabel({ kind: "tool", tool_kind: "command", text: "run_command" }), "⚙️ コマンドを実行");
 assert.strictEqual(L.stepLabel({ kind: "reply", tool_kind: "", text: "返事を書いた" }), "返答完了");
-assert.strictEqual(L.stepLabel({ kind: "reply", detail: "（待機）" }), "プロンプトを渡した");
+assert.strictEqual(L.stepLabel({ kind: "reply", detail: "（待機）" }), "本文を渡した");
 assert.strictEqual(L.stepLabel({ kind: "think", tool_kind: "", text: "考えている" }), "考えている");
 assert.strictEqual(
   L.stepLabel({ kind: "error", tool_kind: "", text: "エラー", filter_name: "コンテンツ安全フィルタ" }),
@@ -56,7 +56,16 @@ const blockSrc = appSrc.slice(s0, s1);
 
 async function runPollProgressTests() {
   const toasts = [];
-  const progressBox = { innerHTML: "" };
+  const boxClasses = new Set();
+  const progressBox = {
+    innerHTML: "",
+    get classList() {
+      return {
+        toggle: (name, on) => { if (on) boxClasses.add(name); else boxClasses.delete(name); },
+        contains: (name) => boxClasses.has(name),
+      };
+    },
+  };
   const logBox = { scrollHeight: 500, scrollTop: 400, clientHeight: 100 };
   let apiResponse = { items: [], running: false };
   const ctx = {
@@ -86,7 +95,7 @@ async function runPollProgressTests() {
   assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
   assert.ok(!progressBox.innerHTML.includes("本文の返答を待っています"), "注記と待機行を2行並べない");
   assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 1, "待機の情報は1行だけ");
-  assert.ok(!progressBox.innerHTML.includes("返答完了"), "送信直後に返答完了を出さない");
+  assert.ok(!progressBox.innerHTML.includes("本文は完了"), "送信直後に完了行を出さない");
   assert.ok(!progressBox.innerHTML.includes("wait_input.py"));
   assert.strictEqual(toasts.length, 0);
 
@@ -114,7 +123,7 @@ async function runPollProgressTests() {
     ],
   };
   await ctx.pollProgress();
-  assert.ok(progressBox.innerHTML.includes("✍️ プロンプトを用意"));
+  assert.ok(progressBox.innerHTML.includes("✍️ 本文を書いた"));
   assert.strictEqual(toasts.length, 0, "write では短文トーストを出さないこと");
 
   // 3b. write が完了しても「次にすることを考えている」を足さない
@@ -207,6 +216,27 @@ async function runPollProgressTests() {
   assert.strictEqual(progressBox.innerHTML,
     '<div class="p-row now wait p-enter"><span class="p-mark">●</span><span class="p-text">Google APIで生成中</span></div>');
 
+  // 5a. プロバイダー名は設定に合わせる（Antigravity 固定にしない）
+  ctx.state = { id: "s2v", setting: { ai_provider: "vertex" }, messages: [{ role: "user", status: "pending", id: "uv" }] };
+  ctx.sid = "s2v";
+  apiResponse = { running: true, items: [] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("Vertex AIで生成中"), "Vertex のとき");
+  assert.ok(!progressBox.innerHTML.includes("Antigravity"));
+
+  ctx.state = { id: "s2g", setting: { ai_provider: "google" }, messages: [{ role: "user", status: "pending", id: "ug" }] };
+  ctx.sid = "s2g";
+  apiResponse = { running: false, items: [] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("Google APIで生成中"), "Google のとき");
+  assert.ok(!progressBox.innerHTML.includes("Antigravity"));
+
+  ctx.state = { id: "s2a", setting: { ide_session: "ide2a" }, messages: [{ role: "user", status: "pending", id: "ua" }] };
+  ctx.sid = "s2a";
+  apiResponse = { running: true, items: [] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"), "Antigravity のとき");
+
   // 5b. 旧サーバーの「会話は止まっている（合図を待っている）」も、
   // 待機行に統合して1行で出す（注記と待機行を2行並べない）
   ctx.state = { id: "s2b", setting: { ide_session: "ide2b" }, messages: [{ role: "user", status: "pending", id: "u2b" }] };
@@ -289,28 +319,29 @@ async function runPollProgressTests() {
   const lastRow = () => progressBox.innerHTML.slice(progressBox.innerHTML.lastIndexOf('<div class="p-row'));
   apiResponse = { running: true, user_time: "t4", items: [1, 2, 3, 4, 5].map(readItem) };
   await ctx.pollProgress();
-  assert.ok(progressBox.innerHTML.includes("file4.md"));
-  assert.ok(progressBox.innerHTML.includes("file5.md"));
-  assert.ok(!progressBox.innerHTML.includes("file1.md"));
-  assert.ok(!progressBox.innerHTML.includes("file2.md"));
-  assert.ok(!progressBox.innerHTML.includes("file3.md"));
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
+  // 5行＋待機行を時系列に並べるだけ（何行見えるかはカードの高さ=CSSが決める）
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 6);
+  for (let i = 1; i <= 5; i += 1)
+    assert.ok(progressBox.innerHTML.indexOf(`file${i}.md`) < progressBox.innerHTML.indexOf(`file${i + 1}.md`)
+      || i === 5, `file${i} が file${i + 1} より上`);
   assert.strictEqual((progressBox.innerHTML.match(/p-enter/g) || []).length, 1);
-  assert.ok(lastRow().includes("本文の返答を待っています"));
+  // 状態行は「文言が変わったときだけ」積む（まだ渡していないので処理開始待ち）
+  assert.ok(lastRow().includes("Antigravityの処理開始を待っています"));
   assert.ok(lastRow().includes("p-enter"));
 
+  // 新しい行は末尾に足される（古い行は消さない・並びを動かさない）
   apiResponse = { running: true, user_time: "t4", items: [1, 2, 3, 4, 5, 6].map(readItem) };
   await ctx.pollProgress();
-  assert.ok(progressBox.innerHTML.includes("file5.md"));
-  assert.ok(progressBox.innerHTML.includes("file6.md"));
-  assert.ok(!progressBox.innerHTML.includes("file3.md"));
-  assert.ok(!progressBox.innerHTML.includes("file4.md"));
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
-  assert.ok(lastRow().includes("本文の返答を待っています"));
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 7);
+  assert.ok(progressBox.innerHTML.indexOf("file5.md") < progressBox.innerHTML.indexOf("file6.md"));
+  assert.strictEqual((progressBox.innerHTML.match(/p-enter/g) || []).length, 1);
+  assert.ok(lastRow().includes("file6.md"), "新しい行は必ず最下段");
+  assert.ok(progressBox.innerHTML.indexOf("Antigravityの処理開始を待っています") <
+    progressBox.innerHTML.indexOf("file6.md"), "状態行は積んだ位置に残る（作り直さない）");
 
   // 同じ内容の再ポーリングでは増えない／再アニメしない
   await ctx.pollProgress();
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 7);
   assert.ok(!progressBox.innerHTML.includes("p-enter"));
 
   // 8. エラーの直後に wait_input.py が来ても、エラー表示を消さない
@@ -381,7 +412,7 @@ async function runPollProgressTests() {
   const beforeSuccess = toasts.length;
   await ctx.pollProgress();
   assert.ok(!progressBox.innerHTML.includes("503エラー"));
-  assert.ok(progressBox.innerHTML.includes("プロンプトを渡した"));
+  assert.ok(progressBox.innerHTML.includes("本文を渡した"));
   assert.strictEqual(toasts.length, beforeSuccess, "本文の完了通知は poll() 側で出す");
 
   // 11. 応答が届いた後に古いポーリング結果が返っても、エラー通知を出さない
@@ -413,42 +444,58 @@ async function runPollProgressTests() {
   ] };
   await ctx.pollProgress();
   assert.ok(!progressBox.innerHTML.includes("503エラー"));
-  assert.ok(progressBox.innerHTML.includes("✍️ プロンプトを用意"));
+  assert.ok(progressBox.innerHTML.includes("✍️ 本文を書いた"));
 
-  // 14. 新しいターンで進捗が1件（待機/思考）しかなくても、直前の3件窓から埋めて3件にする
+  // 14. ターンが変わったら行の流れを切り替える（前ターンの行は混ぜない）
   ctx.state = { id: "s11", setting: { ide_session: "ide11" }, messages: [{ role: "user", status: "pending", id: "u11" }] };
   ctx.sid = "s11";
   apiResponse = { running: true, user_time: "t11a", items: [1, 2, 3].map(readItem) };
   await ctx.pollProgress();
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 4,
+    "3行＋待機行（見えるのはカードの高さ分だけ）");
   assert.ok(progressBox.innerHTML.includes("file3.md"));
 
-  // 次のターンは待機だけ。直前の file2/file3 を残して3件にする
+  // 次のターン（新しいユーザー発言）は待機だけ。前ターンの file2/file3 は出さず、1行から始まる
+  ctx.state.messages = [{ role: "user", status: "pending", id: "u11b" }];
   apiResponse = { running: true, user_time: "t11b", items: [{
     kind: "tool", tool: "run_command", tool_kind: "command", internal: true,
     text: "run", detail: "", done: false, step: 20, call: 0,
   }] };
   await ctx.pollProgress();
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
-  assert.ok(progressBox.innerHTML.includes("file2.md"));
-  assert.ok(progressBox.innerHTML.includes("file3.md"));
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 1,
+    "前のターンの行を混ぜない（待機行だけ）");
+  assert.ok(!progressBox.innerHTML.includes("file2.md"));
+  assert.ok(!progressBox.innerHTML.includes("file3.md"));
   assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
   assert.strictEqual((progressBox.innerHTML.match(/p-enter/g) || []).length, 1);
 
-  // 思考だけが来ても、待機行（いま何を待っているか）は消さずに3件にする
+  // 思考が来たら下に足される（2行。「新しい行ほど下」）
   apiResponse = { running: true, user_time: "t11b", items: [{
     kind: "think", tool: "", tool_kind: "", internal: false,
     text: "考えている", detail: "", done: false, step: 21, call: 0,
   }] };
   await ctx.pollProgress();
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 2,
+    "今のターンの行だけを積む（状態行＋思考）");
   assert.ok(progressBox.innerHTML.includes("考えている"));
-  assert.ok(progressBox.innerHTML.includes("本文の返答を待っています"),
-    "作業行が出たら『処理開始待ち』ではなく本文待ちにする");
-  assert.ok(progressBox.innerHTML.includes("file3.md"));
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
+  assert.ok(!progressBox.innerHTML.includes("file3.md"), "前ターンの行は混ぜない");
+  // 担当が「（待機）」を返すまでは処理開始待ちのまま（作業行が出ても変えない）
+  assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
+  assert.ok(progressBox.innerHTML.indexOf("Antigravityの処理開始を待っています") <
+    progressBox.innerHTML.indexOf("考えている"), "状態行は先に積んだ位置のまま");
 
-  // 14b. 本文が届いて選択肢だけ待っているときは「選択肢を生成中」＋「返答完了」
+  // 渡した（待機）が来たら、状態が「本文の返答を待っています」に変わる
+  apiResponse = { running: true, user_time: "t11b", items: [
+    { kind: "think", tool: "", tool_kind: "", internal: false,
+      text: "考えている", detail: "", done: false, step: 21, call: 0 },
+    { kind: "reply", tool: "", tool_kind: "", internal: false,
+      text: "返事を書いた", detail: "（待機）", done: true, step: 22, call: 0 },
+  ] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("本文を渡した"));
+  assert.ok(progressBox.innerHTML.includes("本文の返答を待っています"), "渡した後は本文待ち");
+
+  // 14b. 本文が届いて選択肢だけ待っているときは「選択肢を生成中」＋「本文は完了」
   ctx.state = { id: "s15", setting: { ide_session: "ide15" }, messages: [
     { role: "user", status: "answered", id: "u15" },
     { role: "assistant", id: "a15", text: "本文", choices_status: "pending" },
@@ -460,19 +507,20 @@ async function runPollProgressTests() {
   }] };
   await ctx.pollProgress();
   assert.ok(progressBox.innerHTML.includes("💬 選択肢を生成しています"));
-  assert.ok(progressBox.innerHTML.includes("返答完了"));
+  assert.ok(progressBox.innerHTML.includes("本文は完了"), "本文の完了と選択肢の生成中を別の行で出す");
+  assert.ok(!progressBox.innerHTML.includes("返答完了"), "選択肢を待っている間はターン完了と言わない");
   assert.ok(!progressBox.innerHTML.includes("本文の返答を待っています"));
 
   // 選択肢待ちのときの Antigravity 側の注記も、待機行に統合して1行で出す
   apiResponse = { running: false, user_time: "t15", items: [], note: "Antigravityの処理開始待ち" };
   await ctx.pollProgress();
   assert.ok(progressBox.innerHTML.includes("💬 選択肢を生成しています"));
-  assert.ok(progressBox.innerHTML.includes('<span class="p-text">返答完了</span>'));
+  assert.ok(progressBox.innerHTML.includes('<span class="p-text">本文は完了</span>'));
   assert.ok(!progressBox.innerHTML.includes("Antigravityの処理開始待ち"));
   assert.ok(!progressBox.innerHTML.includes("選択肢生成待ち"), "注記を別行で出さない");
 
   // 14b2. 本文が届いていれば、status が processing のままでも
-  // 「本文と選択肢を生成」と「返答完了」を同時に出さない
+  // 「本文と選択肢を生成」と「本文は完了」を同時に出さない
   ctx.state = { id: "s15b", setting: { ide_session: "ide15b" }, messages: [
     { role: "user", status: "processing", id: "u15b" },
     { role: "assistant", id: "a15b", text: "本文", choices_status: "pending" },
@@ -484,11 +532,11 @@ async function runPollProgressTests() {
   }] };
   await ctx.pollProgress();
   assert.ok(progressBox.innerHTML.includes("💬 選択肢を生成しています"));
-  assert.ok(progressBox.innerHTML.includes("返答完了"));
+  assert.ok(progressBox.innerHTML.includes("本文は完了"));
   assert.ok(!progressBox.innerHTML.includes("本文と選択肢を生成しています"),
-    "本文到着後に『本文と選択肢』と『返答完了』を併記しない");
+    "本文到着後に『本文と選択肢』と『本文は完了』を併記しない");
 
-  // 14b3. スクショの再現: 選択肢待ち＋思考＋返答完了＋履歴でも最大3行。
+  // 14b3. スクショの再現: 選択肢待ち＋思考＋本文は完了＋履歴でも最大3行。
   // 注記を別行で足して4行にしない。
   ctx.state = { id: "s15c", setting: { ide_session: "ide15c" }, messages: [
     { role: "user", status: "processing", id: "u15c" },
@@ -501,8 +549,8 @@ async function runPollProgressTests() {
   }], history: [readItem(1), readItem(2)] };
   await ctx.pollProgress();
   assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3,
-    "注記・待機・思考・完了が重なっても最大3行");
-  assert.ok(progressBox.innerHTML.includes("返答完了"));
+    "思考＋本文は完了＋待機の3行（前ターンの履歴は混ぜない）");
+  assert.ok(progressBox.innerHTML.includes("本文は完了"));
   assert.ok(progressBox.innerHTML.includes("考えている"));
   assert.ok(!progressBox.innerHTML.includes("Antigravityの選択肢生成待ち"));
   assert.ok(!progressBox.innerHTML.includes("本文と選択肢を生成しています"));
@@ -521,10 +569,10 @@ async function runPollProgressTests() {
   ] };
   await ctx.pollProgress();
   assert.ok(!progressBox.innerHTML.includes("503エラー"), "成功後に503を残さない");
-  assert.ok(progressBox.innerHTML.includes("返答完了"));
+  assert.ok(progressBox.innerHTML.includes("本文は完了"));
   assert.ok(progressBox.innerHTML.includes("選択肢を生成しています"));
 
-  // 14c. 新しいターンでは、前のターンの「返答完了」を持ち越さない
+  // 14c. 新しいターンでは、前のターンの「本文は完了」を持ち越さない
   ctx.state = { id: "s16", setting: { ide_session: "ide16" }, messages: [
     { role: "user", status: "answered", id: "u16" },
     { role: "assistant", id: "a16", text: "本文", choices_status: "pending" },
@@ -535,8 +583,8 @@ async function runPollProgressTests() {
     text: "run", detail: "", done: false, step: 30, call: 0,
   }] };
   await ctx.pollProgress();
-  assert.ok(progressBox.innerHTML.includes("返答完了"));
-  // 次のユーザー入力（user_time が変わる）では、返答完了を引き継がない
+  assert.ok(progressBox.innerHTML.includes("本文は完了"));
+  // 次のユーザー入力（user_time が変わる）では、本文は完了を引き継がない
   ctx.state = { id: "s16", setting: { ide_session: "ide16" }, messages: [
     { role: "user", status: "pending", id: "u16b" },
   ] };
@@ -545,7 +593,7 @@ async function runPollProgressTests() {
     text: "run", detail: "", done: false, step: 31, call: 0,
   }] };
   await ctx.pollProgress();
-  assert.ok(!progressBox.innerHTML.includes("返答完了"), "送信直後に前ターンの返答完了を出さない");
+  assert.ok(!progressBox.innerHTML.includes("本文は完了"), "送信直後に前ターンの本文は完了を出さない");
   assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
 
   // 14d. 本文待ちの新ターンでは、サーバー履歴の前ターンの reply も出さない
@@ -589,7 +637,7 @@ async function runPollProgressTests() {
   ] };
   await ctx.pollProgress();
   assert.ok(!progressBox.innerHTML.includes("503エラー"));
-  assert.ok(progressBox.innerHTML.includes("プロンプトを渡した"));
+  assert.ok(progressBox.innerHTML.includes("本文を渡した"));
 
   // 16. ページを開いた直後（フロント履歴が空）でも、サーバーの直前ターン履歴で3件にする
   ctx.state = { id: "s13", setting: { ide_session: "ide13" },
@@ -602,18 +650,175 @@ async function runPollProgressTests() {
   apiResponse = { running: true, user_time: "t13", items: [waitOnly],
     history: [readItem(1), readItem(2)] };
   await ctx.pollProgress();
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
-  assert.ok(progressBox.innerHTML.includes("file1.md"));
-  assert.ok(progressBox.innerHTML.includes("file2.md"));
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 1,
+    "サーバー履歴（前ターンの行）は使わない");
+  assert.ok(!progressBox.innerHTML.includes("file1.md"));
+  assert.ok(!progressBox.innerHTML.includes("file2.md"));
   assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
   assert.strictEqual((progressBox.innerHTML.match(/p-enter/g) || []).length, 1);
 
-  // 2回目以降はフロント側の履歴を使い、サーバー履歴と二重にならない
+  // 再ポーリングしても増えない・二重にならない
   await ctx.pollProgress();
-  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 3);
-  assert.strictEqual((progressBox.innerHTML.match(/<div class="p-row" title="file1\.md"/g) || []).length, 1);
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 1);
 
-  // 17. 容量不足以外のエラーも、返事が届いたら履歴から消す
+  // 16b. 作業行が来たら下に積む（履歴では埋めない。件数は積まれた分だけ）
+  ctx.state = { id: "s18", setting: { ide_session: "ide18" },
+    messages: [{ role: "user", status: "pending", id: "u18" }] };
+  ctx.sid = "s18";
+  const writeItem18 = { kind: "tool", tool: "write_to_file", tool_kind: "write", internal: false,
+    text: "write", detail: "", done: true, step: 51, call: 0 };
+  apiResponse = { running: true, user_time: "t18", items: [writeItem18],
+    history: [readItem(1), readItem(2)] };
+  await ctx.pollProgress();
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 2,
+    "状態行＋作業行の2行");
+  assert.ok(!progressBox.innerHTML.includes("file2.md"), "前ターンの行は混ぜない");
+  assert.ok(progressBox.innerHTML.includes("✍️ 本文を書いた"));
+  assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
+  // 同じ内容の再ポーリングで増えない
+  await ctx.pollProgress();
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 2);
+  // 新しい行は下に足され、一番上から落ちる（古→新の順を守る）
+  apiResponse = { running: true, user_time: "t18",
+    items: [writeItem18, { kind: "reply", tool: "", tool_kind: "", internal: false,
+      text: "返事を書いた", detail: "（待機）", done: true, step: 52, call: 0 }],
+    history: [readItem(1), readItem(2)] };
+  await ctx.pollProgress();
+  const rows18 = progressBox.innerHTML.match(/<div class="p-row[^>]*>.*?<\/div>/g) || [];
+  assert.strictEqual(rows18.length, 4, "状態行＋書いた＋渡した＋新しい状態行");
+  assert.ok(progressBox.innerHTML.indexOf("本文を書いた") < progressBox.innerHTML.indexOf("本文を渡した"),
+    "先に出た行が上");
+  assert.ok(progressBox.innerHTML.indexOf("本文を渡した") <
+    progressBox.innerHTML.indexOf("本文の返答を待っています"), "渡した後に本文待ちが積まれる");
+
+  // 18. 送信した瞬間に前のターンの行は全部消える（混ぜない）
+  ctx.state = { id: "s20", setting: { ide_session: "ide20" },
+    messages: [{ role: "user", status: "pending", id: "u20" }] };
+  ctx.sid = "s20";
+  apiResponse = { running: true, user_time: "t20", items: [1, 2, 3].map(readItem) };
+  await ctx.pollProgress();
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 4,
+    "3行＋待機行を時系列に積む");
+  // 送信時の処理を再現（履歴もパネルも全消し）
+  vm.runInContext("progressHistory = []; progressStateLabel = ''; progressStateKey = '';", ctx);
+  progressBox.innerHTML = "";
+  apiResponse = { running: true, user_time: "t20b", items: [{
+    kind: "tool", tool: "run_command", tool_kind: "command", internal: true,
+    text: "run", detail: "", done: false, step: 60, call: 0,
+  }] };
+  await ctx.pollProgress();
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 1,
+    "送信直後は今のターンの待機行だけ");
+  assert.ok(!progressBox.innerHTML.includes("file3.md"));
+  assert.ok(progressBox.innerHTML.includes("Antigravityの処理開始を待っています"));
+
+  // 18b. 「本文は完了」は選択肢フェーズの行より前に置く（時系列の逆転を作らない）
+  const bodyDoneMsgs = [
+    { role: "user", status: "answered", id: "u21" },
+    { role: "assistant", id: "a21", text: "本文", choices_status: "pending" },
+  ];
+  const thinkRow = (n) => ({ kind: "think", tool: "", tool_kind: "", internal: false,
+    text: "考えている", detail: "", done: false, step: n, call: 0 });
+  ctx.state = { id: "s21", setting: { ide_session: "ide21" }, messages: bodyDoneMsgs };
+  ctx.sid = "s21";
+  // 途中リロード相当（ログ空）で、いきなり選択肢の行が返る
+  apiResponse = { running: true, user_time: "t21", task: "choices", items: [thinkRow(31)] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("本文は完了"));
+  assert.ok(progressBox.innerHTML.indexOf("本文は完了") < progressBox.innerHTML.indexOf("考えている"),
+    "本文は完了が『考えている』より下に来ない");
+
+  // 18c. 行が増えても「本文は完了」の位置は動かない（下端に戻ってこない）
+  apiResponse = { running: true, user_time: "t21", task: "choices",
+    items: [thinkRow(31), readItem(32)] };
+  await ctx.pollProgress();
+  apiResponse = { running: true, user_time: "t21", task: "choices",
+    items: [thinkRow(31), readItem(32), readItem(33)] };
+  await ctx.pollProgress();
+  assert.strictEqual((progressBox.innerHTML.match(/class="p-row/g) || []).length, 5,
+    "本文は完了＋考えている＋読み込み2件＋待機");
+  assert.strictEqual((progressBox.innerHTML.match(/本文は完了/g) || []).length, 1,
+    "本文は完了 は1回だけ");
+  assert.ok(progressBox.innerHTML.indexOf("本文は完了") < progressBox.innerHTML.indexOf("考えている"),
+    "本文は完了の位置は動かない");
+  assert.ok(progressBox.innerHTML.indexOf("file32.md") < progressBox.innerHTML.indexOf("file33.md"),
+    "新しい行は下");
+
+  // 18d. 選択肢づくりの担当は「選択肢を書いた／選択肢を渡した」と言い換える
+  ctx.state = { id: "s22", setting: { ide_session: "ide22" }, messages: bodyDoneMsgs };
+  ctx.sid = "s22";
+  apiResponse = { running: true, user_time: "t22", task: "choices", items: [
+    { kind: "tool", tool: "write_file", tool_kind: "write", internal: false,
+      text: "write_file", detail: "51a9031728_choices_1.json", done: true, step: 41, call: 0 },
+    { kind: "reply", tool: "", tool_kind: "", internal: false,
+      text: "返事を書いた", detail: "（待機）", done: true, step: 42, call: 0 },
+  ] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("✍️ 選択肢を書いた"), "選択肢づくりの書き込み");
+  assert.ok(progressBox.innerHTML.includes("選択肢を渡した"), "選択肢づくりの（待機）");
+  assert.ok(!progressBox.innerHTML.includes("✍️ 本文を書いた"));
+
+  // 20. エラーも同じ法則で積む（時系列・積んだ位置から動かない）
+  //     エラーが「いま出ている行」のときだけカードの高さ制限を外す
+  const errItem = (step) => ({ kind: "error", tool: "", tool_kind: "", internal: false,
+    filter_name: "400エラー：送信内容がAIに受け付けられませんでした", error_kind: "",
+    text: "エラー", detail: "送信内容が受け付けられませんでした。", done: true, step, call: 0 });
+  ctx.state = { id: "s30", setting: { ide_session: "ide30" },
+    messages: [{ role: "user", status: "pending", id: "u30" }] };
+  ctx.sid = "s30";
+  apiResponse = { running: true, user_time: "t30", items: [readItem(61), errItem(62)] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("400エラー"), "エラー行が出る");
+  assert.ok(progressBox.innerHTML.indexOf("file61.md") < progressBox.innerHTML.indexOf("400エラー"),
+    "先に出た行が上、エラーは下");
+  assert.ok(boxClasses.has("has-error"), "最新行がエラーなら高さ制限を外す（全文を読ませる）");
+
+  // 新しい行が来てエラーが上に流れたら、3行窓に戻す
+  apiResponse = { running: true, user_time: "t30", items: [readItem(61), readItem(63), readItem(64)] };
+  await ctx.pollProgress();
+  assert.ok(!boxClasses.has("has-error"), "過去になったエラーでカードを伸ばしたままにしない");
+  const errPos = progressBox.innerHTML.indexOf("400エラー");
+  const newPos = progressBox.innerHTML.indexOf("file64.md");
+  assert.ok(errPos >= 0 && errPos < newPos, "エラー行は積んだ位置に残る（下端に戻らない）");
+
+  // 20b. フィルタで止まったとき：まだ待っている間は「自動で作り直します」、
+  //      失敗で終わったら「停止しました」を最後に出す（作り直し中か終わりか分かる）
+  const filterStopItem = (step) => ({ kind: "error", tool: "", tool_kind: "", internal: false,
+    is_filter: true, filter_name: "コンテンツ安全フィルタ", text: "エラー",
+    detail: "STOP_REASON_CONTENT_SAFETY", done: true, step, call: 0 });
+  const user20 = { role: "user", status: "pending", id: "u20b" };
+  ctx.state = { id: "s21", setting: { ide_session: "ide21" }, messages: [user20] };
+  ctx.sid = "s21";
+  apiResponse = { running: false, user_time: "t21", items: [writeItem18, filterStopItem(80)] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("コンテンツ安全フィルタ"), "止まった理由が出る");
+  assert.ok(progressBox.innerHTML.includes("自動で作り直します"), "まだ待っている＝作り直し中");
+
+  // 自動の作り直しで IDE 側は新しい入力になるが、ターンが同じなら行は消さない
+  apiResponse = { running: true, user_time: "t21-retry", items: [] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("コンテンツ安全フィルタ"), "作り直しで理由の行が消えない");
+  assert.ok(progressBox.innerHTML.includes("自動で作り直します"));
+
+  // 2回止まると「2回目」
+  apiResponse = { running: false, user_time: "t21-retry", items: [filterStopItem(90)] };
+  await ctx.pollProgress();
+  assert.ok(/自動で作り直します（2回目）/.test(progressBox.innerHTML));
+
+  // それでも駄目でターンが失敗で終わったら「停止しました」
+  ctx.state.messages = [{ ...user20, status: "error", error: "応答が空でした（セーフティ制限等）。再送してください。" }];
+  apiResponse = { running: false, user_time: "t21-retry", items: [] };
+  await ctx.pollProgress();
+  assert.ok(progressBox.innerHTML.includes("停止しました"), "失敗で終わったことが分かる");
+  assert.ok(progressBox.innerHTML.includes("再送してください"));
+
+  // 成功で終わったターンは今までどおり消える（停止行を残さない）
+  ctx.state.messages = [{ ...user20, status: "answered" },
+    { role: "assistant", id: "a20b", text: "本文", choices_status: "done" }];
+  await ctx.pollProgress();
+  assert.strictEqual(progressBox.innerHTML, "", "成功後はパネルを残さない");
+
+  // 19. 容量不足以外のエラーも、返事が届いたら履歴から消す
   ctx.state = { id: "s14", setting: { ide_session: "ide14" },
     messages: [{ role: "user", status: "pending", id: "u14" }] };
   ctx.sid = "s14";
@@ -631,7 +836,7 @@ async function runPollProgressTests() {
   ] };
   await ctx.pollProgress();
   assert.ok(!progressBox.innerHTML.includes("400エラー"));
-  assert.ok(progressBox.innerHTML.includes("プロンプトを渡した"));
+  assert.ok(progressBox.innerHTML.includes("本文を渡した"));
 
   // 18. 返答も選択肢も完了したら、最後の待機行を残さない
   ctx.state = { id: "s14", setting: { ide_session: "ide14" },

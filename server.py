@@ -4167,6 +4167,16 @@ def wizard_job_running(jid):
                 and time.time() - j.get("ts_epoch", 0) < WIZARD_JOB_STALE)
 
 
+def _wiz_job_recheck(job, d, expect_rev=None):
+    """ロック内で必ず呼ぶ。古いオブジェクトを保存しないための関門。"""
+    if not d or str(d.get("last_job") or "") != str(job.get("job_id") or ""):
+        raise WizardError("古いジョブです", code="stale", status=409)
+    if job.get("cancel") or job.get("status") == "canceled":
+        raise WizardError("キャンセルしました", code="canceled")
+    if _as_int(d.get("rev"), 0) != _as_int(job.get("base_rev") if expect_rev is None else expect_rev, 0):
+        raise WizardError("下書きが更新されました", code="stale", retryable=True, status=409)
+
+
 def wizard_start_job(draft, kind, expected_rev=None):
     if kind not in ("questions", "compose"):
         raise WizardError("ジョブ種別が不正です", code="bad_request")
@@ -4213,27 +4223,37 @@ def wizard_start_job(draft, kind, expected_rev=None):
         j = wizard_jobs.get(jid)
         if not j:
             return
+        if j.get("status") == "canceled" or j.get("cancel"):
+            return
         j["status"] = "running"
         j["ts_epoch"] = time.time()
         try:
-            if j.get("cancel"):
+            if j.get("cancel") or j.get("status") == "canceled":
                 raise WizardError("キャンセルしました", code="canceled")
             if kind == "questions":
                 result = wizard_do_questions(j)
             else:
                 result = wizard_do_compose(j)
+            if j.get("cancel") or j.get("status") == "canceled":
+                raise WizardError("キャンセルしました", code="canceled")
             j["result"] = result
             j["status"] = "done"
         except WizardError as e:
-            j["status"] = "error"
-            j["error"] = str(e)
-            j["error_code"] = e.code
-            j["retryable"] = e.retryable
+            if e.code == "canceled" or j.get("status") == "canceled" or j.get("cancel"):
+                j["status"] = "canceled"
+            else:
+                j["status"] = "error"
+                j["error"] = str(e)
+                j["error_code"] = e.code
+                j["retryable"] = e.retryable
         except Exception as e:
-            j["status"] = "error"
-            j["error"] = str(e)
-            j["error_code"] = "wizard_error"
-            j["retryable"] = True
+            if j.get("status") == "canceled" or j.get("cancel"):
+                j["status"] = "canceled"
+            else:
+                j["status"] = "error"
+                j["error"] = str(e)
+                j["error_code"] = "wizard_error"
+                j["retryable"] = True
         finally:
             j["ts_epoch"] = time.time()
             if j.get("kind") == "compose" and j.get("status") == "error":
@@ -4252,31 +4272,31 @@ def wizard_start_job(draft, kind, expected_rev=None):
 def wizard_do_questions(job):
     with wizard_lock:
         d = wizard_load(job["draft_id"])
-        if not d or d.get("last_job") != job["job_id"]:
-            raise WizardError("古いジョブです", code="stale", status=409)
-        if job.get("cancel"):
-            raise WizardError("キャンセルしました", code="canceled")
-        if d.get("rev") != job.get("base_rev"):
-            raise WizardError("下書きが更新されました", code="stale", retryable=True, status=409)
+        _wiz_job_recheck(job, d)
 
     pending = [q for q in (d.get("questions") or []) if q.get("id") not in (d.get("asked_question_ids") or [])]
     if pending:
         return {"draft": wizard_public(d, True), "questions": pending, "done": False}
     if not wizard_ai_enabled(d):
         with wizard_lock:
+            d = wizard_load(job["draft_id"])
+            _wiz_job_recheck(job, d)
             d["done_questions"] = True
             d["status"] = "ready" if wizard_ready(d) else "interview"
             wizard_save(d)
         return {"draft": wizard_public(d, True), "questions": [], "done": True}
     if d.get("done_questions") or d.get("round", 0) >= WIZARD_MAX_ROUNDS or not wizard_askable_slots(d):
         with wizard_lock:
+            d = wizard_load(job["draft_id"])
+            _wiz_job_recheck(job, d)
             d["done_questions"] = True
             d["status"] = "ready" if wizard_ready(d) else "interview"
             wizard_save(d)
         return {"draft": wizard_public(d, True), "questions": [], "done": True}
 
     with wizard_lock:
-        d = wizard_load(d["id"])
+        d = wizard_load(job["draft_id"])
+        _wiz_job_recheck(job, d)
         if d.get("ai_calls", 0) >= WIZARD_AI_CALL_LIMIT:
             raise WizardError("AI呼び出しの上限に達しました", code="ai_limit", status=429)
         d["ai_calls"] = _as_int(d.get("ai_calls"), 0) + 1
@@ -4289,13 +4309,14 @@ def wizard_do_questions(job):
         raw = wizard_extract_json(text)
         qs = wizard_sanitize_questions(d, raw.get("questions") if isinstance(raw, dict) else [])
     except WizardError as e:
-        if job.get("cancel"):
+        if job.get("cancel") or job.get("status") == "canceled":
             raise WizardError("キャンセルしました", code="canceled")
         if e.code in ("stale", "canceled"):
             raise
         qs = []
         with wizard_lock:
-            d = wizard_load(d["id"])
+            d = wizard_load(job["draft_id"])
+            _wiz_job_recheck(job, d)
             d.setdefault("warnings", []).append(f"AI質問を取得できませんでした: {e}")
             d["done_questions"] = True
             d["status"] = "ready" if wizard_ready(d) else "interview"
@@ -4303,11 +4324,8 @@ def wizard_do_questions(job):
         return {"draft": wizard_public(d, True), "questions": [], "done": True}
 
     with wizard_lock:
-        d = wizard_load(d["id"])
-        if job.get("cancel"):
-            raise WizardError("キャンセルしました", code="canceled")
-        if d.get("rev") != job.get("base_rev"):
-            raise WizardError("下書きが更新されました", code="stale", retryable=True, status=409)
+        d = wizard_load(job["draft_id"])
+        _wiz_job_recheck(job, d)
         d["questions"] = qs
         d["round"] = min(_as_int(d.get("round"), 0) + 1, WIZARD_MAX_ROUNDS)
         d["done_questions"] = not qs
@@ -4322,12 +4340,7 @@ def wizard_do_questions(job):
 def wizard_do_compose(job):
     with wizard_lock:
         d = wizard_load(job["draft_id"])
-        if not d or d.get("last_job") != job["job_id"]:
-            raise WizardError("古いジョブです", code="stale", status=409)
-        if job.get("cancel"):
-            raise WizardError("キャンセルしました", code="canceled")
-        if d.get("rev") != job.get("base_rev"):
-            raise WizardError("下書きが更新されました", code="stale", retryable=True, status=409)
+        _wiz_job_recheck(job, d)
         if (d.get("compose") or {}).get("setting") and not d.get("compose_stale"):
             return {"draft": wizard_public(d, True)}
 
@@ -4344,16 +4357,14 @@ def wizard_do_compose(job):
 
     if not wizard_ai_enabled(d):
         with wizard_lock:
-            d = wizard_load(d["id"])
-            if job.get("cancel"):
-                raise WizardError("キャンセルしました", code="canceled")
-            if d.get("rev") != job.get("base_rev"):
-                raise WizardError("下書きが更新されました", code="stale", retryable=True, status=409)
+            d = wizard_load(job["draft_id"])
+            _wiz_job_recheck(job, d)
         setting, warnings = wizard_template_compose(d)
         cmeta = {"source": "template", "warnings": warnings,
                  "title_alternatives": [], "auto_slots": auto_slots, "model": copy.deepcopy(d.get("model") or {})}
         with wizard_lock:
-            d = wizard_load(d["id"])
+            d = wizard_load(job["draft_id"])
+            _wiz_job_recheck(job, d)
             d["compose"] = dict(cmeta, setting=setting)
             d["compose_stale"] = False
             d["status"] = "ready"
@@ -4369,9 +4380,8 @@ def wizard_do_compose(job):
     model = copy.deepcopy(d.get("model") or {})
     for attempt in (1, 2):
         with wizard_lock:
-            d = wizard_load(d["id"])
-            if job.get("cancel"):
-                raise WizardError("キャンセルしました", code="canceled")
+            d = wizard_load(job["draft_id"])
+            _wiz_job_recheck(job, d)
             if d.get("ai_calls", 0) >= WIZARD_AI_CALL_LIMIT:
                 raise WizardError("AI呼び出しの上限に達しました", code="ai_limit", status=429)
             d["ai_calls"] = _as_int(d.get("ai_calls"), 0) + 1
@@ -4392,12 +4402,17 @@ def wizard_do_compose(job):
             setting = candidate
             break
         except WizardError as e:
+            if job.get("cancel") or job.get("status") == "canceled":
+                raise WizardError("キャンセルしました", code="canceled")
             if e.code in ("stale", "canceled"):
                 raise
             if attempt == 2 or e.code not in ("bad_json", "bad_compose", "timeout", "ai_error", "quota", "no_key", "safety", "ai_disabled"):
                 break
             if e.code == "timeout" and model.get("thinking_level") == "high":
                 model["thinking_level"] = "medium"
+
+    if job.get("cancel") or job.get("status") == "canceled":
+        raise WizardError("キャンセルしました", code="canceled")
 
     if setting is None:
         setting, warnings = wizard_template_compose(d)
@@ -4407,11 +4422,8 @@ def wizard_do_compose(job):
     cmeta["model"] = copy.deepcopy(model)
 
     with wizard_lock:
-        d = wizard_load(d["id"])
-        if job.get("cancel"):
-            raise WizardError("キャンセルしました", code="canceled")
-        if d.get("rev") != job.get("base_rev"):
-            raise WizardError("下書きが更新されました", code="stale", retryable=True, status=409)
+        d = wizard_load(job["draft_id"])
+        _wiz_job_recheck(job, d)
         d["compose"] = dict(cmeta, setting=setting)
         d["compose_stale"] = False
         d["status"] = "ready"
@@ -4522,11 +4534,11 @@ def wizard_public(d, full=False):
 
 
 def wizard_set_base(d, base_sid, inherit):
-    """最初の「引き継ぎ元」画面の確定。base_sid は再開判定用に残す。"""
+    """最初の「ベース設定」画面の確定。base_sid は再開判定用に残す。"""
     if d.get("status") == "created":
         raise WizardError("作成済みの下書きは変更できません", code="created", status=409)
     if d.get("slots") or d.get("questions") or d.get("compose"):
-        raise WizardError("設定を入力した後は引き継ぎ元を変更できません",
+        raise WizardError("設定を入力した後はベース設定を変更できません",
                           code="base_locked", status=409)
 
     base_sid = str(base_sid or "")
@@ -4539,9 +4551,9 @@ def wizard_set_base(d, base_sid, inherit):
 
     if inherit:
         if not base_sid:
-            raise WizardError("引き継ぎ元を選んでください", code="bad_base")
+            raise WizardError("ベースにするチャンネルを選んでください", code="bad_base")
         if not src:
-            raise WizardError("引き継ぎ元のチャンネルが見つかりません", code="bad_base")
+            raise WizardError("ベースにするチャンネルが見つかりません", code="bad_base")
         d["base_setting"] = copy.deepcopy(src)
         d["inherit_base"] = True
     else:
@@ -4987,7 +4999,7 @@ def wizard_test_model(body):
         if not ok_idle:
             raise WizardError("Antigravityの会話が応答中です。少し待ってから試してください。",
                               code="antigravity_down", retryable=True, status=502)
-        return {"ok": True, "note": "Antigravityの会話を確認しました。"}
+        return {"ok": True, "note": "Antigravityとの接続を確認しました。"}
     text, meta = wizard_generate(
         {"provider": provider, "model": model, "thinking_level": "minimal"},
         'JSONで {"ok": true, "message": "接続OK"} とだけ返してください。',
@@ -5007,6 +5019,31 @@ def wizard_draft_from_request(body):
     if not d:
         raise WizardError("下書きが見つかりません", code="not_found", status=404)
     return d
+
+
+def wizard_draft_has_input(d):
+    """ユーザーが何か進めた下書きか。
+
+    何も入力していない下書きで「前回の続きから再開しますか？」を出さないための判定。
+    （保存せずに閉じただけの下書きは、次に開いたとき黙って使い回す）
+    """
+    if not d:
+        return False
+    if d.get("slots"):
+        return True
+    if d.get("questions") or d.get("asked_question_ids") or d.get("asked_slots"):
+        return True
+    if d.get("compose"):
+        return True
+    if str(d.get("partner_preset_id") or ""):
+        return True
+    if d.get("selected_tags") or d.get("custom_ng"):
+        return True
+    if str(d.get("step") or "base") != "base":
+        return True
+    if str(d.get("last_job") or "") and wizard_job_running(d.get("last_job")):
+        return True
+    return False
 
 
 def wizard_start(body):
@@ -5030,6 +5067,9 @@ def wizard_start(body):
                 d["status"] = "ready" if has else "interview"
                 d["step"] = "preview" if has else "tags"
                 wizard_save(d, bump=False)
+            if not wizard_draft_has_input(d):
+                # 入力が何もない下書きは「再開しますか？」を出さずにそのまま使い回す
+                return {"ok": True, "resumed": False, "draft": wizard_public(d, True)}
             return {"ok": True, "resumed": True, "draft": wizard_public(d, True)}
 
     d = wizard_new_draft(base, wizard_model_from_app(), bool(app_settings().get("wizard_confirm", True)))
@@ -5167,10 +5207,28 @@ def wizard_route(h, path, body, method):
                 return h.send_json({"ok": True, "job_id": job["job_id"], "draft": pub})
             if path_only == "/api/wizard/job_cancel":
                 jid = str(body.get("job_id") or "")
-                job = wizard_jobs.get(jid)
-                if job:
-                    job["cancel"] = True
-                return h.send_json({"ok": bool(job)})
+                wid = str(body.get("draft_id") or "")
+                with wizard_lock:
+                    job = wizard_jobs.get(jid)
+                    if job:
+                        job["cancel"] = True
+                        if job.get("status") in ("queued", "running"):
+                            job["status"] = "canceled"
+                    # draft_id が無い旧クライアント: 従来の応答だけ返す（rev を動かさない）
+                    if not wid:
+                        return h.send_json({"ok": bool(job)})
+                    if not WIZARD_ID_RE.match(wid):
+                        raise ValueError("bad wizard id")
+                    jd = wizard_load(wid)
+                    if jd and jd.get("last_job") == jid:
+                        jd["last_job"] = ""
+                        if jd.get("status") == "composing":
+                            has = bool((jd.get("compose") or {}).get("setting"))
+                            jd["status"] = "ready" if has else "interview"
+                            jd["step"] = "preview" if has else "tags"
+                        wizard_save(jd)            # rev を進め、走行中ジョブの書き戻しを弾く
+                    pub = wizard_public(jd, True) if jd else None
+                return h.send_json({"ok": bool(jd), "canceled": bool(job), "draft": pub})
             if path_only == "/api/wizard/create":
                 d = wizard_draft_from_request(body)
                 # rev の検証は wizard_create 内（同じロック内）で行う。
@@ -5183,6 +5241,8 @@ def wizard_route(h, path, body, method):
                     job = wizard_jobs.get(d["last_job"])
                     if job:
                         job["cancel"] = True
+                        if job.get("status") in ("queued", "running"):
+                            job["status"] = "canceled"
                 try:
                     os.remove(wizard_path(d["id"]))
                 except OSError:
@@ -8301,8 +8361,9 @@ def sync_choices_agents(s):
             f"{AGENTS_MARK} channel={s['id']}_choices -->\n"
             f"# ロールプレイチャット「{title}」（選択肢生成専用セッション）\n\n"
             "この会話は返答候補（choices・8択）を並列生成する専用担当です。\n"
-            f"合図が届いたら、合図に書かれている `python \"{script}\" --ide <この会話のID> --wait 8` をそのまま実行し、表示に従って outbox に JSON を出力してください。\n"
-            "（このフォルダは複数チャンネルで共有されるため、AGENTS.md には固定の会話IDを書きません。合図のコマンドのIDを優先してください）\n"
+            f"合図が届いたら `python \"{script}\" --ide <この会話のID> --wait 8` を実行し、表示に従って outbox に JSON を出力してください。\n"
+            "（このフォルダは複数チャンネルで共有されるため、AGENTS.md には固定の会話IDを書きません。合図にコマンドが書かれていればそのIDを、"
+            "合図が半角スペース1文字だけなら前に wait_input.py が表示した `--ide` のIDを優先してください）\n"
             f"書いたら待機せず、この会話への返事は{TURN_END_MARK}だけにしてターンを終えてください。\n"
             "outbox への書き込みは1回だけ。書けたら同じ内容を再出力しない（ファイル名を変えての作り直しも禁止）。\n\n"
             + CHOICES_AGENTS_FILTER_NOTE
@@ -9794,9 +9855,10 @@ def poke_worker():
                 task_k, m_item, ttype, item_sid = item
                 is_choices_task = task_k in choices_tasks
                 role = "choices" if is_choices_task else "main"
-                # 選択肢専用会話は「書いたら待機せずターン終了」するので、半角スペースでは動かない。
-                # 毎回コマンド全文（full=True）を送る。他の会話は wait_input.py の実行経験がなければフルコマンド。
-                full = True if is_choices_task else not ide_is_known(target_ide)
+                # コマンド全文を送るのは wait_input.py をまだ実行したことのない会話（初回・世代交代直後）だけ。
+                # 選択肢会話も、一度実行していれば AGENTS.md と前ターンの表示に `--ide` が残るので半角スペースで動く。
+                # スペースで動かなかったときは unclaimed の再送（POKE_AGAIN 秒後）がフルコマンドを1回送る。
+                full = not ide_is_known(target_ide)
                 media = paste_media([m_item]) if (rpc and ttype == "user" and m_item.get("files") and not m_item.get("pasted")) else []
                 ok, msg, retry = send_poke(target_ide, full, media)  # モデルは send_poke が ide_model_of() で解決
                 print(f"[poke] role={role} full={full} ide={target_ide[:8]} ok={ok}")
@@ -9827,8 +9889,8 @@ def poke_worker():
                             target_m["pasted"] = True  # wait_input.py の表示で「チャット欄にも貼った」と伝える
                             save(s)
                 poked[task_k] = time.time()
-                if full and not is_choices_task:
-                    # 選択肢会話は again に入れず、POKE_AGAIN 秒後の unclaimed 再送枠を残す
+                if full:
+                    # フルコマンドを送ったら unclaimed の再送はしない（再送は「スペースが効かなかった」とき用）
                     again.add(task_k)
                 quiet[target_ide] = time.time() + (1.5 if rpc else 15)
 
@@ -11997,22 +12059,45 @@ def clean_import(obj):
 
 
 # ---------------------------------------------------------------- http
+class Srv(ThreadingHTTPServer):
+    """クライアント切断（端末スリープ・画面更新・ポーリング中断など）で
+    コンソールにトレースバックを出さない"""
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *a):
         pass
 
+    def _write(self, b):
+        """クライアントが先に切った場合（端末スリープ・画面更新・ポーリング中断など）は
+        例外を投げずに接続を畳む。ブロークンパイプのトレースバックを出さない。"""
+        try:
+            self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+
     def send_json(self, obj, code=200):
         # セッション等の共有辞書を別スレッドが書き換えている最中の dumps を避ける（RLock なので再入可）
         with lock:
             b = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(b)))
-        self.end_headers()
-        self.wfile.write(b)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+            return
+        self._write(b)
 
     def send_file(self, path, ctype=None):
         if not os.path.isfile(path):
@@ -12044,7 +12129,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
-        self.wfile.write(b)
+        self._write(b)
 
     def body(self):
         try:
@@ -12066,7 +12151,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
-        self.wfile.write(b)
+        self._write(b)
 
     def blocked(self, u, post=False):
         """入れてよいリクエストでなければ、ここで断って True を返す"""
@@ -12222,7 +12307,7 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(name))
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()
-                self.wfile.write(b)
+                self._write(b)
                 return
             if p == "/api/message/state":
                 sid = q.get("sid", [""])[0]
@@ -12604,7 +12689,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send_json({"title": s.get("summary") or "", "steps": s.get("stepCount"), "turns": res})
             if p == "/api/ide/move":
                 return self.send_json(moves_info())
-            if p == "/api/ide/models":
+            if p in ("/api/ide/models", "/api/ag_quota"):
                 # 合図を送るときに選べるモデル（Antigravity の一覧と残りの利用枠）
                 if not ide_poke or not hasattr(ide_poke, "models"):
                     return self.send_json({"error": "この環境では Antigravity のモデルを読めない（Windows のみ）"}, 400)
@@ -12667,7 +12752,12 @@ class H(BaseHTTPRequestHandler):
                 # 止まっている会話の、この入力より前のターンは関係ないので出さない
                 if not res["running"] and (_epoch(res["user_time"]) or 0) < (_epoch(task_ts(m, ttype)) or 0) - 1:
                     return self.send_json({"items": [], "running": False,
+                                           "task": ttype or "user",
                                            "note": "Antigravityの処理開始待ち"})
+                # どの担当（本文 / 選択肢 / 推敲 …）の進捗かを返す。
+                # 本文が届いたターンで選択肢側の行が先に来ても、クライアントが
+                # 「本文は完了」を選択肢の行より前に置けるようにするため。
+                res["task"] = ttype or "user"
                 return self.send_json(res)
             if p == "/api/google/status":
                 key, source = google_ai.load_key()
@@ -12936,7 +13026,7 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(os.path.basename(full).split("_", 3)[-1]))
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
-            self.wfile.write(b)
+            self._write(b)
             return
         if p == "/":
             p = "/index.html"
@@ -14183,13 +14273,30 @@ class H(BaseHTTPRequestHandler):
                 idx = next((i for i, m in enumerate(s["messages"]) if m["id"] == d.get("id")), -1)
                 if idx < 0:
                     return self.send_json({"error": "no such message"}, 404)
+                # drop=true の truncate は「巻き戻し」: そのユーザー発言ごと消して、本文を入力欄に戻す。
+                # 応答待ちの発言がある間は切らない（生成中の応答が stale として残るため）
+                drop_target = None
+                if p == "/api/message/truncate" and d.get("drop"):
+                    cand = s["messages"][idx]
+                    if cand.get("role") != "user":
+                        return self.send_json({"error": "not a user message"}, 400)
+                    if cand.get("status") in ("pending", "processing") or any(
+                            m.get("role") == "user" and m.get("status") in ("pending", "processing")
+                            for m in s["messages"]):
+                        return self.send_json({"error": "応答中は巻き戻せません。停止してから操作してください。"}, 409)
+                    drop_target = cand
                 rotation_abort_if_active(s, "会話の書き換えが行われた")
                 before_turns = user_turns_of(s["messages"])  # ← 追加（書き換え前）
-                new_user, rv = None, False
+                new_user, rv, removed_ids = None, False, []
                 if p == "/api/message/truncate":
                     backup(s, "truncate")
-                    rv = idx + 1 < len(s["messages"]) and plan_revert(s, idx)
-                    s["messages"] = s["messages"][:idx + 1]
+                    if drop_target is not None:
+                        removed_ids = [m["id"] for m in s["messages"][idx:]]
+                        rv = plan_revert(s, idx - 1)
+                        s["messages"] = s["messages"][:idx]
+                    else:
+                        rv = idx + 1 < len(s["messages"]) and plan_revert(s, idx)
+                        s["messages"] = s["messages"][:idx + 1]
                 elif p == "/api/message/edit":
                     old = s["messages"][idx]
                     text = d.get("text")
@@ -14260,6 +14367,11 @@ class H(BaseHTTPRequestHandler):
                 elif p == "/api/message/edit":
                     memory_store.delete_after_turn(sid, max(0, current_total - 1))
                 else:
+                    # 巻き戻し（drop）で消した発言の記憶も落とす
+                    for mid in removed_ids:
+                        memory_store.delete_by_mid(sid, mid)
+                        for k in [k for k in list(claimed_at) if k == mid or k.startswith(mid + ":")]:
+                            claimed_at.pop(k, None)
                     # truncate: if ending on a user message, its assistant response was cut
                     if s["messages"] and s["messages"][-1].get("role") == "user":
                         memory_store.delete_after_turn(sid, max(0, current_total - 1))
@@ -14272,7 +14384,14 @@ class H(BaseHTTPRequestHandler):
                 else:
                     ide_auto_event.set()
                     poke_event.set()
-                return self.send_json({"ok": True, "id": new_user["id"] if new_user else None, "revert": rv})
+                return self.send_json({
+                    "ok": True,
+                    "id": new_user["id"] if new_user else (drop_target["id"] if drop_target else None),
+                    "text": (drop_target.get("text") or "") if drop_target else "",
+                    "files": (drop_target.get("files") or []) if drop_target else [],
+                    "drop": bool(drop_target),
+                    "revert": rv,
+                })
             if p == "/api/message/regenerate-choices":
                 target_id = d.get("id")
                 if target_id:
@@ -15066,9 +15185,9 @@ def main():
         print(f"RP Image Chat: http://{host}:{PORT}/")
     if host != "127.0.0.1" and host not in ("0.0.0.0", "::"):
         # LANモードでも PC 上の wait_input.py（127.0.0.1 宛て）が届くように、ローカルでも待ち受ける
-        local = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+        local = Srv(("127.0.0.1", PORT), H)
         threading.Thread(target=local.serve_forever, daemon=True).start()
-    ThreadingHTTPServer((host, PORT), H).serve_forever()
+    Srv((host, PORT), H).serve_forever()
 
 
 if __name__ == "__main__":

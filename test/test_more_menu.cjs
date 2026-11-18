@@ -153,8 +153,8 @@ console.log("\n[1] ⋯ メニューの中身（状態ごとの項目）");
   reset();
   const a = T.build(asst, false, mkState(msgs));
   ok(JSON.stringify(labelsOf(a)) === JSON.stringify(
-    ["🔍 拡大", "—", "📝 本文を編集", "—", "🔄 再生成", "分岐", "📋 コピー", "—", "⏪ 巻き戻し", "🗑️ 削除"]),
-    "A: 画像done+前ユーザー発言+isLast=false", labelsOf(a));
+    ["🔍 拡大", "—", "📝 本文を編集", "—", "🔄 再生成", "分岐", "📋 コピー", "—", "🗑️ 削除"]),
+    "A: 画像done+前ユーザー発言+isLast=false（AI応答に巻き戻しは出さない）", labelsOf(a));
 
   reset();
   const b = T.build(mkMsg(), true, mkState([asst], { setting: { rp_state: true } }));
@@ -167,6 +167,17 @@ console.log("\n[1] ⋯ メニューの中身（状態ごとの項目）");
   ok(JSON.stringify(labelsOf(c)) === JSON.stringify(
     ["✏️ 編集して再送", "—", "分岐", "📋 コピー", "—", "🗑️ 削除"]),
     "C: ユーザー発言（状態/再生成は出さない）", labelsOf(c));
+
+  // ユーザー発言の巻き戻しは「この発言とこれ以降を削除して入力欄に戻す」ので、
+  // 最新の発言（isLast）では出さない（■ 停止 が担当）
+  reset();
+  const c2 = T.build(user, false, mkState([user, asst]));
+  ok(JSON.stringify(labelsOf(c2)) === JSON.stringify(
+    ["✏️ 編集して再送", "—", "分岐", "📋 コピー", "—", "巻き戻し", "🗑️ 削除"]),
+    "C2: ユーザー発言 + isLast=false なら巻き戻しを出す", labelsOf(c2));
+  const rewindBtn = c2.children.find((x) => x.textContent === "巻き戻し");
+  ok(!!rewindBtn && rewindBtn.children.some((x) => x.classList.contains("more-ico")),
+    "C2: 巻き戻しの頭に SVG アイコン（.more-ico）が付く", rewindBtn && rewindBtn.children.map((x) => x.className));
 
   // 分岐は絵文字だと 🔀（シャッフル）に見えるので、線画のSVGアイコンを前に付ける
   const branchBtn = c.children.find((x) => x.textContent === "分岐");

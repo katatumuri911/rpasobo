@@ -778,7 +778,7 @@ def new_conversation(folder):
     """Antigravity にそのフォルダの新しい会話を作る（何も送らない）。(会話ID, 説明) か (None, 失敗の説明)"""
     hub = hub_server()
     if not hub:
-        return None, "Antigravity が見つからない（Antigravity を起動しておく）"
+        return None, "Antigravity が見つかりません（Antigravity の起動と、アカウントのログインを確認してください）"
     port, tok = hub
     pid = find_project(port, tok, folder) or create_project(port, tok, folder)
     body = {"source": "CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT", "trajectoryType": "CORTEX_TRAJECTORY_TYPE_CASCADE"}
@@ -1106,6 +1106,7 @@ def progress(cid, limit=10):
                 target.append(dict(_tool_line(tc), kind="tool", done=False, step=at, call=k))
             if pr.get("stopReason") == "STOP_REASON_CONTENT_FILTER":
                 target.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
+                               "is_filter": True,   # フィルタで止まった（再試行待ちか失敗かを画面で分けるため）
                                "filter_name": filter_label("STOP_REASON_CONTENT_FILTER"),
                                "text": "エラー", "detail": "STOP_REASON_CONTENT_FILTER",
                                "done": True, "step": at, "call": len(calls)})
@@ -1128,6 +1129,7 @@ def progress(cid, limit=10):
                 fcode = _http_code(msg)
                 flabel = f"{fcode}エラー：{flabel}" if fcode else flabel
             target.append({"kind": "error", "tool": "", "tool_kind": "", "internal": False,
+                           "is_filter": bool(flabel),   # ★ フィルタ由来か（それ以外のAPIエラーと区別）
                            "filter_name": flabel or label,   # ★ どのフィルタ/理由か
                            "error_kind": ekind,
                            "text": "エラー", "detail": detail, "raw_detail": msg,

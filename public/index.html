@@ -6,8 +6,8 @@
 <title>RP Image Chat {{PORT}}</title>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="apple-touch-icon" href="icon-maskable-512.png">
-<link rel="stylesheet" href="style.css?v=173">
-<link rel="stylesheet" href="wizard.css?v=1">
+<link rel="stylesheet" href="style.css?v=186">
+<link rel="stylesheet" href="wizard.css?v=7">
 </head>
 <body>
 <aside id="sidebar">
@@ -156,30 +156,12 @@
       <div style="margin: -6px 0 10px 0;"><button type="button" id="memoAsInitial" class="sub" style="font-size: 11px;">現在のmemoを初期値にも保存</button></div>
       <label class="check" title="AI が応答のたびに、場面に出ているキャラの今の状態（外見・服装・姿勢など）を箇条書きで、内心・本音を文で書く。次の入力を受け取るたびに、前の応答のときの状態を毎回読んでから書く。応答ごとに残すので、巻き戻し・作り直しをするとそのときの状態に戻る"><input type="checkbox" id="f_rp_state"> キャラの状態と内心を記録する <span class="muted">応答の「キャラの状態」ボタンで確認・編集</span></label>
       <label class="check" title="AIに応答と一緒に次の行動・指示・セリフの返答候補（8択）を生成させ、クリックで入力欄にセットできるようにする"><input type="checkbox" id="f_suggest_choices" checked> 返答候補（8択）を生成する <span class="muted">クリックで入力欄にセットできる候補を表示</span></label>
-      <label class="check" title="このチャンネルでは新規ターンから🔞の候補を作ります（通常の候補は作りません）。選択肢担当の Antigravity 会話が必要です。"><input type="checkbox" id="f_choices_erotic_auto"> 🔞の候補を最初から作る <span class="muted">通常の候補は作らない（🔞既定のシーン向け）</span></label>
+      <label class="check" title="このチャンネルは次のターンから🔞の候補だけを作ります（通常の候補は作りません）。選択肢担当の Antigravity 会話が必要です。候補ヘッダーの「🔞既定 / 💬既定」チップでも切り替えられます。"><input type="checkbox" id="f_choices_erotic_auto"> 🔞を既定にする <span class="muted">🔞の候補だけ作り、通常は作らない</span></label>
       <label class="check" title="AIがフィルタを避けて書いた婉曲語（「秘所」「後ろの穴」など）を、受信時に直接語へ自動で置換します。語彙は「アプリ全体の設定」で編集できます。"><input type="checkbox" id="f_decensor_choices"> 候補の婉曲表現を自動で戻す <span class="muted">「秘所」→「おまんこ」など（語彙はアプリ全体の設定）</span></label>
       <label class="check" title="AIが書いた本文（reply）の婉曲表現も辞書で直接語に戻します。語彙は「アプリ全体の設定」で編集できます。">
         <input type="checkbox" id="f_decensor_reply" checked> 本文の婉曲表現も自動で戻す
         <span class="muted">「秘所」→「おまんこ」など（語彙はアプリ全体の設定）</span></label>
       <label class="check" title="検索時に同じキャラ名を持つ他チャンネルの記憶も横断して参照できるようにします（読み込み専用）"><input type="checkbox" id="f_shared_memories"> キャラクター共通記憶 <span class="muted">同名キャラの他チャンネルの記憶も参照</span></label>
-      <div class="box" id="timeRelBox">
-        <div class="box-title">作中経過時間</div>
-        <div class="grid2">
-          <label>経過日数 (日目)
-            <input type="number" id="f_elapsed_day" min="1" value="1">
-          </label>
-          <label>時間帯
-            <select id="f_elapsed_period">
-              <option value="早朝">早朝 🌅</option>
-              <option value="午前">午前 ☀️</option>
-              <option value="昼">昼 🍱</option>
-              <option value="夕方">夕方 🌇</option>
-              <option value="夜">夜 🌙</option>
-              <option value="深夜">深夜 🌌</option>
-            </select>
-          </label>
-        </div>
-      </div>
       <div class="grid2">
         <label>あなたの呼び名<input id="f_user_name"></label>
         <label>キャラ名<input id="f_char_name"></label>
@@ -345,7 +327,6 @@
         </svg>
         <span id="favModelLabel" class="chip-label">お気に入り</span>
       </button>
-      <button id="agQuotaBadge" type="button" class="ag-quota hidden" title="Antigravity の今週の残り。タップで読み直す" aria-label="Antigravity の今週の残り"></button>
       <textarea id="messageInput" rows="1" placeholder="セリフや行動を入力"></textarea>
       <button id="micBtn" type="button" class="composer-circle" title="音声入力（準備中）" aria-label="音声入力（準備中）">
         <svg class="composer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -359,6 +340,7 @@
           <path d="M12 19.5V5.2M12 5.2 5.8 11.4M12 5.2l6.2 6.2"></path>
         </svg>
         <span class="send-text">送信</span>
+        <span class="send-quota-layer" aria-hidden="true"><span class="send-quota-pct"></span></span>
       </button>
     </div>
   </footer>
@@ -994,21 +976,23 @@
   <div class="wizard-backdrop"></div>
   <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizardTitle">
     <header class="wizard-head">
-      <button type="button" id="wizardBack" aria-label="戻る">‹</button>
       <div>
-        <h2 id="wizardTitle">新しいチャンネル</h2>
+        <h2 id="wizardTitle" tabindex="-1">新しいチャンネル</h2>
         <div id="wizardProgress" class="wizard-progress"></div>
       </div>
       <button type="button" id="wizardModelChip" class="wizard-model-chip">AI: 未設定</button>
       <button type="button" id="wizardClose" aria-label="閉じる">✕</button>
     </header>
     <main id="wizardBody" class="wizard-body"></main>
-    <footer id="wizardFoot" class="wizard-foot"></footer>
+    <footer class="wizard-foot">
+      <button type="button" id="wizardBack" class="wizard-btn ghost wizard-back hidden">戻る</button>
+      <div id="wizardFoot"></div>
+    </footer>
   </div>
 </div>
 <script src="prompt_toolbar.js"></script>
-<script src="progress_labels.js?v=13"></script>
-<script src="app.js?v=168"></script>
-<script src="wizard.js?v=1"></script>
+<script src="progress_labels.js?v=14"></script>
+<script src="app.js?v=191"></script>
+<script src="wizard.js?v=7"></script>
 </body>
 </html>

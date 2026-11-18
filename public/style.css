@@ -319,15 +319,15 @@ header h1#title { cursor: pointer; }
     height: 38px;
     border-radius: 50%;
     /* 見た目は「ツール」クラスタ（↓ ツール ↑）に合わせる:
-       背景 rgba(38,40,56,.62) / 枠 rgba(255,255,255,.18) / opacity .62 */
-    background: rgba(38, 40, 56, 0.62);
+       背景 rgba(38,40,56,.82) / 枠 rgba(255,255,255,.18) / opacity .90 */
+    background: rgba(38, 40, 56, 0.82);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     color: #f0f0f5;
     font-size: 17px;
     line-height: 1;
     border: 1px solid rgba(255, 255, 255, 0.18);
-    opacity: .62;
+    opacity: .90;
     box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
     z-index: 65;
     cursor: pointer;
@@ -647,7 +647,14 @@ footer { flex-shrink: 0; }
   border: 1px solid rgba(255, 255, 255, .06);
   border-radius: 10px;
   padding: 6px 8px;
+  /* カードは「3行分」の高さ。行は時系列に積み、はみ出した古い行は上で切れる
+     （＝見えているのは常に最新の3行）。件数はJSで数えない */
+  max-height: 78px;
+  overflow: hidden;
 }
+/* エラー行は折り返して縦に伸びる（最大6行）。最新行がエラーのときだけ
+   全文が読める高さまで広げる。エラーが上に流れたら3行窓に戻る */
+.progress.has-error { max-height: min(45vh, 220px); }
 .progress .p-row { display: flex; gap: 6px; align-items: baseline; min-width: 0; color: #9a9aa6; }
 .progress .p-row .p-mark { flex-shrink: 0; width: 1.2em; text-align: center; }
 .progress .p-row .p-text { flex-shrink: 0; color: #e8eaf2; font-size: 13px; font-weight: 600; line-height: 1.4; }
@@ -695,7 +702,10 @@ footer { flex-shrink: 0; }
 }
 /* 待機行（返答待ち・選択肢生成中など「いま待っているもの」）はオレンジで統一 */
 .progress .p-row.wait .p-text { color: #ffd27a; }
-/* 3件の窓を1件ずつ進める（新しい項目だけ下から出す） */
+/* 失敗で終わった行（もう作り直さない）。点滅させず、赤で固定する */
+.progress .p-row.stop { margin: 0 -7px; }
+.progress .p-row.stop .p-mark { color: #ff9999; }
+/* 新しい行だけ下から出す */
 .progress .p-row.p-enter { animation: progressRowIn .24s cubic-bezier(.16, 1, .3, 1) both; }
 @keyframes progressRowIn {
   from { opacity: 0; transform: translateY(9px); }
@@ -742,26 +752,29 @@ footer > * { pointer-events: auto; }
    入力中（.is-expanded）はテキストが上段へ広がり、ボタンが下段に回る。 */
 .foot-input {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto auto;
-  grid-template-areas: "plus text chip quota mic stop send";
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas: "plus text chip mic stop send";
   align-items: end;
   gap: 5px 6px;
   padding: 6px 12px;
   background: var(--rp-bg-input, #2b2b33);
   border: 1px solid #3e3e49;
   border-radius: 9999px;
-  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease, border-radius .18s ease;
+  /* 切替は即時（transition を入れると、角丸・背景色・影が途中の形で見えて
+     「拡大したような変なデザインが一瞬映る」ようになる） */
 }
 /* 入力中は上の段にテキスト、下の段にボタン（真ん中の空き列がボタンを右へ押す） */
 .foot-input.is-expanded {
   border-radius: 22px;
-  grid-template-columns: auto minmax(8px, 1fr) auto auto auto auto auto;
+  grid-template-columns: auto minmax(8px, 1fr) auto auto auto auto;
   grid-template-areas:
-    "text text text text text text text"
-    "plus .    chip quota mic  stop send";
+    "text text text text text text"
+    "plus .    chip mic  stop send";
 }
+/* 入力中は「縁と影」だけでフォーカスを示す。背景は `input-focus`（スライダーの設定値）を使うが、
+   tier の色は `input` と同じにしてある（微妙に違うと「拡大の途中の色」と区別がつかないため） */
 .foot-input:focus-within {
-  background: var(--rp-bg-input-focus, #30303a);
+  background: var(--rp-bg-input-focus, #2b2b33);
   border-color: #56567380;
   box-shadow: 0 6px 22px rgba(0, 0, 0, .38);
 }
@@ -800,39 +813,71 @@ footer > * { pointer-events: auto; }
 }
 .composer-chip .chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .foot-input.is-expanded .composer-chip { min-width: fit-content; max-width: 260px; }
-/* Antigravity の週の残り（入力欄の中の小さなバッジ。タップで読み直し） */
-.ag-quota {
-  grid-area: quota;
-  /* 行は align-items: end。バッジはボタンより 10px 低いので、下から 5px 上げると
-     高さの違うボタン（＋・マイク・送信）と縦の中心が揃う */
-  align-self: end;
-  margin-bottom: 5px;
-  display: inline-flex;
+/* Antigravity の週の残りを送信ボタン（#sendBtn）に重ねる円形ゲージオーバーレイ。
+   常時は出さず、入力欄フォーカス時にフェードインし、放置で 3.5 秒、入力で 1.0 秒後にフェードアウトする。 */
+.send-quota-layer, .ag-quota {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #2b2b33;
+  color: #e2e8f0;
+  display: none;
   align-items: center;
   justify-content: center;
-  height: calc(var(--composer-h) - 10px);
-  padding: 0 8px;
-  border: 1px solid rgba(52, 211, 153, .28);
-  border-radius: 999px;
-  background: rgba(52, 211, 153, .12);
-  color: #34d399;
   font: inherit;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
+  pointer-events: none;
+  z-index: 2;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
 }
-.ag-quota:hover { background: rgba(52, 211, 153, .2); border-color: rgba(52, 211, 153, .45); }
-.ag-quota:active { transform: scale(.96); }
-.ag-quota:focus-visible { outline: 2px solid #8ea2ff; outline-offset: 2px; }
-.ag-quota.is-low {
-  background: rgba(248, 113, 113, .12);
-  border-color: rgba(248, 113, 113, .28);
-  color: #f87171;
+.send-quota-layer.hidden, .ag-quota.hidden {
+  display: none !important;
 }
-.ag-quota.is-loading { opacity: .55; }
+/* 円形プログレスリング（外枠ゲージ）: --quota-pct に応じて時計回りに塗る（通常は cyan #38bdf8、15%以下で赤 #f87171） */
+.send-quota-layer::before, .ag-quota::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--quota-color, #38bdf8) calc(var(--quota-pct, 100) * 1%),
+    rgba(255, 255, 255, 0.14) 0
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #fff calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #fff calc(100% - 2.5px));
+  pointer-events: none;
+}
+.send-quota-layer.is-peek, .ag-quota.is-peek {
+  display: inline-flex;
+  opacity: 1;
+  animation: sendQuotaIn .24s cubic-bezier(.16, 1, .3, 1);
+}
+@keyframes sendQuotaIn {
+  from { opacity: 0; transform: scale(.92); }
+  to   { opacity: 1; transform: scale(1); }
+}
+/* タイマー経過でフェードアウトする。blur 時は hideAgQuota が .is-peek ごと外すので即座に非表示 */
+.send-quota-layer.is-fading, .ag-quota.is-fading {
+  opacity: 0;
+  transition: opacity .32s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .send-quota-layer.is-peek, .ag-quota.is-peek { animation: none; }
+  .send-quota-layer.is-fading, .ag-quota.is-fading { transition: none; }
+}
+.send-quota-layer.is-low, .ag-quota.is-low {
+  --quota-color: #f87171;
+  color: #fca5a5;
+}
+.send-quota-pct {
+  user-select: none;
+  -webkit-user-select: none;
+}
 /* マイク（音声入力はこれから。今は押すと準備中と出すだけ） */
 #micBtn {
   grid-area: mic;
@@ -1030,7 +1075,7 @@ footer textarea:focus { outline: none; }
   }
   .foot-input.is-expanded {
     border-radius: 20px;
-    grid-template-columns: auto minmax(4px, 1fr) auto auto auto auto auto;
+    grid-template-columns: auto minmax(4px, 1fr) auto auto auto auto;
   }
   #attachBtn {
     min-width: var(--composer-h);
@@ -1051,9 +1096,6 @@ footer textarea:focus { outline: none; }
     flex-shrink: 0;
   }
   .foot-input.is-expanded #messageInput { min-height: 58px; }
-  /* スマホで入力中はお気に入りチップが出るので、残量は畳む（横に詰め込みすぎない）。
-     入力前はチップが隠れているので、その場所に残量だけを出す。 */
-  .foot-input.is-expanded .ag-quota { display: none; }
   /* 下フリック送信のヒント。小さい矢印をバッジにして見えるように */
   .attach-flick-hint {
     display: flex;
@@ -2814,6 +2856,10 @@ button.rag-entry-pin.is-pinned {
 .elapsed-time-dropdown.hidden { display: none; }
 .elapsed-time-item { padding: 8px 12px; font-size: 12px; color: #ddd; background: none; border: none; text-align: left; cursor: pointer; display: flex; align-items: center; justify-content: space-between; width: 100%; box-sizing: border-box; }
 .elapsed-time-item:hover { background: #33333f; color: #fff; }
+/* type=number のスピナーは領域を確保して文字が左にずれるので消す（1〜3桁でも中央に揃える） */
+.elapsed-stepper input::-webkit-outer-spin-button,
+.elapsed-stepper input::-webkit-inner-spin-button { -webkit-appearance: none; appearance: none; margin: 0; }
+.elapsed-stepper input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 @media (max-width: 768px) {
   .modal {
@@ -3172,8 +3218,6 @@ button.rag-entry-pin.is-pinned {
   box-sizing: border-box;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  -webkit-backdrop-filter: blur(8px) saturate(130%);
-  backdrop-filter: blur(8px) saturate(130%);
   transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
 }
 /* ホバーと「開いている」は同じ青（他のツールバーボタンのホバー色に合わせる） */
@@ -3253,15 +3297,61 @@ button.rag-entry-pin.is-pinned {
   gap: 10px;
 }
 .choices-head-sp { flex: 1; }
-.choices-auto-badge {
-  font-size: 10px;
-  line-height: 1;
-  padding: 3px 6px;
+
+/* チャンネルの既定（💬既定 / 🔞既定）。オフのときも出す。
+   スイッチ（＝この返答の表示）とは役割が違うので、ノブの無い平たいピルにして形で区別する。
+   オンのときも光り方は控えめにして、発光はスイッチに譲る（ピンク２個を避ける）。 */
+.choices-auto-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border: none;
   border-radius: 999px;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #c9cedb;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+.choices-auto-chip .choices-auto-ic {
+  font-size: 12px;
+  line-height: 1;
+}
+.choices-auto-chip .choices-auto-lb {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+}
+.choices-auto-chip:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.09);
+}
+/* オン（🔞既定）: 枠と薄い地色だけピンク */
+.choices-auto-chip.is-erotic {
   color: #ffc0e0;
   background: rgba(255, 121, 198, 0.14);
-  border: 1px solid rgba(255, 121, 198, 0.35);
-  white-space: nowrap;
+  box-shadow: inset 0 0 0 1px rgba(255, 121, 198, 0.42);
+}
+.choices-auto-chip.is-erotic:hover:not(:disabled) {
+  background: rgba(255, 121, 198, 0.20);
+}
+.choices-auto-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+/* 狭い画面では「既定」の文字を落として絵文字だけに縮退（ヘッダー行の折り返しを避ける） */
+@media (max-width: 430px) {
+  .choices-auto-chip { padding: 0 7px; }
+  .choices-auto-chip .choices-auto-lb { display: none; }
 }
 
 /* 💬 ⇄ 🔞 スイッチ。ノブ（白い円）が今のモードのアイコンになる */
@@ -3506,6 +3596,24 @@ button.rag-entry-pin.is-pinned {
   background: rgba(30, 30, 38, 0.90);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
+/* 既定チップも RP の暗い地に合わせる（オンの色は通常テーマと同じ） */
+#chatLog.rp .choices-auto-chip {
+  color: #d3d7e2;
+  background: rgba(30, 30, 38, 0.90);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.20);
+}
+#chatLog.rp .choices-auto-chip:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(44, 44, 54, 0.95);
+}
+#chatLog.rp .choices-auto-chip.is-erotic {
+  color: #ffc0e0;
+  background: rgba(255, 121, 198, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(255, 121, 198, 0.42);
+}
+#chatLog.rp .choices-auto-chip.is-erotic:hover:not(:disabled) {
+  background: rgba(255, 121, 198, 0.22);
+}
 #chatLog.rp .choices-switch.is-erotic {
   background: var(--choices-erotic-bg);
   box-shadow:
@@ -3515,10 +3623,11 @@ button.rag-entry-pin.is-pinned {
     0 0 10px rgba(255, 48, 122, 0.55),
     0 0 20px rgba(255, 40, 118, 0.30);
 }
-/* 他のツールバーボタン（🔁 / 🎨 / ⋯）と同じ青ホバーに揃える */
+/* 他のツールバーボタン（🔁 / 🎨 / ⋯）と同じ青ホバーに揃える。
+   地色も他のボタンと同じ --rp-bg-tool（0.85）に揃える（以前は .70 で 15pt 薄かった） */
 #chatLog.rp .choices-toggle-btn {
-  background: var(--rp-bg-tool-alt, rgba(30, 30, 38, 0.70));
-  border-color: rgba(255, 255, 255, 0.18);
+  background: var(--rp-bg-tool, rgba(30, 30, 38, 0.85));
+  border-color: rgba(255, 255, 255, 0.20);
 }
 #chatLog.rp .choices-toggle-btn:hover,
 #chatLog.rp .choices-toggle-btn.is-open {
@@ -3531,13 +3640,13 @@ button.rag-entry-pin.is-pinned {
 }
 #chatLog.rp .choices-toggle-btn.is-erotic {
   color: #ffc0e0;
-  background: rgba(30, 30, 38, 0.70);
+  background: rgba(30, 30, 38, 0.85);
   border-color: rgba(255, 121, 198, 0.32);
   box-shadow: none;
   text-shadow: none;
 }
 #chatLog.rp .choices-toggle-btn.is-erotic:hover {
-  background: rgba(30, 30, 38, 0.88);
+  background: rgba(30, 30, 38, 0.95);
   border-color: rgba(255, 121, 198, 0.55);
   color: #ffd0e8;
 }
@@ -3700,7 +3809,7 @@ button.rag-entry-pin.is-pinned {
   color: #fff;
 }
 
-/* --- ユーザー発言カードのホバー操作（編集 / コピー / ⋯） --- */
+/* --- ユーザー発言カードのホバー操作（巻き戻し / コピー / ⋯） --- */
 .msg-hover-actions {
   display: flex;
   align-items: center;
@@ -4154,11 +4263,11 @@ button.rag-entry-pin.is-pinned {
     height: 30px;
     border: 1px solid rgba(255, 255, 255, .18);
     border-radius: 12px;
-    background: rgba(38, 40, 56, .62);
+    background: rgba(38, 40, 56, .82);
     color: #e6e6e6;
     box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    opacity: .72;
+    opacity: .90;
     font-size: 10.5px;
     line-height: 1;
     white-space: nowrap;
@@ -4214,8 +4323,8 @@ button.rag-entry-pin.is-pinned {
     height: 32px;
     padding: 0 6px;
     border-radius: 999px;
-    background: rgba(38, 40, 56, .78);
-    opacity: .82;
+    background: rgba(38, 40, 56, .86);
+    opacity: .92;
     font-size: 10.5px;
     z-index: 64;
   }
@@ -4234,7 +4343,7 @@ button.rag-entry-pin.is-pinned {
     padding: 0;
     border: 1px solid rgba(255, 255, 255, .18);
     border-radius: 50%;
-    background: rgba(38, 40, 56, .78);
+    background: rgba(38, 40, 56, .86);
     color: #e6e6e6;
     box-shadow: 0 3px 12px rgba(0, 0, 0, .4);
     backdrop-filter: blur(8px);
@@ -4270,16 +4379,16 @@ button.rag-entry-pin.is-pinned {
     stroke-linecap: round;
     stroke-linejoin: round;
   }
-  #mobileScrollLatest.is-visible { opacity: .82; pointer-events: auto; }
+  #mobileScrollLatest.is-visible { opacity: .92; pointer-events: auto; }
   #mobileScrollLatest:active { transform: translateX(-50%) scale(.94); opacity: 1; }
   /* タッチ端末では :hover がタップ後に残り、青いままになる。
      モバイルではホバー色を付けず、:active の押下感だけ残す。 */
   #mobileTurnCluster button:hover,
   #mobileActionToggle:hover {
-    background: rgba(38, 40, 56, .78);
+    background: rgba(38, 40, 56, .9);
     border-color: rgba(255, 255, 255, .18);
     color: #e6e6e6;
-    opacity: .82;
+    opacity: .96;
   }
   /* 押している間だけ青くする。丸ボタンの border-radius で円形に塗られる */
   #mobileTurnCluster .mobile-turn-btn:active,
@@ -4298,6 +4407,7 @@ button.rag-entry-pin.is-pinned {
   #mobileActionToggle.tap-flash,
   .choices-toggle-btn.tap-flash,
   .choices-switch.tap-flash,
+  .choices-auto-chip.tap-flash,
   .choice-item-btn.tap-flash,
   .btn-img-refine.tap-flash,
   .btn-prompt.tap-flash,
@@ -4416,7 +4526,7 @@ button.rag-entry-pin.is-pinned {
   #modelSheet .modal-content.compact { height: auto; max-height: 76dvh; }
 
   .elapsed-stepper { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 10px 0 14px; }
-  .elapsed-stepper input { width: 4.6em; text-align: center; background: #1a1a1e; color: #e6e6e6; border: 1px solid #44444c; border-radius: 6px; padding: 8px; font: inherit; font-size: 16px; }
+  .elapsed-stepper input { width: 4.6em; text-align: center; background: #1a1a1e; color: #e6e6e6; border: 1px solid #44444c; border-radius: 6px; padding: 8px; font: inherit; font-size: 16px; font-variant-numeric: tabular-nums; }
   .elapsed-stepper button { width: 40px; height: 40px; padding: 0; font-size: 18px; border-radius: 50%; }
   .elapsed-day-unit { font-size: 13px; color: #bbb; }
   .elapsed-period-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -4452,7 +4562,7 @@ button.rag-entry-pin.is-pinned {
     color: #ccc;
   }
   #chatLog.rp .choices-toggle-btn:hover:not(.is-open):not(.is-erotic) {
-    background: var(--rp-bg-tool-alt, rgba(30, 30, 38, 0.70));
+    background: var(--rp-bg-tool, rgba(30, 30, 38, 0.85));
     border-color: rgba(255, 255, 255, 0.2);
     color: #ccc;
   }

@@ -304,12 +304,12 @@ class TestRpCardStrength(unittest.TestCase):
         self._run_node_script(js)
 
     def test_t9_input_focus_set_at_50_percent(self):
-        """T9: 50% で --rp-bg-input-focus が設定される（①の回帰）"""
+        """T9: 50% で --rp-bg-input-focus が設定される（①の回帰）。色は input と同じ（フォーカスで色を変えない）"""
         js = """
         window.__rpCard.applyRpCardStrength(50);
         const style = document.body.style;
         const focusVal = style.getPropertyValue("--rp-bg-input-focus");
-        if (!focusVal || !focusVal.includes("48, 48, 58")) {
+        if (!focusVal || !focusVal.includes("43, 43, 51")) {
             throw new Error(`--rp-bg-input-focus invalid or missing: ${focusVal}`);
         }
         if (style.getPropertyValue("--rp-bg-inputFocus")) {
@@ -581,13 +581,19 @@ class TestRpCardStrength(unittest.TestCase):
             self.assertNotIn("--rp-bg-", f, ".mobile-fab contains --rp-bg-")
 
     def test_p3_touch_hover_reset_uses_rp_bg_tool(self):
-        """P3: CSS: タッチ用ホバー復帰が --rp-bg-tool / --rp-bg-tool-alt を使っている（⑤）"""
+        """P3: CSS: タッチ用ホバー復帰が --rp-bg-tool を使っている（⑤）
+
+        `.choices-toggle-btn` は以前 `tool-alt`（0.70）という別段だったが、
+        隣の 🔁/🎨/⋯ と濃さが違って見えるため `tool`（0.85）に統合した。
+        """
         blocks = re.findall(r"@media\s*\(\s*hover:\s*none\s*\)[^{]*\{([\s\S]*?)(?:@media|\Z)", self.style_css)
         target = [b for b in blocks if "choice-item-btn" in b]
         self.assertTrue(len(target) > 0, "選択肢・ツールのタッチ端末用 @media ブロックが見つかりません")
         block = target[0]
         self.assertIn("var(--rp-bg-tool,", block)
-        self.assertIn("var(--rp-bg-tool-alt,", block)
+        self.assertIn("#chatLog.rp .choices-toggle-btn:hover", block)
+        self.assertNotIn("--rp-bg-tool-alt", self.style_css, "別基調の段は廃止したので残さない")
+        self.assertNotIn("tool-alt", self.app_js, "RP_TIERS からも廃止済みであること")
 
     def test_p4_html_side_opacity_row_outside_bottom_section(self):
         """P4: HTML: #sideOpacityRow が #sideBottomSection の外にある"""
@@ -622,9 +628,12 @@ class TestRpCardStrength(unittest.TestCase):
         self.assertIn("#sidebar > :not(#sideOpacityRow)", content)
 
     def test_p7_cache_busting_versions_updated(self):
-        """P7: HTML: ?v= が更新されている"""
-        self.assertIn('href="style.css?v=161"', self.index_html)
-        self.assertIn('src="app.js?v=137"', self.index_html)
+        """P7: HTML: CSS/JS に ?v=<整数> のキャッシュバスターが付いている
+        数を固定すると正当な更新のたびに落ちる（＝テストが「前回の作業メモ」になる）ので、形だけを見る"""
+        for asset in ("style.css", "app.js"):
+            m = re.search(r'(?:href|src)="%s\?v=(\d+)"' % re.escape(asset), self.index_html)
+            self.assertIsNotNone(
+                m, f"{asset} に ?v=<整数> が付いていない（更新してもブラウザが古いファイルを使い続ける）")
 
 
 if __name__ == "__main__":
