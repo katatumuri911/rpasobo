@@ -218,7 +218,6 @@ DEFAULT_APP = {
     "wizard_provider": "google",
     "wizard_model": "",
     "wizard_thinking_level": "high",
-    "wizard_confirm": True,
     "wizard_builder_ide": "",
 }
 FOLDER_EXT = (".md", ".txt")
@@ -607,6 +606,33 @@ RESET_STORY = {
     "chars": [],
     "rag_collections": [],  # ✅ Q1 確定：ストーリー固有RAGは引き継がない
 }
+
+
+def new_channel_setting(base):
+    """新規チャンネル用の初期化設定を作る。
+    環境・画像設定・プロジェクト・ユーザー名・本文AI設定などは引き継ぎ、
+    ストーリー・キャラ・進行状態・作業フォルダ・IDE会話は初期化する。
+    """
+    if not isinstance(base, dict):
+        return None
+    base = copy.deepcopy(base)
+    for k in (
+        "elapsed_time", "initial_elapsed_time", "rotation_notice",
+        "last_memo_mid", "memo_manual_edit_mid", "memo_manual_edit_ts", "memo_ts",
+        "memo_bytes", "memo_over_target", "memo_over_budget",
+        "rotation", "rotation_skip_until", "rotation_reserve",
+    ):
+        base.pop(k, None)
+    for k in DEPRECATED_SETTING_KEYS:
+        base.pop(k, None)
+    if isinstance(base.get("image"), dict):
+        for k in DEPRECATED_IMAGE_KEYS:
+            base["image"].pop(k, None)
+    base.update(copy.deepcopy(RESET_PROGRESS))
+    base.update(copy.deepcopy(RESET_STORY))
+    base.update(NO_IDE)
+    base.update(NO_FOLDER)
+    return base
 
 
 def now():
@@ -4435,7 +4461,7 @@ def wizard_do_compose(job):
     return {"draft": pub}
 
 
-def wizard_new_draft(base, model, confirm):
+def wizard_new_draft(base, model):
     t = now()
     return {
         "schema_version": 1,
@@ -4467,7 +4493,6 @@ def wizard_new_draft(base, model, confirm):
         "created_sid": "",
         "warnings": [],
         "ai_calls": 0,
-        "confirm": bool(confirm),
     }
 
 
@@ -4494,12 +4519,13 @@ def wizard_public(d, full=False):
         "done_questions": bool(d.get("done_questions")),
         "ready": not missing,
         "missing": missing,
-        "confirm": bool(d.get("confirm", True)),
         "last_job": d.get("last_job", ""),
         "created_sid": d.get("created_sid", ""),
+        "created_title": d.get("created_title", ""),
         "warnings": list(d.get("warnings") or []),
         "compose_stale": bool(d.get("compose_stale", True)),
         "title_hint": ((d.get("compose") or {}).get("setting") or {}).get("title")
+                      or d.get("created_title")
                       or str(wslot_value(d, "work") or "")[:24]
                       or str(wslot_value(d, "rough_idea") or "")[:24]
                       or "新しいチャンネル",
@@ -4870,6 +4896,99 @@ def _wizard_create_locked(d, overrides, use_template=False):
             "opening_image": bool(opening_mid), "opening_image_mid": opening_mid}
 
 
+def _wizard_manual_created_result(d):
+    """手動作成済み下書きの冪等応答。作成済みでなければ None。"""
+    sid = d.get("created_sid")
+    if not sid:
+        return None
+    try:
+        if not os.path.exists(spath(sid)):
+            return None
+        s0 = load(sid, readonly=True)
+        title = d.get("created_title") or (s0.get("setting") or {}).get("title", "")
+        return {
+            "ok": True,
+            "sid": sid,
+            "title": title,
+            "draft": wizard_public(d, True),
+            "created": True,
+            "warnings": [],
+        }
+    except Exception:
+        return None
+
+
+def wizard_manual_create(d, body):
+    """手動でチャンネルを作成する（AI生成を行わない）。"""
+    with wizard_create_lock:
+        fresh = wizard_load(d.get("id")) or d
+        done = _wizard_manual_created_result(fresh)
+        if done:
+            return done
+
+        if fresh.get("created_sid") or fresh.get("created_title"):
+            with wizard_lock:
+                fresh = wizard_load(fresh["id"]) or fresh
+                fresh["created_sid"] = ""
+                fresh.pop("created_title", None)
+                if fresh.get("status") == "created":
+                    fresh["status"] = "interview"
+                wizard_save(fresh, bump=False)
+
+        if _as_int(fresh.get("rev"), 0) != _as_int(body.get("rev"), -1):
+            e = WizardError("下書きが更新されました", code="rev", status=409)
+            e.draft = wizard_public(fresh, True)
+            raise e
+
+        if wizard_job_running(fresh.get("last_job")):
+            raise WizardError("生成中です。完了してから操作してください", code="wizard_busy", status=409)
+
+        title = wizard_plain_text(body.get("title"), 40)
+        if not title:
+            raise WizardError("チャンネル名を入力してください", code="bad_title", status=400)
+
+        inherit = bool(fresh.get("inherit_base"))
+        base_st = fresh.get("base_setting")
+        warnings = []
+        if inherit:
+            if isinstance(base_st, dict) and base_st:
+                setting = new_channel_setting(base_st)
+            else:
+                setting = None
+                warnings.append("引き継ぎ元の設定が見つかりませんでした。初期設定で作成しました。")
+        else:
+            setting = None
+
+        if setting is None:
+            setting = {"title": title}
+        else:
+            setting["title"] = title
+
+        s = create_session(setting)
+        sid = s.get("id")
+        if not sid:
+            raise WizardError("チャンネル作成に失敗しました", code="create_failed", status=500)
+
+        with wizard_lock:
+            fresh = wizard_load(fresh["id"]) or fresh
+            fresh["status"] = "created"
+            fresh["created_sid"] = sid
+            fresh["created_title"] = title
+            fresh["step"] = "preview"
+            fresh["updated"] = now()
+            fresh["warnings"] = list(warnings)
+            wizard_save(fresh)
+            pub = wizard_public(fresh, True)
+
+        return {
+            "ok": True,
+            "sid": sid,
+            "title": title,
+            "draft": pub,
+            "warnings": warnings,
+        }
+
+
 def wizard_model_tier(label):
     base = re.sub(r"\s*[\(（].*?[\)）]\s*$", "", str(label or "")).lower()
     for k in ("flash", "mini", "haiku", "lite", "fast", "nano"):
@@ -5072,7 +5191,7 @@ def wizard_start(body):
                 return {"ok": True, "resumed": False, "draft": wizard_public(d, True)}
             return {"ok": True, "resumed": True, "draft": wizard_public(d, True)}
 
-    d = wizard_new_draft(base, wizard_model_from_app(), bool(app_settings().get("wizard_confirm", True)))
+    d = wizard_new_draft(base, wizard_model_from_app())
     d["base_sid"] = base_sid
     d["base_title"] = str((base or {}).get("title") or "")
     d["inherit_base"] = bool(base)
@@ -5107,7 +5226,6 @@ def wizard_route(h, path, body, method):
                 return h.send_json({
                     "ok": True,
                     "enabled": bool(app.get("wizard_enabled", True)),
-                    "confirm": bool(app.get("wizard_confirm", True)),
                     "configured": bool(str(app.get("wizard_model") or "").strip()) or str(app.get("wizard_provider") or "") == "antigravity",
                     "current": wizard_model_from_app(),
                     "max_questions": WIZARD_MAX_QUESTIONS,
@@ -5178,8 +5296,6 @@ def wizard_route(h, path, body, method):
                         "thinking_level": str(body.get("thinking_level") or "").strip().lower(),
                         "ai_enabled": bool(body.get("ai_enabled", provider != "none")),
                     }
-                    if "confirm" in body:
-                        d["confirm"] = bool(body.get("confirm"))
                     d["compose_stale"] = True
                     # 選択したモデルの configured 表示を次の一覧取得で更新する
                     wizard_model_cache.clear()
@@ -5189,9 +5305,7 @@ def wizard_route(h, path, body, method):
                     step = str(body.get("step") or "").strip()
                     if step in ("base", "idea", "partner", "tags", "questions", "preview", "creating"):
                         d["step"] = step
-                    if "confirm" in body:
-                        d["confirm"] = bool(body.get("confirm"))
-                    # step / confirm はUI状態。ジョブ実行中の画面遷移でも 409 wizard_busy にせず、rev も上げない。
+                    # step はUI状態。ジョブ実行中の画面遷移でも 409 wizard_busy にせず、rev も上げない。
                 return h.send_json({"ok": True, "draft": wizard_public(d, True)})
             if path_only == "/api/wizard/preview":
                 with wizard_write(body) as d:
@@ -5235,6 +5349,9 @@ def wizard_route(h, path, body, method):
                 # 作成済みなら rev が古くても同じ sid を返し、二重作成しない。
                 return h.send_json(wizard_create(d, body.get("overrides") or {},
                                                  bool(body.get("use_template"))))
+            if path_only == "/api/wizard/manual":
+                d = wizard_draft_from_request(body)
+                return h.send_json(wizard_manual_create(d, body))
             if path_only == "/api/wizard/delete":
                 d = wizard_draft_from_request(body)
                 if d.get("last_job"):
@@ -13507,7 +13624,6 @@ class H(BaseHTTPRequestHandler):
                     elif isinstance(d.get(k), list) and isinstance(DEFAULT_APP[k], list):
                         cur[k] = list(dict.fromkeys(x.strip() for x in str_list(d[k])))
                 cur["wizard_enabled"] = bool(cur.get("wizard_enabled", True))
-                cur["wizard_confirm"] = bool(cur.get("wizard_confirm", True))
                 cur["wizard_model"] = str(cur.get("wizard_model") or "").strip()
                 if cur.get("wizard_provider") not in ("google", "vertex", "antigravity"):
                     cur["wizard_provider"] = "google"
@@ -13840,28 +13956,7 @@ class H(BaseHTTPRequestHandler):
                 save_rag(col)
                 return self.send_json({"ok": True})
             if p == "/api/session/new":
-                base = d.get("setting")
-                if isinstance(base, dict):
-                    # 新規チャンネル：環境・画像設定のみ引き継ぎ、ストーリー・キャラ・進行状態は初期化
-                    base = copy.deepcopy(base)
-                    for k in (
-                        "elapsed_time", "initial_elapsed_time", "rotation_notice",
-                        "last_memo_mid", "memo_manual_edit_mid", "memo_manual_edit_ts", "memo_ts",
-                        "memo_bytes", "memo_over_target", "memo_over_budget",
-                        "rotation", "rotation_skip_until", "rotation_reserve",
-                    ):
-                        base.pop(k, None)
-                    for k in DEPRECATED_SETTING_KEYS:
-                        base.pop(k, None)
-                    if isinstance(base.get("image"), dict):
-                        for k in DEPRECATED_IMAGE_KEYS:
-                            base["image"].pop(k, None)
-                    base.update(copy.deepcopy(RESET_PROGRESS))
-                    base.update(copy.deepcopy(RESET_STORY))
-                    base.update(NO_IDE)
-                    base.update(NO_FOLDER)
-                else:
-                    base = None
+                base = new_channel_setting(d.get("setting"))
                 if d.get("copy_from"):
                     try:
                         src_st = copy.deepcopy(load(d["copy_from"])["setting"])

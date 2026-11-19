@@ -13,7 +13,8 @@
   let draft = null;
   let jobId = "";
   let jobKind = "";
-  let autoCreateOnce = false;  // 「おまかせで開始」の1回だけ自動作成（下書きの confirm は変えない）
+  let ideaMode = "";          // "consult" | "auto" | ""
+  let lastManualTitle = "";   // 手動作成ダイアログの失敗時プリフィル用
   let jobTimer = null;
   let busy = false;
   let screen = "idea";
@@ -150,6 +151,7 @@
         bEl.setAttribute("aria-disabled", enabled ? "false" : "true");
       }
     }
+    syncFootBar();
     const mc = (draft && draft.model && draft.model.model) ? draft.model : ((wmeta && wmeta.current) || {});
     const chip = $("#wizardModelChip");
     if (chip) {
@@ -196,11 +198,23 @@
     return `<button type="button" class="wizard-chip ${on ? "on" : ""}" ${attrs}>${E(text)}</button>`;
   }
 
+  function syncFootBar() {
+    const f = foot();
+    if (!f) return;
+    const bar = f.parentElement;                  // footer.wizard-foot
+    if (!bar || !bar.classList) return;
+    const back = $("#wizardBack");
+    const backHidden = !back || back.classList.contains("hidden");
+    const empty = !f.children || f.children.length === 0;
+    bar.classList.toggle("hidden", empty && backHidden);
+  }
+
   function setBody(html) { const b = body(); if (b) b.innerHTML = html; }
   function setFoot(html) {
     const f = foot();
     if (f) f.innerHTML = html || "";
     updateFootDisabled();
+    syncFootBar();
   }
 
   function val(id) {
@@ -376,7 +390,7 @@
   async function open(baseSid) {
     if (busy) return;
     clearDialog();
-    autoCreateOnce = false;
+    ideaMode = "";
     jobId = "";
     jobKind = "";
     pendingTags = null;
@@ -494,6 +508,133 @@
     });
   }
 
+  function askText(opts) {
+    const o = opts || {};
+    return new Promise((resolve) => {
+      const r = root();
+      const host = (r && !r.classList.contains("hidden")) ? r : (typeof document !== "undefined" ? document.body : null);
+      if (!host) { resolve(null); return; }
+      if (typeof document.createElement !== "function" || typeof host.appendChild !== "function") {
+        resolve(null);
+        return;
+      }
+      const isOnBody = (host === document.body);
+      const wrap = document.createElement("div");
+      wrap.id = "wizAskText";
+      wrap.className = "wizard-confirm" + (isOnBody ? " on-body" : "");
+      const initialVal = o.value != null ? String(o.value) : "";
+      const maxLen = typeof o.maxlength === "number" ? o.maxlength : 40;
+      const okLabel = o.okLabel || "作成";
+      const cancelLabel = o.cancelLabel || "キャンセル";
+
+      wrap.innerHTML = `
+        <div class="wizard-confirm-backdrop"></div>
+        <div class="wizard-confirm-box" role="dialog" aria-modal="true" aria-labelledby="wizAskTextTitle" tabindex="-1">
+          <h3 id="wizAskTextTitle">${E(o.title || "チャンネル名")}</h3>
+          ${o.message ? `<p class="wizard-confirm-msg">${E(o.message)}</p>` : ""}
+          <div class="wizard-confirm-input-wrap">
+            <input type="text" id="wizAskTextInput" class="wizard-input" value="${E(initialVal)}" maxlength="${maxLen}">
+            <div class="wizard-confirm-error hidden" id="wizAskTextError"></div>
+          </div>
+          <div class="wizard-confirm-btns">
+            <button type="button" class="wizard-btn primary" data-choice="ok">${E(okLabel)}</button>
+            <button type="button" class="wizard-btn ghost" data-choice="cancel">${E(cancelLabel)}</button>
+          </div>
+        </div>`;
+
+      const box = $(".wizard-confirm-box", wrap);
+      const input = $("#wizAskTextInput", wrap);
+      const errEl = $("#wizAskTextError", wrap);
+      const prevFocus = document.activeElement;
+      const modalEl = (!isOnBody && r) ? $(".wizard-modal", r) : null;
+      let settled = false;
+      let isComposing = false;
+      dialogOpen = true;
+      if (modalEl) modalEl.inert = true;
+
+      const done = (val) => {
+        if (settled) return;
+        settled = true;
+        dialogOpen = false;
+        dialogDone = null;
+        wrap.removeEventListener("keydown", onKey, true);
+        if (wrap.isConnected && typeof wrap.remove === "function") wrap.remove();
+        else if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+        if (modalEl) modalEl.inert = false;
+        try { prevFocus && prevFocus.focus && prevFocus.focus({ preventScroll: true }); } catch (_) {}
+        resolve(val);
+      };
+      dialogDone = (val) => done(val === "cancel" ? null : val);
+
+      const submit = () => {
+        const v = (input ? input.value : "").trim();
+        if (!v) {
+          if (errEl) {
+            errEl.textContent = "チャンネル名を入力してください";
+            errEl.classList.remove("hidden");
+          }
+          if (input) input.focus();
+          return;
+        }
+        done(v);
+      };
+
+      const onKey = (e) => {
+        if (e.isComposing || isComposing || e.keyCode === 229) return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          done(null);
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          submit();
+        } else if (e.key === "Tab") {
+          const f = Array.from(box.querySelectorAll("input, button:not([disabled])"));
+          if (!f.length) return;
+          const first = f[0], last = f[f.length - 1];
+          const cur = document.activeElement;
+          if (e.shiftKey && (cur === first || cur === box)) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+        }
+      };
+
+      wrap.addEventListener("click", (e) => {
+        const t = e.target && typeof e.target.closest === "function" ? e.target : null;
+        const b = t && t.closest("[data-choice]");
+        if (b) {
+          e.preventDefault();
+          if (b.dataset.choice === "ok") submit();
+          else done(null);
+          return;
+        }
+        if (t && t.closest(".wizard-confirm-backdrop")) done(null);
+      });
+
+      if (input) {
+        input.addEventListener("compositionstart", () => { isComposing = true; });
+        input.addEventListener("compositionend", () => { isComposing = false; });
+        input.addEventListener("input", () => {
+          if (errEl && !errEl.classList.contains("hidden")) {
+            errEl.classList.add("hidden");
+            errEl.textContent = "";
+          }
+        });
+      }
+
+      wrap.addEventListener("keydown", onKey, true);
+      host.appendChild(wrap);
+      if (input) {
+        setTimeout(() => {
+          try {
+            input.focus({ preventScroll: true });
+            input.select();
+          } catch (_) {}
+        }, 0);
+      }
+    });
+  }
+
   const CLOSE_BUTTONS = [
     { value: "save", label: "保存", primary: true },
     { value: "discard", label: "保存せずに閉じる", danger: true },
@@ -545,7 +686,7 @@
   }
 
   function closeNow() {
-    autoCreateOnce = false;
+    ideaMode = "";
     stopPoll();
     clearDialog();
     if (tagTimer) { clearTimeout(tagTimer); tagTimer = null; }
@@ -572,7 +713,7 @@
   async function goBack() {
     if (!canBack()) return;
     await runAction("back", async () => {
-      if (screen === "model") autoCreateOnce = false; // AI選択から戻ったら「おまかせ即作成」は解除
+      if (screen === "model") ideaMode = ""; // AI選択から戻ったらモード解除
       const running = !!jobId;
       if (running && (screen === "creating" || screen === "questions")) {
         if (!window.confirm("生成を中止して戻りますか？")) return;
@@ -687,7 +828,7 @@
 
   // ---- idea 退避 ----
   function readIdeaForm() {
-    return { idea: val("#wizIdea"), confirm: isChecked("#wizConfirm") };
+    return { idea: val("#wizIdea") };
   }
 
   async function flushIdea(v) {
@@ -697,13 +838,6 @@
     if (v.idea !== cur) {
       await saveSlots({ rough_idea: v.idea ? { value: v.idea, source: "user" }
                                          : { value: "", source: "auto" } }, "idea");
-      changed = true;
-    }
-    if (v.confirm !== !!(draft && draft.confirm)) {
-      const r = await apiCall("/api/wizard/step", {
-        draft_id: draft.id, rev: draft.rev, step: "idea", confirm: v.confirm,
-      });
-      if (r && r.draft) draft = r.draft;
       changed = true;
     }
     return { ok: true, changed };
@@ -1013,7 +1147,6 @@
         wizard_provider: provider,
         wizard_model: model,
         wizard_thinking_level: thinking,
-        wizard_confirm: draft.confirm,
       });
       if (a && a.error) throw new Error(a.error);
     }
@@ -1034,9 +1167,8 @@
     }
     if (modelMode === "step") {
       // 流れの中のステップ：話（idea）→ AI → 相手（partner）。
-      // 「おまかせで作る」から来ていたら、ここでそのまま作成まで進める。
-      if (autoCreateOnce) {
-        autoCreateOnce = false;
+      // 「おまかせ」から来た場合、または AI を使わない場合はそのままプレビューへ進める。
+      if (skipAi || provider === "none" || ideaMode === "auto") {
         return startCreateChain(false);
       }
       return navigate("partner");
@@ -1061,7 +1193,6 @@
   function renderIdea() {
     const snapIdea = snap.idea;
     const idea = snapIdea ? snapIdea.idea : ((draft && draft.slots && draft.slots.rough_idea && draft.slots.rough_idea.value) || "");
-    const confirm = snapIdea ? snapIdea.confirm : (draft && draft.confirm);
     const examples = (wmeta && wmeta.tags && wmeta.tags.examples) || [];
     setBody(`
       <div class="wizard-card">
@@ -1069,30 +1200,27 @@
         <textarea id="wizIdea" class="wizard-textarea" rows="4" maxlength="300"
           placeholder="例: 放課後の教室で、幼馴染と二人きり。">${E(idea)}</textarea>
         <div class="wizard-examples">${examples.map(x => `<button type="button" class="wizard-example" data-example="${E(x)}">${E(x)}</button>`).join("")}</div>
-        <label class="wizard-check"><input type="checkbox" id="wizConfirm" ${confirm ? "checked" : ""}> 作成前にプレビューを確認する</label>
         <p class="wizard-note">空でも作れます。わからないことはAIが「おまかせ」で補います。</p>
+        <h3>作り方</h3>
+        <div class="wizard-options">
+          <button type="button" class="wizard-choice" data-act="idea-consult">AIと相談<span>質問に答えながら、あらすじ・キャラ・第一声を作ります</span></button>
+          <button type="button" class="wizard-choice" data-act="idea-auto">AIにおまかせ<span>一言から残りをAIが埋めて、確認してから作成します</span></button>
+          <button type="button" class="wizard-choice" data-act="idea-manual">手動で作成<span>AIを使わず、空のチャンネルを作って設定画面で書きます</span></button>
+        </div>
       </div>`);
-    setFoot(`
-      <button type="button" class="wizard-btn primary" data-act="idea-next">AIと作る</button>
-      <button type="button" class="wizard-btn" data-act="idea-auto">おまかせで作る</button>
-      <button type="button" class="wizard-btn ghost" data-act="empty">空のチャンネル</button>
-    `);
+    setFoot("");
   }
 
-  async function saveIdea(auto) {
-    const text = auto ? "" : val("#wizIdea");
-    const confirm = isChecked("#wizConfirm");
+  async function saveIdea() {
+    const text = val("#wizIdea");
+    const autoFill = !text;
     const r = await apiCall("/api/wizard/answer", {
       draft_id: draft.id, rev: draft.rev, question_id: "fixed_idea",
-      custom_text: text, auto, step: "idea",
+      custom_text: text, auto: autoFill, step: "idea",
     });
     if (!r || r.error) throw new Error(r.error || "保存できません");
     draft = r.draft;
     delete snap.idea;
-    if (confirm !== draft.confirm) {
-      const s = await apiCall("/api/wizard/step", { draft_id: draft.id, rev: draft.rev, step: "idea", confirm });
-      if (s && s.draft) draft = s.draft;
-    }
   }
 
   // ------------------------------------------------------------ partner
@@ -1487,9 +1615,10 @@
           <span>自動補完: ${E(((draft && draft.compose && draft.compose.auto_slots) || []).map(k => draft?.slots?.[k]?.label || k).join("、") || "なし")}</span>
         </div>
       </div>`);
+    const aiEnabled = !(!draft || !draft.model || draft.model.provider === "none" || draft.model.ai_enabled === false);
     setFoot(`
       <button type="button" class="wizard-btn primary" data-act="create">この内容で作成</button>
-      <button type="button" class="wizard-btn" data-act="recompose">作り直す</button>
+      ${aiEnabled ? `<button type="button" class="wizard-btn" data-act="recompose">作り直す</button>` : ""}
     `);
   }
 
@@ -1590,9 +1719,6 @@
         } else {
           delete snap.preview;
           settleTo("preview", returnTo);
-          if (autoCreateOnce) { autoCreateOnce = false; doCreate(); }
-          else if (draft && draft.confirm) { /* stay at preview */ }
-          else doCreate();
         }
         return;
       }
@@ -1627,10 +1753,6 @@
           if (j.result && j.result.draft) draft = j.result.draft;
           if (kind === "compose") {
             delete snap.preview;
-            if (autoCreateOnce || (draft && !draft.confirm)) {
-              autoCreateOnce = false;
-              return doCreate();
-            }
           }
           enterScreen(entryScreen());
           return;
@@ -1665,7 +1787,7 @@
       if (!r || r.ok === false || !r.draft) {
         return { ok: false, error: (r && r.error) || "生成を中止できませんでした" };
       }
-      jobId = ""; autoCreateOnce = false; stopPoll();
+      jobId = ""; stopPoll();
       draft = r.draft;
       return { ok: true, draft: r.draft };
     } catch (e) {
@@ -1674,13 +1796,7 @@
   }
 
   function startCreateChain(withQuestions) {
-    if (!draft || !draft.model || draft.model.provider === "none" || draft.model.ai_enabled === false) {
-      return doCreate({}, true);
-    }
-    if (draft.compose && !draft.compose_stale) {
-      if (autoCreateOnce) { autoCreateOnce = false; return doCreate(); }
-      return draft.confirm ? navigate("preview") : doCreate();
-    }
+    if (draft.compose && !draft.compose_stale) return navigate("preview");
     if (withQuestions && !draft.done_questions && draft.round < ((wmeta && wmeta.max_rounds) || 2)) {
       return startJob("questions");
     }
@@ -1689,7 +1805,6 @@
 
   async function doCreate(overrides, useTemplate) {
     if (busy) return;
-    autoCreateOnce = false;
     busy = true;
     try {
       const r = await apiCall("/api/wizard/create", {
@@ -1707,6 +1822,7 @@
       }
       draft = r.draft || draft;
       if (r.sid) {
+        ideaMode = "";
         if (appMeta()?.app?.new_channel_ide !== false && typeof checked === "function") {
           checked("/api/ide/new", { sid: r.sid, target: "both" })
             .then(async () => {
@@ -1737,7 +1853,46 @@
   }
 
   async function useTemplate() {
-    return doCreate({}, true);
+    const r = await apiCall("/api/wizard/model", {
+      draft_id: draft.id,
+      rev: draft.rev,
+      provider: "none",
+      model: "",
+      thinking_level: "",
+      ai_enabled: false,
+    });
+    if (r && r.draft) draft = r.draft;
+    delete snap.preview;
+    return startJob("compose");
+  }
+
+  async function createManual() {
+    const title = await askText({
+      title: "チャンネル名",
+      message: "新しいチャンネルの名前を入力してください。",
+      value: lastManualTitle || "新しいチャンネル",
+      maxlength: 40,
+      okLabel: "作成",
+      cancelLabel: "キャンセル",
+    });
+    if (title === null) return;
+    lastManualTitle = title;
+    await runAction("create", async () => {
+      const r = await apiCall("/api/wizard/manual", {
+        draft_id: draft.id,
+        rev: draft.rev,
+        title,
+      });
+      if (!r || !r.sid) throw new Error((r && r.error) || "作成できません");
+      lastManualTitle = "";
+      ideaMode = "";
+      close(true);
+      if (typeof window.afterChannelCreated === "function") {
+        await window.afterChannelCreated(r.sid);
+      } else {
+        await activateCreatedSession(r.sid);
+      }
+    });
   }
 
   // ------------------------------------------------------------ events
@@ -1775,13 +1930,21 @@
         if (a === "model-test") return testModel();
         if (a === "model-save") return runAction("next", () => saveModel(false));
         if (a === "model-skip") return runAction("next", () => saveModel(true));
-        if (a === "idea-next") return runAction("next", async () => { await saveIdea(false); autoCreateOnce = false; openModelStep(); });
-        if (a === "idea-auto") return runAction("next", async () => {
-          await saveIdea(true);
-          autoCreateOnce = true;
-          openModelStep();
-        });
-        if (a === "empty") { close(true); if (window.callLegacyNewSession) window.callLegacyNewSession(); return; }
+        if (a === "idea-consult") {
+          return runAction("next", async () => {
+            await saveIdea();
+            ideaMode = "consult";
+            openModelStep();
+          });
+        }
+        if (a === "idea-auto") {
+          return runAction("next", async () => {
+            await saveIdea();
+            ideaMode = "auto";
+            openModelStep();
+          });
+        }
+        if (a === "idea-manual") return createManual();
         if (a === "partner-next") return runAction("next", async () => { await savePartner(false); navigate("tags"); });
         if (a === "partner-skip") return runAction("next", async () => { await savePartner(true); navigate("tags"); });
         if (a === "tags-next") return runAction("next", () => saveTagsAndGo("next"));
@@ -1797,6 +1960,8 @@
           });
         }
         if (a === "recompose") {
+          const aiEnabled = !(!draft || !draft.model || draft.model.provider === "none" || draft.model.ai_enabled === false);
+          if (!aiEnabled) return;
           return runAction("recompose", async () => {
             delete snap.preview;
             const r = await apiCall("/api/wizard/model", { draft_id: draft.id, rev: draft.rev, ...(draft.model || {}) });
@@ -1831,7 +1996,6 @@
       if ($("#f_wizard_provider")) $("#f_wizard_provider").value = m.current?.provider || "google";
       if ($("#f_wizard_model")) $("#f_wizard_model").value = m.current?.model || "";
       if ($("#f_wizard_thinking_level")) $("#f_wizard_thinking_level").value = m.current?.thinking_level || "high";
-      if ($("#f_wizard_confirm")) $("#f_wizard_confirm").checked = !!m.confirm;
     } catch (_) {}
   }
 
@@ -1843,7 +2007,6 @@
         wizard_provider: val("#f_wizard_provider") || "google",
         wizard_model: val("#f_wizard_model"),
         wizard_thinking_level: val("#f_wizard_thinking_level") || "high",
-        wizard_confirm: isChecked("#f_wizard_confirm"),
       });
       const m = await apiCall("/api/wizard/meta");
       if (m && !m.error) {
@@ -1854,8 +2017,6 @@
         if (sm) sm.value = m.current?.model || "";
         const st = $("#f_wizard_thinking_level");
         if (st) st.value = m.current?.thinking_level || "high";
-        const sc = $("#f_wizard_confirm");
-        if (sc) sc.checked = !!m.confirm;
         const se = $("#f_wizard_enabled");
         if (se) se.checked = !!m.enabled;
       }
@@ -1947,7 +2108,7 @@
       appSaveBtn.addEventListener("click", () => setTimeout(saveWizardSettings, 0));
     }
     ["#f_wizard_enabled", "#f_wizard_provider", "#f_wizard_model",
-     "#f_wizard_thinking_level", "#f_wizard_confirm"].forEach((sel) => {
+     "#f_wizard_thinking_level"].forEach((sel) => {
       const el = $(sel);
       if (el) el.addEventListener("change", saveWizardSettings);
     });
@@ -1965,7 +2126,7 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
 
-  window.RPWizard = { open, close, showModel };
+  window.RPWizard = { open, close, showModel, askText };
 
   if (typeof window !== "undefined" && window.__RP_WIZARD_TEST__) {
     window.RPWizard.__test = {
@@ -1973,6 +2134,8 @@
       set navStack(v) { navStack = v; },
       get screen() { return screen; },
       set screen(v) { screen = v; },
+      get ideaMode() { return ideaMode; },
+      set ideaMode(v) { ideaMode = v; },
       get draft() { return draft; },
       set draft(v) { draft = v; },
       get wmeta() { return wmeta; },
@@ -2039,6 +2202,15 @@
       pollJob,
       resumeJob,
       initPendingTags,
+      saveIdea,
+      saveModel,
+      startCreateChain,
+      askText,
+      syncFootBar,
+      setFoot,
+      createManual,
+      useTemplate,
+      doCreate,
     };
   }
 })();

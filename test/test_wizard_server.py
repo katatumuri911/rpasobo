@@ -93,7 +93,7 @@ class WizardTestBase(unittest.TestCase):
     def new_draft(self):
         d = server.wizard_new_draft(
             {}, {"provider": "google", "model": "gemini-2.5-pro",
-                 "thinking_level": "high", "ai_enabled": True}, True)
+                 "thinking_level": "high", "ai_enabled": True})
         d["base_sid"] = ""
         server.wizard_save(d)
         return d
@@ -832,6 +832,241 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
         status, res = self.post("/api/wizard/job_cancel", {"job_id": "wj_test", "draft_id": "invalid/id"})
         self.assertEqual(status, 400)
         self.assertEqual(res["code"], "bad_request")
+
+
+class TestWizardManualAndConfirm(WizardTestBase):
+    def post(self, path, body):
+        h = FakeHandler(path, body)
+        server.wizard_route(h, path, body, "POST")
+        return h.status, h.result
+
+    def test_manual_inherit_base_true(self):
+        base_st = {
+            "title": "元チャンネル",
+            "user_name": "元ユーザー",
+            "project": "元プロジェクト",
+            "summary": "元のあらすじ",
+            "scenario": "元のシナリオ",
+            "first_message": "元の第一声",
+            "character": {"name": "元のキャラ", "age": "20", "profile": "...", "speech": "..."},
+            "memo": "元のメモ",
+            "turns_in_period": 5,
+            "image": {"model": "img_model_xyz"},
+        }
+        d = self.new_draft()
+        d["inherit_base"] = True
+        d["base_setting"] = base_st
+        server.wizard_save(d)
+
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "新しい手動チャンネル",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        sid = res["sid"]
+        self.assertTrue(sid)
+        self.assertEqual(res["title"], "新しい手動チャンネル")
+
+        # セッションの検証
+        s = server.load(sid)
+        st = s["setting"]
+        self.assertEqual(st["title"], "新しい手動チャンネル")
+        self.assertEqual(st["user_name"], "元ユーザー")
+        self.assertEqual(st["project"], "元プロジェクト")
+        self.assertEqual(st.get("image", {}).get("model"), "img_model_xyz")
+        # ストーリー・進行は初期化されている
+        self.assertEqual(st["summary"], "")
+        self.assertEqual(st["scenario"], "")
+        self.assertEqual(st["first_message"], "")
+        self.assertEqual(st["character"]["name"], "")
+        self.assertEqual(st["memo"], "")
+        self.assertEqual(st["turns_in_period"], 0)
+
+    def test_manual_inherit_base_false(self):
+        d = self.new_draft()
+        d["inherit_base"] = False
+        d["base_setting"] = {"user_name": "元ユーザー", "title": "元タイトル"}
+        server.wizard_save(d)
+
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "手動デフォルトチャンネル",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        sid = res["sid"]
+        s = server.load(sid)
+        st = s["setting"]
+        self.assertEqual(st["title"], "手動デフォルトチャンネル")
+        self.assertNotEqual(st["user_name"], "元ユーザー")
+
+    def test_manual_inherit_base_true_empty_setting(self):
+        d = self.new_draft()
+        d["inherit_base"] = True
+        d["base_setting"] = {}
+        server.wizard_save(d)
+
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "空ベースチャンネル",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertTrue(len(res.get("warnings", [])) > 0)
+        sid = res["sid"]
+        s = server.load(sid)
+        self.assertEqual(s["setting"]["title"], "空ベースチャンネル")
+
+    def test_manual_title_validation(self):
+        d = self.new_draft()
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "   ",
+        })
+        self.assertEqual(status, 400)
+        self.assertEqual(res["code"], "bad_title")
+
+        # 40文字超過は切り詰められて成功
+        long_title = "あ" * 50
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": long_title,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(res["title"], "あ" * 40)
+
+    def test_manual_rev_mismatch(self):
+        d = self.new_draft()
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": 999,
+            "title": "タイトル",
+        })
+        self.assertEqual(status, 409)
+        self.assertEqual(res["code"], "rev")
+
+    def test_manual_busy(self):
+        d = self.new_draft()
+        with mock.patch.object(server, "wizard_job_running", return_value=True):
+            d["last_job"] = "wj_testbusy"
+            server.wizard_save(d)
+            status, res = self.post("/api/wizard/manual", {
+                "draft_id": d["id"],
+                "rev": d["rev"],
+                "title": "タイトル",
+            })
+            self.assertEqual(status, 409)
+            self.assertEqual(res["code"], "wizard_busy")
+
+    def test_manual_idempotent(self):
+        d = self.new_draft()
+        status1, res1 = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "冪等チャンネル",
+        })
+        self.assertEqual(status1, 200)
+        sid1 = res1["sid"]
+
+        # 2回目（同じ draft_id、古い rev でもよい）
+        status2, res2 = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "冪等チャンネル",
+        })
+        self.assertEqual(status2, 200)
+        self.assertEqual(res2["sid"], sid1)
+        self.assertTrue(res2.get("created"))
+        self.assertEqual(res2["draft"]["title_hint"], "冪等チャンネル")
+        self.assertEqual(res2["draft"]["created_title"], "冪等チャンネル")
+
+    def test_manual_recreates_if_session_deleted(self):
+        d = self.new_draft()
+        status1, res1 = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "再作成テストチャンネル",
+        })
+        self.assertEqual(status1, 200)
+        sid1 = res1["sid"]
+
+        # 作成されたセッションファイルを削除
+        session_file = server.spath(sid1)
+        if os.path.exists(session_file):
+            os.remove(session_file)
+
+        # セッション削除後に再送すると、新sidで作り直される
+        fresh = server.wizard_load(d["id"])
+        status2, res2 = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": fresh["rev"],
+            "title": "再作成テストチャンネル2",
+        })
+        self.assertEqual(status2, 200)
+        self.assertNotEqual(res2["sid"], sid1)
+        self.assertFalse(res2.get("created", False))
+        self.assertTrue(os.path.exists(server.spath(res2["sid"])))
+
+    def test_manual_created_status_prevents_resume(self):
+        d = self.new_draft()
+        d["base_sid"] = "some_sid"
+        server.wizard_save(d)
+        status, res = self.post("/api/wizard/manual", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "title": "チャンネル",
+        })
+        self.assertEqual(status, 200)
+
+        # wizard_start で再開対象にならない
+        start_res = server.wizard_start({"base_sid": "some_sid"})
+        self.assertFalse(start_res["resumed"])
+        self.assertNotEqual(start_res["draft"]["id"], d["id"])
+
+    def test_confirm_is_ignored_in_routes(self):
+        d = self.new_draft()
+        status, res = self.post("/api/wizard/model", {
+            "draft_id": d["id"],
+            "rev": d["rev"],
+            "provider": "google",
+            "model": "gemini-2.5-pro",
+            "confirm": False,
+        })
+        self.assertEqual(status, 200)
+        fresh = server.wizard_load(d["id"])
+        self.assertNotIn("confirm", fresh)
+
+        status, res = self.post("/api/wizard/step", {
+            "draft_id": d["id"],
+            "rev": fresh["rev"],
+            "step": "idea",
+            "confirm": False,
+        })
+        self.assertEqual(status, 200)
+        fresh = server.wizard_load(d["id"])
+        self.assertNotIn("confirm", fresh)
+
+    def test_ai_disabled_compose_sets_preview_state(self):
+        d = self.new_draft()
+        d["model"] = {"provider": "none", "model": "", "ai_enabled": False}
+        server.wizard_save(d)
+        job, _ = server.wizard_start_job(d, "compose")
+        for _ in range(50):
+            if job.get("status") in ("done", "error"):
+                break
+            time.sleep(0.05)
+        self.assertEqual(job.get("status"), "done")
+        fresh = server.wizard_load(d["id"])
+        self.assertEqual(fresh["status"], "ready")
+        self.assertEqual(fresh["step"], "preview")
+        self.assertTrue(fresh["compose"])
+        self.assertEqual(fresh["compose"]["source"], "template")
 
 
 if __name__ == "__main__":

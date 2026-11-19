@@ -1026,7 +1026,6 @@ async function loadOptions() {
   if ($("f_wizard_provider")) $("f_wizard_provider").value = meta.app?.wizard_provider || "google";
   if ($("f_wizard_model")) $("f_wizard_model").value = meta.app?.wizard_model || "";
   if ($("f_wizard_thinking_level")) $("f_wizard_thinking_level").value = meta.app?.wizard_thinking_level || "high";
-  if ($("f_wizard_confirm")) $("f_wizard_confirm").checked = meta.app?.wizard_confirm !== false;
   await loadDecensor();
   showPhone(meta.phone || {});
   fillSelect($("presetSelect"), presets.map((x) => ({ value: x.id, label: x.name })), $("presetSelect").value, "プリセット…");
@@ -4317,7 +4316,6 @@ $("appSave").onclick = async () => {
     if ($("f_wizard_provider")) payload.wizard_provider = $("f_wizard_provider").value;
     if ($("f_wizard_model")) payload.wizard_model = $("f_wizard_model").value;
     if ($("f_wizard_thinking_level")) payload.wizard_thinking_level = $("f_wizard_thinking_level").value;
-    if ($("f_wizard_confirm")) payload.wizard_confirm = $("f_wizard_confirm").checked;
     await checked("/api/app-settings", payload);
     await loadOptions();
     $("appMsg").textContent = "保存しました";
@@ -10770,6 +10768,26 @@ if (eroticAutoEl) {
   });
 }
 
+async function afterChannelCreated(newSid) {
+  await refreshSessions();
+  await switchTo(newSid);
+  const sp = $("settingsPanel");
+  if (sp) sp.classList.remove("hidden");  // ✅ Q2 確定：常にパネルを開く
+  updateFabState();
+  flash("新しいチャンネルを作成しました");
+  if (meta.app?.new_channel_ide === false) return;
+  // アプリ全体の設定でオンなら、Antigravity の新規会話も作って担当にする
+  toast("Antigravity の新規会話を作っています…", { kind: "progress" });
+  try {
+    const n = await checked("/api/ide/new", { sid: newSid, target: "both" });
+    toast(`Antigravity の新規会話を作って担当にしました: ${n.title}（${String(n.ide).slice(0, 8)}）`, { kind: "ok", ms: 6000 });
+    if (newSid === sid) await poll();
+    refreshSessions(); loadIdeSessions();
+  } catch (e) { toast("チャンネルは作りましたが、Antigravity の新規会話は作れませんでした:\n" + e.message, { kind: "err", ms: 15000 }); }
+}
+
+window.afterChannelCreated = afterChannelCreated;
+
 // 新規: 動作・画像設定のみを引き継いで、真っ白な新しいチャンネルを始める
 async function legacyNewSession() {
   let base = null;
@@ -10777,26 +10795,22 @@ async function legacyNewSession() {
     try { base = formSid === sid ? readForm() : JSON.parse(JSON.stringify(state.setting)); }
     catch { base = JSON.parse(JSON.stringify(state.setting)); }
   }
-  const title = prompt("新しいチャンネル名", "新しいチャンネル");
-  if (title === null) return;
+  let title = "新しいチャンネル";
+  if (typeof window.RPWizard?.askText === "function") {
+    title = await window.RPWizard.askText({
+      title: "チャンネル名",
+      message: "新しいチャンネルの名前を入力してください。",
+      value: "新しいチャンネル",
+      maxlength: 40,
+      okLabel: "作成",
+      cancelLabel: "キャンセル",
+    });
+    if (title === null) return;
+  }
   const r = await api("/api/session/new", base ? { title, setting: base } : { title });
-  await refreshSessions();
-  await switchTo(r.sid);
-  $("settingsPanel").classList.remove("hidden");  // ✅ Q2 確定：常にパネルを開く
-  updateFabState();
-  flash("新しいチャンネルを作成しました");
-  if (meta.app?.new_channel_ide === false) return;
-  // アプリ全体の設定でオンなら、Antigravity の新規会話も作って担当にする
-  toast("Antigravity の新規会話を作っています…", { kind: "progress" });
-  try {
-    const n = await checked("/api/ide/new", { sid: r.sid, target: "both" });
-    toast(`Antigravity の新規会話を作って担当にしました: ${n.title}（${String(n.ide).slice(0, 8)}）`, { kind: "ok", ms: 6000 });
-    if (sid === r.sid) await poll();
-    refreshSessions(); loadIdeSessions();
-  } catch (e) { toast("チャンネルは作りましたが、Antigravity の新規会話は作れませんでした:\n" + e.message, { kind: "err", ms: 15000 }); }
+  if (!r || !r.sid) return;
+  await afterChannelCreated(r.sid);
 }
-
-window.callLegacyNewSession = legacyNewSession;
 
 $("newSession").onclick = async () => {
   if (window.RPWizard && meta?.app?.wizard_enabled !== false) {

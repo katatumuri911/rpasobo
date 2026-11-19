@@ -57,7 +57,7 @@ class StubEl {
     this.value = "";
     this.checked = false;
     this.textContent = "";
-    this.innerHTML = "";
+    this._innerHTML = "";
     this.title = "";
     this.disabled = false;
     this.inert = false;
@@ -78,6 +78,62 @@ class StubEl {
       }
     };
   }
+  get innerHTML() { return this._innerHTML !== undefined ? this._innerHTML : ""; }
+  set innerHTML(val) {
+    this._innerHTML = String(val || "");
+    if (this._innerHTML.includes("wizard-confirm-box")) {
+      const backdrop = new StubEl("", "div", this._envRef);
+      backdrop.classList.add("wizard-confirm-backdrop");
+      const box = new StubEl("", "div", this._envRef);
+      box.classList.add("wizard-confirm-box");
+      const input = new StubEl("wizAskTextInput", "input", this._envRef);
+      input.classList.add("wizard-input");
+      const matchVal = this._innerHTML.match(/value="([^"]*)"/);
+      if (matchVal) input.value = matchVal[1];
+      const err = new StubEl("wizAskTextError", "div", this._envRef);
+      err.classList.add("wizard-confirm-error", "hidden");
+      const okBtn = new StubEl("", "button", this._envRef);
+      okBtn.dataset.choice = "ok";
+      okBtn.classList.add("wizard-btn", "primary");
+      const cancelBtn = new StubEl("", "button", this._envRef);
+      cancelBtn.dataset.choice = "cancel";
+      cancelBtn.classList.add("wizard-btn", "ghost");
+      box.children = [input, err, okBtn, cancelBtn];
+      input.parentElement = box;
+      err.parentElement = box;
+      okBtn.parentElement = box;
+      cancelBtn.parentElement = box;
+      this.children = [backdrop, box];
+      backdrop.parentElement = this;
+      box.parentElement = this;
+      if (this._envRef) {
+        this._envRef["wizAskTextInput"] = input;
+        this._envRef["wizAskTextError"] = err;
+      }
+      return;
+    }
+    const btnMatches = this._innerHTML.match(/<button[^>]*>/g) || [];
+    this.children = btnMatches.map(() => new StubEl("", "button", this._envRef));
+  }
+  appendChild(child) {
+    if (child) {
+      child.parentElement = this;
+      this.children.push(child);
+    }
+    return child;
+  }
+  removeChild(child) {
+    this.children = this.children.filter(c => c !== child);
+    if (child) child.parentElement = null;
+    return child;
+  }
+  remove() {
+    if (this.parentElement) {
+      this.parentElement.removeChild(this);
+    }
+  }
+  select() {}
+  get isConnected() { return !!this.parentElement; }
   get className() { return Array.from(this._classes).join(" "); }
   set className(v) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
   setAttribute(k, v) { this.attrs[k] = String(v); }
@@ -93,19 +149,29 @@ class StubEl {
     }
   }
   dispatchEvent(ev) {
-    const list = this.listeners[ev.type] || [];
+    if (!ev.preventDefault) ev.preventDefault = () => {};
+    if (!ev.stopPropagation) ev.stopPropagation = () => {};
+    const list = (this.listeners[ev.type] || []).slice();
     for (const fn of list) fn.call(this, ev);
   }
   closest(sel) {
     if (sel === ".wizard-backdrop") return this.classList.contains("wizard-backdrop") ? this : null;
+    if (sel === ".wizard-confirm-backdrop") return this.classList.contains("wizard-confirm-backdrop") ? this : null;
+    if (sel === "[data-choice]") return (this.dataset && this.dataset.choice) ? this : null;
+    if (sel === "[data-act]") return (this.dataset && this.dataset.act) ? this : null;
     return null;
   }
   focus() {}
   querySelector(sel) {
     if (sel.startsWith("#")) {
       const id = sel.slice(1);
+      if (this.id === id) return this;
       if (this._envRef && this._envRef[id]) return this._envRef[id];
       if (typeof elements !== "undefined" && elements[id]) return elements[id];
+      for (const child of this.children) {
+        const found = child.querySelector(sel);
+        if (found) return found;
+      }
       return null;
     }
     if (sel === ".wizard-modal") return this;
@@ -124,13 +190,15 @@ class StubEl {
     return null;
   }
   querySelectorAll(sel) {
-    if (sel.includes(".wizard-seg-btn")) {
-      return this.children.filter(c => c.classList.contains("wizard-seg-btn"));
-    }
-    if (sel.includes("button")) {
-      return this.children.filter(c => c.tagName === "BUTTON");
-    }
-    return [];
+    const res = [];
+    const check = (el) => {
+      if (sel.includes(".wizard-seg-btn") && el.classList.contains("wizard-seg-btn")) res.push(el);
+      else if (sel.includes("button") && el.tagName === "BUTTON") res.push(el);
+      else if (sel.includes("input") && el.tagName === "INPUT") res.push(el);
+      for (const c of el.children) check(c);
+    };
+    check(this);
+    return res;
   }
 }
 
@@ -159,7 +227,6 @@ const fWizardEnabled = getOrCreateEl("f_wizard_enabled", "input");
 const fWizardProvider = getOrCreateEl("f_wizard_provider", "select");
 const fWizardModel = getOrCreateEl("f_wizard_model", "input");
 const fWizardThinking = getOrCreateEl("f_wizard_thinking_level", "select");
-const fWizardConfirm = getOrCreateEl("f_wizard_confirm", "input");
 const appMsg = getOrCreateEl("appMsg", "span");
 
 const bodyEl = new StubEl("body", "body", elements);
@@ -195,13 +262,16 @@ function createWizardEnv(opts = {}) {
   [
     "wizardRoot", "wizardBody", "wizardFoot", "wizardBack",
     "wizardTitle", "wizardProgress", "wizardModelChip", "wizardClose",
-    "wizIdea", "wizConfirm", "wizWork", "wizPartnerName", "wizPartnerType",
+    "wizIdea", "wizWork", "wizPartnerName", "wizPartnerType",
     "wizPlayerType", "wizPlayerWork", "wizPlayerName", "wizPlayerProfile",
     "wizStart", "wizCanon", "wizGoal", "wizEnding", "wizProject", "wizPreset",
     "wizCustomNg", "wizFree", "wizJobMsg", "wizProvider", "wizModel", "wizThink"
   ].forEach(id => getEl(id));
 
   envEls["wizardRoot"].classList.add("wizard-root");
+  const footBar = getEl("wizardFootBar", "footer");
+  footBar.classList.add("wizard-foot");
+  envEls["wizardFoot"].parentElement = footBar;
 
   const apiCalls = [];
   const defaultApi = async (path, data) => {
@@ -224,6 +294,7 @@ function createWizardEnv(opts = {}) {
       body: envBody,
       readyState: "complete",
       activeElement: null,
+      ...(opts.withDom ? { createElement: (tag) => new StubEl("", tag, envEls) } : {}),
       querySelector: (sel) => {
         if (sel === "#wizardRoot") return envEls["wizardRoot"];
         if (sel === "#wizardBody") return envEls["wizardBody"];
@@ -364,7 +435,7 @@ async function main() {
     assert(indexHtml.includes('id="f_wizard_provider"'), "#f_wizard_provider present");
     assert(indexHtml.includes('id="f_wizard_model"'), "#f_wizard_model present");
     assert(indexHtml.includes('id="f_wizard_thinking_level"'), "#f_wizard_thinking_level present");
-    assert(indexHtml.includes('id="f_wizard_confirm"'), "#f_wizard_confirm present");
+    assert(!indexHtml.includes('id="f_wizard_confirm"'), "#f_wizard_confirm removed");
 
     const appSaveIdx = indexHtml.indexOf('id="appSave"');
     const wizardBoxIdx = indexHtml.indexOf('id="f_wizard_enabled"');
@@ -476,16 +547,16 @@ async function main() {
     assert.strictEqual(closedWhenHidden, false, "closeTopmostLayer returns false when all layers closed");
   });
 
-  // [3.4] switchTo, refreshSessions, callLegacyNewSession のグローバル公開
-  test("window.switchTo, window.refreshSessions, window.callLegacyNewSession の公開構文", () => {
+  // [3.4] switchTo, refreshSessions, afterChannelCreated のグローバル公開
+  test("window.switchTo, window.refreshSessions, window.afterChannelCreated の公開構文", () => {
     assert(appJsSrc.includes("window.switchTo = switchTo;"), "window.switchTo is assigned");
     assert(appJsSrc.includes("window.refreshSessions = refreshSessions;"), "window.refreshSessions is assigned");
-    assert(appJsSrc.includes("window.callLegacyNewSession = legacyNewSession;"), "window.callLegacyNewSession is assigned");
+    assert(appJsSrc.includes("window.afterChannelCreated = afterChannelCreated;"), "window.afterChannelCreated is assigned");
   });
 
   // [3.5] newSession.onclick の振る舞い検証
   await testAsync("newSession.onclick が RPWizard.open() に委譲し、無効時や例外時に legacyNewSession にフォールバックする", async () => {
-    const startIdx = appJsSrc.indexOf("async function legacyNewSession() {");
+    const startIdx = appJsSrc.indexOf("async function afterChannelCreated(");
     const endIdx = appJsSrc.indexOf("\n$(\"dupBtn\").onclick", startIdx);
     assert(startIdx !== -1 && endIdx !== -1, "extract legacyNewSession and newSession.onclick");
     const code = appJsSrc.slice(startIdx, endIdx);
@@ -594,7 +665,6 @@ async function main() {
     fWizardProvider.value = "vertex";
     fWizardModel.value = "gemini-2.5-flash";
     fWizardThinking.value = "medium";
-    fWizardConfirm.checked = false;
 
     await elements["appSave"].onclick();
 
@@ -604,7 +674,7 @@ async function main() {
     assert.strictEqual(sentPayload.wizard_provider, "vertex");
     assert.strictEqual(sentPayload.wizard_model, "gemini-2.5-flash");
     assert.strictEqual(sentPayload.wizard_thinking_level, "medium");
-    assert.strictEqual(sentPayload.wizard_confirm, false);
+    assert.strictEqual("wizard_confirm" in sentPayload, false, "wizard_confirm not in sentPayload");
   });
 
   console.log("\n=== [4] wizard.js 静的解析・構造検証（§11.1） ===");
@@ -1048,7 +1118,7 @@ async function main() {
   await testAsync("8. 退避失敗 → 次へで正常保存 → 閉じる、で古い snap が再送されない", async () => {
     const env = createWizardEnv();
     // 過去の退避失敗で snap に値が残っている
-    env.t.snap = { idea: { idea: "failed_old_idea", confirm: true } };
+    env.t.snap = { idea: { idea: "failed_old_idea" } };
 
     // 正常保存が成功したときに snap[screen] が削除される
     delete env.t.snap.idea;
@@ -1161,6 +1231,246 @@ async function main() {
     await env.t.pollJob();
 
     assert.strictEqual(scheduled.length, 0, "catch block did not reschedule timer when jobId was replaced");
+  });
+
+  console.log("\n=== [7] 新仕様（wizard-idea-step-spec.md）の検証 ===");
+
+  // 1 & 2. 2/7「どんな話にしますか？」のマークアップ検証
+  test("2/7 HTML に idea-consult, idea-auto, idea-manual が存在し #wizConfirm が含まれない", () => {
+    const env = createWizardEnv();
+    env.t.render("idea");
+    const bodyHtml = env.elements["wizardBody"].innerHTML;
+    assert(bodyHtml.includes('data-act="idea-consult"'), "data-act=idea-consult exists");
+    assert(bodyHtml.includes('data-act="idea-auto"'), "data-act=idea-auto exists");
+    assert(bodyHtml.includes('data-act="idea-manual"'), "data-act=idea-manual exists");
+    assert(!bodyHtml.includes('id="wizConfirm"'), "#wizConfirm must NOT be in idea HTML");
+    assert(!bodyHtml.includes('data-act="empty"'), "data-act=empty must NOT be in idea HTML");
+  });
+
+  // 5. 一言アイデア参照バグ修正: 入力時は custom_text + auto:false、空欄時は auto:true
+  await testAsync("saveIdea: 入力があるときは custom_text が送られ auto:false、空欄なら auto:true", async () => {
+    const env = createWizardEnv();
+    env.t.draft = { id: "d_idea", rev: 1, slots: {} };
+
+    // 1) 入力あり
+    env.elements["wizIdea"].value = "学園ラブコメ";
+    await env.t.saveIdea();
+    const call1 = env.apiCalls[env.apiCalls.length - 1];
+    assert.strictEqual(call1.path, "/api/wizard/answer");
+    assert.strictEqual(call1.data.custom_text, "学園ラブコメ");
+    assert.strictEqual(call1.data.auto, false);
+
+    // 2) 入力なし（空欄）
+    env.elements["wizIdea"].value = "   ";
+    await env.t.saveIdea();
+    const call2 = env.apiCalls[env.apiCalls.length - 1];
+    assert.strictEqual(call2.path, "/api/wizard/answer");
+    assert.strictEqual(call2.data.custom_text, "");
+    assert.strictEqual(call2.data.auto, true);
+  });
+
+  // 6. startCreateChain() が compose 済みで常に preview（doCreate を呼ばない）
+  test("startCreateChain: compose 済みなら常に preview（doCreate を呼ばない）", () => {
+    const env = createWizardEnv();
+    env.t.draft = {
+      id: "d1", rev: 1,
+      model: { provider: "google", model: "m", ai_enabled: true },
+      compose: { setting: { title: "タイトル" } },
+      compose_stale: false,
+    };
+    env.t.navStack = ["idea", "model"];
+    env.t.screen = "model";
+    let doCreateCalled = false;
+    env.t.doCreate = () => { doCreateCalled = true; };
+    env.t.startCreateChain(false);
+    assert.strictEqual(env.t.screen, "preview");
+    assert.strictEqual(doCreateCalled, false);
+  });
+
+  // 7. pollJob の compose 完了で doCreate が呼ばれない
+  await testAsync("pollJob: compose 完了時に doCreate は呼ばれず preview に settle する", async () => {
+    const env = createWizardEnv();
+    env.t.jobId = "wj_done";
+    env.t.jobKind = "compose";
+    env.sandbox.api = async () => ({
+      status: "done",
+      result: { draft: { id: "d1", rev: 2, compose: { setting: { title: "完了" } } } },
+    });
+    env.t.navStack = ["idea", "creating"];
+    env.t.screen = "creating";
+    let doCreateCalled = false;
+    env.t.doCreate = () => { doCreateCalled = true; };
+
+    await env.t.pollJob();
+    assert.strictEqual(env.t.screen, "preview");
+    assert.strictEqual(doCreateCalled, false, "doCreate must NOT be called on compose done");
+  });
+
+  // 8. saveModel() が ideaMode==="auto" で startCreateChain(false)、"consult" で partner へ
+  await testAsync("saveModel: ideaMode==='auto' で startCreateChain(false)、'consult' で partner へ", async () => {
+    const env = createWizardEnv();
+    env.t.draft = { id: "d1", rev: 1, model: {}, compose: { setting: { title: "生成済み" } }, compose_stale: false };
+    env.elements["wizProvider"].value = "google";
+    env.elements["wizModel"].value = "gemini-pro";
+
+    // auto の場合（compose済み下書きなので preview へ遷移する）
+    env.t.ideaMode = "auto";
+    env.t.openModelStep();
+    await env.t.saveModel(false);
+    assert.strictEqual(env.t.screen, "preview", "startCreateChain transitioned to preview when ideaMode === 'auto'");
+
+    // consult の場合（partner へ遷移する）
+    env.t.ideaMode = "consult";
+    env.t.openModelStep();
+    await env.t.saveModel(false);
+    assert.strictEqual(env.t.screen, "partner", "navigate('partner') called when ideaMode === 'consult'");
+
+    // consult かつ skipAi=true の場合（partner ではなく preview へ遷移する: §4.2）
+    env.t.ideaMode = "consult";
+    env.t.openModelStep();
+    await env.t.saveModel(true);
+    assert.strictEqual(env.t.screen, "preview", "startCreateChain transitioned to preview when skipAi is true in consult mode");
+  });
+
+  // 8b. useTemplate(): テンプレ生成ジョブを開始して preview へ遷移する（即作成しない）
+  await testAsync("useTemplate: テンプレ compose ジョブを開始する（即作成しない）", async () => {
+    const env = createWizardEnv();
+    env.t.draft = { id: "d1", rev: 1, model: { provider: "google", model: "gemini" } };
+    await env.t.useTemplate();
+    const modelCall = env.apiCalls.find(c => c.path === "/api/wizard/model");
+    const composeCall = env.apiCalls.find(c => c.path === "/api/wizard/compose");
+    assert(modelCall, "called /api/wizard/model");
+    assert.strictEqual(modelCall.data.provider, "none");
+    assert.strictEqual(modelCall.data.ai_enabled, false);
+    assert(composeCall, "called /api/wizard/compose to generate template");
+    assert.strictEqual(env.t.jobKind, "compose", "jobKind is compose");
+  });
+
+  // 9. AIなし時にプレビューの data-act="recompose" が無い（7.4）
+  test("プレビュー描画: AIなし時に recompose ボタンが非表示", () => {
+    const env = createWizardEnv();
+    env.t.draft = {
+      id: "d1", rev: 1,
+      model: { provider: "none", model: "", ai_enabled: false },
+      compose: { setting: { title: "テンプレ", chars: [] } },
+    };
+    env.t.render("preview");
+    const footHtml = env.elements["wizardFoot"].innerHTML;
+    assert(footHtml.includes('data-act="create"'), "create button exists in preview");
+    assert(!footHtml.includes('data-act="recompose"'), "recompose button must NOT exist when AI is disabled");
+
+    // AIありのとき
+    env.t.draft.model = { provider: "google", model: "gemini", ai_enabled: true };
+    env.t.render("preview");
+    const footHtmlAi = env.elements["wizardFoot"].innerHTML;
+    assert(footHtmlAi.includes('data-act="recompose"'), "recompose button exists when AI is enabled");
+  });
+
+  // 10. setFoot("") かつ戻る非表示のとき footer.wizard-foot に hidden が付く
+  test("syncFootBar: foot が空かつ戻る非表示のとき footer.wizard-foot に hidden が付く", () => {
+    const env = createWizardEnv();
+    const footBar = env.elements["wizardFootBar"];
+    const backBtn = env.elements["wizardBack"];
+
+    backBtn.classList.add("hidden");
+    env.t.setFoot("");
+    assert.strictEqual(footBar.classList.contains("hidden"), true, "footBar is hidden when empty and back hidden");
+
+    backBtn.classList.remove("hidden");
+    env.t.syncFootBar();
+    assert.strictEqual(footBar.classList.contains("hidden"), false, "footBar is NOT hidden when back is visible");
+  });
+
+  // 11. askText() がダイアログを返し、Esc/キャンセルで null（DOMスタブ環境では null）
+  await testAsync("askText: DOMスタブ環境では null を返す", async () => {
+    const env = createWizardEnv();
+    const res = await env.t.askText({ title: "チャンネル名" });
+    assert.strictEqual(res, null, "askText returns null in non-DOM stub environment");
+  });
+
+  // 11b. askText() の DOM 動作検証（Enter で入力値返却、空文字バリデーション、IME変換中ガード、Esc/キャンセル/背景クリックで null）
+  await testAsync("askText: DOM環境での Enter 確定、空文字エラー、IME変換中ガード、Esc/キャンセル", async () => {
+    const env = createWizardEnv({ withDom: true });
+
+    // 1) 有効なテキスト入力で Enter → 入力値を返却
+    {
+      const p = env.t.askText({ title: "チャンネル名", value: "初期値" });
+      const wrap = env.elements["wizardRoot"].children.find(c => c.id === "wizAskText");
+      assert(wrap, "wizAskText appended to root");
+      const input = wrap.querySelector("#wizAskTextInput");
+      assert(input, "input exists");
+      input.value = "   確定チャンネル名   ";
+      wrap.dispatchEvent({ type: "keydown", key: "Enter" });
+      const res = await p;
+      assert.strictEqual(res, "確定チャンネル名", "returns trimmed channel name");
+    }
+
+    // 2) 空文字で Enter → インラインエラー表示、ダイアログは維持
+    {
+      let resolved = false;
+      const p = env.t.askText({ title: "チャンネル名" }).then(v => { resolved = true; return v; });
+      const wrap = env.elements["wizardRoot"].children.find(c => c.id === "wizAskText");
+      const input = wrap.querySelector("#wizAskTextInput");
+      const err = wrap.querySelector("#wizAskTextError");
+      input.value = "     ";
+      wrap.dispatchEvent({ type: "keydown", key: "Enter" });
+      await new Promise(r => setTimeout(r, 10));
+      assert.strictEqual(resolved, false, "dialog must not resolve on empty input");
+      assert.strictEqual(err.classList.contains("hidden"), false, "error element visible");
+      assert.strictEqual(err.textContent, "チャンネル名を入力してください");
+
+      // その後 Escape で閉じる
+      wrap.dispatchEvent({ type: "keydown", key: "Escape" });
+      const res = await p;
+      assert.strictEqual(res, null, "resolves to null on Escape");
+    }
+
+    // 3) 日本語IME変換中の Enter（isComposing / keyCode 229）では確定しない
+    {
+      let resolved = false;
+      const p = env.t.askText({ title: "チャンネル名" }).then(v => { resolved = true; return v; });
+      const wrap = env.elements["wizardRoot"].children.find(c => c.id === "wizAskText");
+      const input = wrap.querySelector("#wizAskTextInput");
+      input.value = "まほうしょうじょ";
+      // IME 変換中の Enter (isComposing: true)
+      wrap.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+      await new Promise(r => setTimeout(r, 10));
+      assert.strictEqual(resolved, false, "must NOT submit on Enter when isComposing is true");
+
+      // IME 変換中の Enter (keyCode: 229)
+      wrap.dispatchEvent({ type: "keydown", key: "Enter", keyCode: 229 });
+      await new Promise(r => setTimeout(r, 10));
+      assert.strictEqual(resolved, false, "must NOT submit on Enter when keyCode is 229");
+
+      // compositionend 後の本確定 Enter
+      input.dispatchEvent({ type: "compositionend" });
+      input.value = "魔法少女";
+      wrap.dispatchEvent({ type: "keydown", key: "Enter", isComposing: false });
+      const res = await p;
+      assert.strictEqual(res, "魔法少女", "submits only on real Enter after composition");
+    }
+
+    // 4) キャンセルボタンクリックで null
+    {
+      const p = env.t.askText({ title: "チャンネル名" });
+      const wrap = env.elements["wizardRoot"].children.find(c => c.id === "wizAskText");
+      const cancelBtn = wrap.querySelector(".wizard-confirm-box").children.find(c => c.dataset?.choice === "cancel");
+      assert(cancelBtn, "cancel button found");
+      wrap.dispatchEvent({ type: "click", target: cancelBtn, preventDefault: () => {} });
+      const res = await p;
+      assert.strictEqual(res, null, "returns null on cancel button click");
+    }
+
+    // 5) 背景（backdrop）クリックで null
+    {
+      const p = env.t.askText({ title: "チャンネル名" });
+      const wrap = env.elements["wizardRoot"].children.find(c => c.id === "wizAskText");
+      const backdrop = wrap.children.find(c => c.classList.contains("wizard-confirm-backdrop"));
+      assert(backdrop, "backdrop found");
+      wrap.dispatchEvent({ type: "click", target: backdrop, preventDefault: () => {} });
+      const res = await p;
+      assert.strictEqual(res, null, "returns null on backdrop click");
+    }
   });
 
   console.log(`\n========================================`);
