@@ -906,8 +906,9 @@ footer > * { pointer-events: auto; }
 footer > .foot-bar label.ide-model,
 footer > .foot-bar .foot-model-sub-row { display: none !important; }
 /* 中身（思考の深さ）が無いときは行ごと消す。Antigravity はモデル名に思考が入っているので出ない */
-/* 中身（思考の深さ）は設定側へ集約したので、モバイルのフッターには何も出さない */
-#footBar:not(:has(#footThinkingSection)) { display: none !important; }
+/* 中身（思考の深さ・モデル行）は出さない。
+   モデルは入力欄のチップ、思考の深さは設定 → AI・モデル・認証設定に集約した */
+footer > .foot-bar { display: none !important; }
 .model-badge {
   display: inline-flex;
   align-items: center;
@@ -4944,7 +4945,7 @@ button.rag-entry-pin.is-pinned {
   min-height: 1.4em;
 }
 
-/* FootBar & Sidebar Compact Thinking */
+/* Sidebar compact AI button */
 .side-ai-tool-btn {
   padding: 1px 6px;
   font-size: 11px;
