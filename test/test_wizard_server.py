@@ -13,6 +13,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 import server
+import rpchat.channel_wizard as channel_wizard
 
 
 TAGS_FIXTURE = {
@@ -496,7 +497,7 @@ class TestCreate(WizardTestBase):
     def test_opening_image_failure_does_not_fail_create(self):
         d = self.new_draft()
         self.with_compose(d)
-        with mock.patch.object(server, "wizard_enqueue_opening_image", side_effect=RuntimeError("boom")):
+        with mock.patch.object(channel_wizard, "wizard_enqueue_opening_image", side_effect=RuntimeError("boom")):
             r = server.wizard_create(d, {})
         self.assertTrue(r["ok"])
         self.assertFalse(r["opening_image"])
@@ -522,7 +523,7 @@ class TestJobsAndSweep(WizardTestBase):
     def test_compose_job_sets_composing(self):
         d = self.new_draft()
         # スレッドが即座に完了して status を戻さないようにブロックする
-        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.3)):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=lambda job: time.sleep(0.3)):
             job, _ = server.wizard_start_job(d, "compose")
             dd = server.wizard_load(d["id"])
             self.assertEqual(dd["status"], "composing")
@@ -727,7 +728,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
 
     def test_job_cancel_with_draft_id_clears_last_job_and_bumps_rev(self):
         d = self.new_draft()
-        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
             job, _ = server.wizard_start_job(d, "compose")
             orig_d = server.wizard_load(d["id"])
             self.assertEqual(orig_d["last_job"], job["job_id"])
@@ -752,7 +753,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
     def test_job_cancel_with_existing_setting_restores_ready_and_preview(self):
         d = self.new_draft()
         self.with_compose(d)
-        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
             job, _ = server.wizard_start_job(d, "compose")
             status, res = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"], "draft_id": d["id"]})
             self.assertEqual(status, 200)
@@ -765,7 +766,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
     def test_cancel_causes_old_rev_slots_to_return_409(self):
         d = self.new_draft()
         base_rev = d["rev"]
-        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
             job, _ = server.wizard_start_job(d, "compose")
 
         status, _ = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"], "draft_id": d["id"]})
@@ -782,7 +783,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
 
     def test_wizard_job_running_is_false_after_cancel(self):
         d = self.new_draft()
-        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
             job, _ = server.wizard_start_job(d, "compose")
             self.assertTrue(server.wizard_job_running(job["job_id"]))
             self.assertTrue(server.wizard_job_running(server.wizard_load(d["id"])["last_job"]))
@@ -828,7 +829,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
     def test_legacy_job_cancel_without_draft_id(self):
         d = self.new_draft()
         base_rev = d["rev"]
-        with mock.patch.object(server, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=lambda job: time.sleep(0.5)):
             job, _ = server.wizard_start_job(d, "compose")
 
         status, res = self.post("/api/wizard/job_cancel", {"job_id": job["job_id"]})
@@ -867,7 +868,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
                                 {"job_id": job["job_id"], "draft_id": d["id"]}, "POST")
             return orig_template_compose(draft)
 
-        with mock.patch.object(server, "wizard_template_compose", side_effect=hook):
+        with mock.patch.object(channel_wizard, "wizard_template_compose", side_effect=hook):
             with self.assertRaises(server.WizardError) as cm:
                 server.wizard_do_compose(job)
             self.assertIn(cm.exception.code, ("canceled", "stale"))
@@ -900,7 +901,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
                                 {"job_id": job["job_id"], "draft_id": d["id"]}, "POST")
             return orig_ai_enabled(draft)
 
-        with mock.patch.object(server, "wizard_ai_enabled", side_effect=hook):
+        with mock.patch.object(channel_wizard, "wizard_ai_enabled", side_effect=hook):
             with self.assertRaises(server.WizardError) as cm:
                 server.wizard_do_questions(job)
             self.assertIn(cm.exception.code, ("canceled", "stale"))
@@ -912,7 +913,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
     def test_run_canceled_error_handling(self):
         d = self.new_draft()
         # When wizard_do_compose raises WizardError(code="canceled"), run() sets status to "canceled", not "error"
-        with mock.patch.object(server, "wizard_do_compose", side_effect=server.WizardError("キャンセルしました", code="canceled")):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=server.WizardError("キャンセルしました", code="canceled")):
             job, _ = server.wizard_start_job(d, "compose")
             time.sleep(0.1)
             self.assertEqual(job["status"], "canceled")
@@ -925,7 +926,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
             j["status"] = "canceled"
             raise RuntimeError("unexpected boom after cancel")
 
-        with mock.patch.object(server, "wizard_do_compose", side_effect=fail_with_cancel):
+        with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=fail_with_cancel):
             job2, _ = server.wizard_start_job(d2, "compose")
             time.sleep(0.1)
             self.assertEqual(job2["status"], "canceled")
@@ -1074,7 +1075,7 @@ class TestWizardManualAndConfirm(WizardTestBase):
 
     def test_manual_busy(self):
         d = self.new_draft()
-        with mock.patch.object(server, "wizard_job_running", return_value=True):
+        with mock.patch.object(channel_wizard, "wizard_job_running", return_value=True):
             d["last_job"] = "wj_testbusy"
             server.wizard_save(d)
             status, res = self.post("/api/wizard/manual", {
@@ -1231,7 +1232,7 @@ class TestWizardBoostFixes(WizardTestBase):
         d["last_job"] = job["job_id"]
         server.wizard_save(d, bump=False)
 
-        with mock.patch.object(server, "wizard_generate", side_effect=server.WizardError("AI error", code="ai_error")):
+        with mock.patch.object(channel_wizard, "wizard_generate", side_effect=server.WizardError("AI error", code="ai_error")):
             with self.assertRaises(server.WizardError) as cm:
                 server.wizard_do_compose(job)
             self.assertIn("AI error", str(cm.exception))
@@ -1246,7 +1247,7 @@ class TestWizardBoostFixes(WizardTestBase):
         d["last_job"] = job["job_id"]
         server.wizard_save(d, bump=False)
 
-        with mock.patch.object(server, "wizard_generate", side_effect=server.WizardError("429 Quota exhausted", code="quota")):
+        with mock.patch.object(channel_wizard, "wizard_generate", side_effect=server.WizardError("429 Quota exhausted", code="quota")):
             with self.assertRaises(server.WizardError) as cm:
                 server.wizard_do_questions(job)
             self.assertIn("429", str(cm.exception))
@@ -1257,7 +1258,7 @@ class TestWizardBoostFixes(WizardTestBase):
         d["model"] = {"provider": "google", "model": "gemini-3.8-flash", "ai_enabled": True}
         server.wizard_save(d)
 
-        with mock.patch.object(server, "wizard_generate", side_effect=server.WizardError("429 Quota exhausted", code="quota")):
+        with mock.patch.object(channel_wizard, "wizard_generate", side_effect=server.WizardError("429 Quota exhausted", code="quota")):
             job, _ = server.wizard_start_job(d, "questions")
             for _ in range(50):
                 if job.get("status") in ("error", "done"):
