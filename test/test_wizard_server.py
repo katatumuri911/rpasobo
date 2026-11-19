@@ -387,6 +387,7 @@ class TestCompose(WizardTestBase):
 
     def test_compose_persists_auto_slots_on_disk_reload(self):
         d = self.new_draft()
+        d["model"]["ai_enabled"] = False
         # 必須スロットを未設定のまま compose ジョブを実行
         server.wizard_save(d)
         job = {"job_id": "wj_test_persist", "draft_id": d["id"],
@@ -442,7 +443,7 @@ class TestCreate(WizardTestBase):
         self.assertEqual(m["id"], r["opening_image_mid"])
         self.assertEqual(m["image"]["status"], "queued")
         self.assertTrue(m["image"]["opening"])
-        self.assertEqual(m["image"]["chars"], ["ヒロイン"])
+        self.assertEqual(m["image"]["chars"], ["お相手"])
         self.assertIn((r["sid"], m["id"]), list(server.queued_images))
 
     def test_create_skips_opening_image_when_off(self):
@@ -577,6 +578,126 @@ class TestJobsAndSweep(WizardTestBase):
             payload = server.wizard_models_payload("antigravity")
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["models"][0]["id"], "m1")
+
+
+class TestDraftResume(WizardTestBase):
+    """下書きの再開判定（「前回の続きから再開しますか？」）のエッジケース。"""
+
+    def make_base(self, title="元のチャンネル"):
+        return server.create_session({"title": title, "user_name": "先生"})["id"]
+
+    def put_updated(self, wid, when):
+        d = server.wizard_load(wid)
+        d["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
+        server.write_json(server.wizard_path(wid), d)
+
+    def test_base_choice_alone_is_not_resumed(self):
+        # 1/7 を選んだだけ（step="idea" になる）では再開確認を出さない
+        sid = self.make_base()
+        r = server.wizard_start({"base_sid": sid})
+        d = server.wizard_load(r["draft"]["id"])
+        server.wizard_set_base(d, sid, True)
+        server.wizard_save(d)
+        dd = server.wizard_load(d["id"])
+        self.assertEqual(dd["step"], "idea")
+        self.assertFalse(server.wizard_draft_has_input(dd))
+        r2 = server.wizard_start({"base_sid": sid})
+        self.assertFalse(r2["resumed"])
+        self.assertEqual(r2["draft"]["id"], d["id"])
+
+    def test_auto_placeholder_is_not_input(self):
+        d = self.new_draft()
+        server.wslot_set_auto(d, "rough_idea")
+        server.wizard_save(d)
+        self.assertFalse(server.wizard_draft_has_input(server.wizard_load(d["id"])))
+        r = server.wizard_start({"base_sid": ""})
+        self.assertFalse(r["resumed"])
+
+    def test_user_slot_is_input(self):
+        d = self.new_draft()
+        server.wslot_set(d, "rough_idea", "海辺の町", "user")
+        server.wizard_save(d)
+        self.assertTrue(server.wizard_draft_has_input(server.wizard_load(d["id"])))
+
+    def test_declined_draft_is_dismissed(self):
+        # 「新規作成」で断った下書きは退避され、次回以降たずねられない
+        sid = self.make_base()
+        d = server.wizard_load(server.wizard_start({"base_sid": sid})["draft"]["id"])
+        server.wizard_set_base(d, sid, True)
+        server.wslot_set(d, "rough_idea", "古い話", "user")
+        server.wizard_save(d)
+        r2 = server.wizard_start({"base_sid": sid, "force_new": True, "dismiss_id": d["id"]})
+        self.assertNotEqual(r2["draft"]["id"], d["id"])
+        self.assertEqual(server.wizard_load(d["id"])["status"], "dismissed")
+        r3 = server.wizard_start({"base_sid": sid})
+        self.assertFalse(r3["resumed"])
+        self.assertNotEqual(r3["draft"]["id"], d["id"])
+
+    def test_dismiss_keeps_created_draft(self):
+        sid = self.make_base()
+        d = server.wizard_load(server.wizard_start({"base_sid": sid})["draft"]["id"])
+        d["status"] = "created"
+        d["created_sid"] = sid
+        server.wizard_save(d)
+        server.wizard_start({"base_sid": sid, "force_new": True, "dismiss_id": d["id"]})
+        self.assertEqual(server.wizard_load(d["id"])["status"], "created")
+
+    def test_start_prefers_draft_with_input(self):
+        # 空の新しい下書きに隠されて、内容のある下書きが再開できなくなるのを防ぐ
+        sid = self.make_base()
+        old = server.wizard_start({"base_sid": sid})["draft"]["id"]
+        d = server.wizard_load(old)
+        server.wslot_set(d, "rough_idea", "残す話", "user")
+        server.wizard_save(d)
+        time.sleep(1.1)
+        server.wizard_start({"base_sid": sid, "force_new": True})
+        r = server.wizard_start({"base_sid": sid})
+        self.assertTrue(r["resumed"])
+        self.assertEqual(r["draft"]["id"], old)
+
+    def test_ids_sorted_breaks_tie_by_mtime(self):
+        # updated が秒単位で同じでも、最後に更新された下書きが先に来る
+        d1 = self.new_draft()
+        d2 = self.new_draft()
+        same = "2026-01-01T00:00:00"
+        for d in (d1, d2):
+            raw = server.wizard_load(d["id"])
+            raw["updated"] = same
+            server.write_json(server.wizard_path(d["id"]), raw)
+        old_t = time.time() - 100
+        os.utime(server.wizard_path(d1["id"]), (old_t, old_t))
+        ids = [wid for wid, _ in server.wizard_ids_sorted()]
+        self.assertEqual(ids[0], d2["id"])
+        self.assertEqual(ids[1], d1["id"])
+
+    def test_sweep_keeps_draft_with_input(self):
+        # 空の下書きが溜まっても、内容のある下書きは消さない
+        keep = self.new_draft()
+        server.wslot_set(keep, "rough_idea", "残す話", "user")
+        server.wizard_save(keep)
+        base_time = time.time() - 7200
+        self.put_updated(keep["id"], base_time)
+        for i in range(server.WIZARD_DRAFT_LIMIT + 2):
+            d = self.new_draft()
+            self.put_updated(d["id"], base_time + 10 + i)
+        server.wizard_sweep()
+        self.assertTrue(os.path.exists(server.wizard_path(keep["id"])))
+        self.assertLessEqual(len(server.wizard_ids()), server.WIZARD_DRAFT_LIMIT)
+
+    def test_sweep_does_not_count_created_for_limit(self):
+        keep = self.new_draft()
+        server.wslot_set(keep, "rough_idea", "残す話", "user")
+        server.wizard_save(keep)
+        base_time = time.time() - 7200
+        self.put_updated(keep["id"], base_time)
+        for i in range(server.WIZARD_DRAFT_LIMIT + 2):
+            d = self.new_draft()
+            d["status"] = "created"
+            d["created_sid"] = "sid_%02d" % i
+            server.wizard_save(d)
+            self.put_updated(d["id"], base_time + 10 + i)
+        server.wizard_sweep()
+        self.assertTrue(os.path.exists(server.wizard_path(keep["id"])))
 
 
 class FakeHandler:
@@ -1067,6 +1188,183 @@ class TestWizardManualAndConfirm(WizardTestBase):
         self.assertEqual(fresh["step"], "preview")
         self.assertTrue(fresh["compose"])
         self.assertEqual(fresh["compose"]["source"], "template")
+
+
+class TestWizardBoostFixes(WizardTestBase):
+    def test_partner_name_priority_and_askable_when_auto_empty(self):
+        self.assertEqual(server.ASKABLE_PRIORITY[0], "partner_name")
+        d = self.new_draft()
+        # partner_name unset by default
+        self.assertIn("partner_name", server.wizard_askable_slots(d))
+
+        # partner_name set to auto with empty string (e.g. user skipped on partner screen)
+        server.wslot_set_auto(d, "partner_name")
+        self.assertIn("partner_name", server.wizard_askable_slots(d))
+
+        # partner_name set with actual value
+        server.wslot_set(d, "partner_name", "アリス", "user")
+        self.assertNotIn("partner_name", server.wizard_askable_slots(d))
+
+    def test_sanitize_questions_permits_auto_empty_slot(self):
+        d = self.new_draft()
+        server.wslot_set_auto(d, "partner_name")
+        raw_qs = [{
+            "slot": "partner_name",
+            "text": "お相手の名前はどうしますか？",
+            "options": [
+                {"label": "アリス", "effects": {"partner_name": "アリス"}},
+                {"label": "ボブ", "effects": {"partner_name": "ボブ"}},
+                {"label": "チャーリー", "effects": {"partner_name": "チャーリー"}},
+            ]
+        }]
+        qs = server.wizard_sanitize_questions(d, raw_qs)
+        self.assertEqual(len(qs), 1)
+        self.assertEqual(qs[0]["slot"], "partner_name")
+
+    def test_compose_raises_on_ai_failure_when_ai_enabled(self):
+        d = self.new_draft()
+        d["model"] = {"provider": "google", "model": "invalid-model", "ai_enabled": True}
+        server.wizard_save(d)
+        job = {"job_id": "wj_test_fail", "draft_id": d["id"],
+               "kind": "compose", "base_rev": d["rev"], "cancel": False}
+        server.wizard_jobs[job["job_id"]] = job
+        d["last_job"] = job["job_id"]
+        server.wizard_save(d, bump=False)
+
+        with mock.patch.object(server, "wizard_generate", side_effect=server.WizardError("AI error", code="ai_error")):
+            with self.assertRaises(server.WizardError) as cm:
+                server.wizard_do_compose(job)
+            self.assertIn("AI error", str(cm.exception))
+
+    def test_questions_raises_on_ai_failure(self):
+        d = self.new_draft()
+        d["model"] = {"provider": "google", "model": "gemini-3.8-flash", "ai_enabled": True}
+        server.wizard_save(d)
+        job = {"job_id": "wj_q_fail", "draft_id": d["id"],
+               "kind": "questions", "base_rev": d["rev"], "cancel": False}
+        server.wizard_jobs[job["job_id"]] = job
+        d["last_job"] = job["job_id"]
+        server.wizard_save(d, bump=False)
+
+        with mock.patch.object(server, "wizard_generate", side_effect=server.WizardError("429 Quota exhausted", code="quota")):
+            with self.assertRaises(server.WizardError) as cm:
+                server.wizard_do_questions(job)
+            self.assertIn("429", str(cm.exception))
+
+    def test_questions_worker_rollbacks_step_to_tags_on_error(self):
+        d = self.new_draft()
+        d["step"] = "tags"
+        d["model"] = {"provider": "google", "model": "gemini-3.8-flash", "ai_enabled": True}
+        server.wizard_save(d)
+
+        with mock.patch.object(server, "wizard_generate", side_effect=server.WizardError("429 Quota exhausted", code="quota")):
+            job, _ = server.wizard_start_job(d, "questions")
+            for _ in range(50):
+                if job.get("status") in ("error", "done"):
+                    break
+                time.sleep(0.05)
+            self.assertEqual(job.get("status"), "error")
+            fresh = server.wizard_load(d["id"])
+            self.assertEqual(fresh["step"], "tags")
+
+    def test_compose_merges_warnings(self):
+        d = self.new_draft()
+        d["model"]["ai_enabled"] = False
+        d["warnings"] = ["既存の警告"]
+        server.wizard_save(d)
+        job = {"job_id": "wj_warn_merge", "draft_id": d["id"],
+               "kind": "compose", "base_rev": d["rev"], "cancel": False}
+        server.wizard_jobs[job["job_id"]] = job
+        d["last_job"] = job["job_id"]
+        server.wizard_save(d, bump=False)
+        server.wizard_do_compose(job)
+        fresh = server.wizard_load(d["id"])
+        self.assertIn("既存の警告", fresh["warnings"])
+        self.assertTrue(any("テンプレート" in w for w in fresh["warnings"]))
+
+    def test_template_compose_improvements(self):
+        d = self.new_draft()
+        server.wslot_set(d, "rough_idea", "放課後の屋上で秘密の相談をする", "user")
+        server.wslot_set(d, "work", "学園天国", "user")
+        # partner_name not set -> should be "学園天国のお相手"
+        # world not set -> should be "学園天国の世界"
+        # goal is default "おまかせ"
+        setting, warnings = server.wizard_template_compose(d)
+
+        self.assertEqual(setting["character"]["name"], "学園天国のお相手")
+        self.assertIn("放課後の屋上で秘密の相談をする", setting["summary"])
+        self.assertIn("放課後の屋上で秘密の相談をする", setting["scenario"])
+        self.assertIn("学園天国の世界", setting["summary"])
+        # Title should prevent duplication "学園天国 — 学園天国のお相手..."
+        self.assertNotIn("学園天国 — 学園天国のお相手", setting["title"])
+        self.assertIn("学園天国 — お相手との", setting["title"])
+        # Goal shouldn't be "おまかせに向かう"
+        self.assertNotIn("おまかせに向かう", setting["scenario"])
+        self.assertIn("二人の関係を深めていく", setting["scenario"])
+        # School context detection
+        self.assertEqual(setting["character"]["age"], "なし")
+        self.assertTrue(setting["chars"][0]["tags"])
+        self.assertIn("school uniform", setting["chars"][0]["tags"])
+        # wizard_normalize_chars does not drop character
+        norm_chars = server.wizard_normalize_chars(setting["chars"])
+        self.assertEqual(len(norm_chars), 1)
+
+    def test_build_final_setting_sanitization(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        # 1. Placeholder name omitted from 確定事項
+        final, _ = server.wizard_build_final_setting(d, {
+            "character": {"name": "お相手"},
+            "summary": "概要",
+        })
+        self.assertNotIn("- 相手の名前:", final["instructions"])
+        self.assertIn("- 目的・ゴール: 自由な対話と関係の進展", final["instructions"])
+
+        # 2. Specific name included
+        final2, _ = server.wizard_build_final_setting(d, {
+            "character": {"name": "美咲"},
+            "summary": "概要",
+        })
+        self.assertIn("- 相手の名前: 美咲", final2["instructions"])
+
+    def test_slots_lines_only_decided_excludes_empty_auto(self):
+        d = self.new_draft()
+        server.wslot_set_auto(d, "partner_name")
+        server.wslot_set_auto(d, "start_point")
+        decided = server.wizard_slots_lines(d, only_decided=True)
+        self.assertNotIn("相手の名前", decided)
+        self.assertNotIn("開始時点", decided)
+        all_lines = server.wizard_slots_lines(d, only_decided=False)
+        self.assertIn("相手の名前: （おまかせ） [auto]", all_lines)
+
+    def test_build_chars_fallback_no_heroine(self):
+        d1 = self.new_draft()
+        chars1 = server.wizard_build_chars(d1, [], "")
+        self.assertEqual(chars1[0]["name"], "お相手")
+        self.assertNotIn("ヒロイン", chars1[0]["name"])
+
+        d2 = self.new_draft()
+        server.wslot_set(d2, "work", "チェンソーマン", "user")
+        chars2 = server.wizard_build_chars(d2, [], "")
+        self.assertEqual(chars2[0]["name"], "チェンソーマンのお相手")
+
+    def test_sanitize_compose_fallback_no_heroine(self):
+        d = self.new_draft()
+        server.wslot_set(d, "work", "チェンソーマン", "user")
+        raw = {"title": "タイトル", "character": {"name": ""}}
+        setting, _ = server.wizard_sanitize_compose(d, raw)
+        self.assertEqual(setting["character"]["name"], "チェンソーマンのお相手")
+        self.assertNotIn("ヒロイン", setting["character"]["name"])
+
+    def test_create_merges_existing_warnings(self):
+        d = self.new_draft()
+        self.with_compose(d)
+        d["warnings"] = ["生成前の警告"]
+        server.wizard_save(d)
+        r = server.wizard_create(d, {}, use_template=True)
+        fresh = server.wizard_load(d["id"])
+        self.assertIn("生成前の警告", fresh["warnings"])
+        self.assertIn("生成前の警告", r["warnings"])
 
 
 if __name__ == "__main__":

@@ -29,6 +29,33 @@ import google_ai
 from memory_extract import *
 from decensor_engine import *
 from image_engine import *
+from rpchat.util import _as_int, _safe_int_env
+from rpchat.story_time import (
+    TIME_FIRST_TURNS,
+    TIME_EVERY_TURNS,
+    TIME_ESCALATE_AFTER,
+    TIME_FORCE_AFTER,
+    VALID_PERIODS,
+    PERIODS,
+    _PERIOD_ALIASES,
+    _safe_day,
+    apply_reported_time,
+    force_time_tick,
+    infer_initial_period,
+    normalize_period,
+    period_after,
+    period_index,
+    scene_is_showpiece,
+    state_prompt,
+    time_after_force_section,
+    time_asked,
+    time_cue_section,
+    time_question_section,
+    time_skip_cued,
+    time_tick_info,
+    time_tick_section,
+    time_transition_mentions,
+)
 memory_regen_state = {}  # sid -> {"running": bool, "current": int, "total": int, "status": str}
 memory_regen_meta = {}   # sid -> {"before": int, "reset": bool, "after": int}
 
@@ -377,36 +404,6 @@ RAG_RECALL_BUDGET_MAX = 800
 RAG_SECTION_WRAPPER_BYTES = 59  # len("\n--- 過去の記憶・約束（関連する記録） ---\n\n".encode("utf-8"))
 RAG_SECTION_WRAPPER_CHARS = 27  # len("\n--- 過去の記憶・約束（関連する記録） ---\n\n")
 RAG_SECTION_WRAPPER_NEWLINES = 3  # "\n--- 過去の記憶・約束（関連する記録） ---\n\n".count("\n")
-
-
-def _safe_int_env(key: str, default: int | None = None) -> int | None:
-    raw = os.environ.get(key)
-    if raw is None or not str(raw).strip():
-        return default
-    try:
-        return int(raw)
-    except (ValueError, TypeError):
-        try:
-            return int(float(raw))
-        except (ValueError, TypeError):
-            return default
-
-
-def _as_int(v, default=0):
-    try:
-        if isinstance(v, bool):
-            return int(v)
-        return int(float(v))
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
-# 作中時間の進行（サーバーが「番」、AIが「判断と描写」）
-TIME_FIRST_TURNS = max(1, _safe_int_env("RPCHAT_TIME_FIRST", 30) or 30)
-TIME_EVERY_TURNS = max(1, _safe_int_env("RPCHAT_TIME_EVERY", 20) or 20)
-_esc_env = _safe_int_env("RPCHAT_TIME_ESCALATE_AFTER", 3)
-TIME_ESCALATE_AFTER = max(0, 3 if _esc_env is None else _esc_env)
-TIME_FORCE_AFTER = max(1, _safe_int_env("RPCHAT_TIME_FORCE_AFTER", 10) or 10)
 
 
 def log_event(category, message, level="INFO"):
@@ -2331,343 +2328,6 @@ def backup(s, why):
     write_json(os.path.join(TRASH, f"{s['id']}_{int(time.time())}_{why}.json"), snap)
 
 
-VALID_PERIODS = ("早朝", "午前", "昼", "夕方", "夜", "深夜")
-PERIODS = VALID_PERIODS
-
-_PERIOD_ALIASES = {
-    "朝": "早朝", "あさ": "早朝", "朝方": "早朝", "明け方": "早朝", "夜明け": "早朝",
-    "午前": "午前",
-    "昼": "昼", "午後": "昼", "昼下がり": "昼", "昼過ぎ": "昼", "正午": "昼",
-    "夕方": "夕方", "夕暮れ": "夕方", "夕刻": "夕方", "日暮れ": "夕方", "放課後": "夕方",
-    "夜": "夜", "晩": "夜", "夜間": "夜",
-    "深夜": "深夜", "夜中": "深夜", "真夜中": "深夜", "未明": "深夜", "夜更け": "深夜",
-}
-
-
-def period_index(p):
-    s = _PERIOD_ALIASES.get(str(p or "").strip(), str(p or "").strip())
-    try:
-        return PERIODS.index(s)
-    except ValueError:
-        return -1
-
-
-def normalize_period(p):
-    idx = period_index(p)
-    return PERIODS[idx] if idx >= 0 else "午前"
-
-
-def _safe_day(v, default=1):
-    return max(1, _as_int(v, default))
-
-
-def period_after(day, idx, steps):
-    total = int(idx) + int(steps)
-    return max(1, int(day) + total // len(PERIODS)), total % len(PERIODS)
-
-
-def time_tick_info(st, total_turn):
-    st = st if isinstance(st, dict) else {}
-    total = max(0, _as_int(total_turn, 0))
-    # 未来のカーソルで時計が止まらないようにclamp
-    last = min(max(0, _as_int(st.get("time_last_turn"), 0)), total)
-    threshold = TIME_FIRST_TURNS if last <= 0 else TIME_EVERY_TURNS
-    overdue = total - last - threshold
-    return overdue >= 0, overdue, threshold
-
-
-_TIME_CUE_RE = re.compile(
-    r"(翌朝|翌日|次の日|明くる日|翌晩|翌週|翌月|数日後|数時間後|数週間後|何週間後|二日後|数ヶ月後|数カ月後|数か月後|何ヶ月後|何カ月後|何か月後|一週間後|"
-    r"三日後|朝まで|夜通し|一晩中|一晩|徹夜|寝落ち|おやすみ|寝よう|眠ろう|就寝|床に就|ベッドに入|眠りにつ|一眠り|仮眠|"
-    r"(?:(?:もう|そろそろ|今日は|今夜は|先に|お先に)寝る(?:よ|ね|わ|ぞ|ぜ|かな)?|寝る(?:よ|ね|わ|ぞ|ぜ|かな)|寝ます|眠る(?:よ|ね|わ))|"
-    r"目が覚め|起きたら|日が暮れ|日が昇|夜になった|朝になった|夕方になった|夜が明|朝が来|"
-    r"その夜|その日の夜|何日か後|時間を飛ば|時間が飛|気づけば|"
-    r"next morning|next day|the next day|morning came|night fell|hours later|days later)",
-    re.IGNORECASE,
-)
-_TIME_MENTION_RE = re.compile(
-    r"(翌朝|翌日|次の日|明くる日|翌晩|その夜|朝になった|夜になった|夕方になった|"
-    r"日が暮れ|日が昇|目が覚め|朝が来|夜が明け|一晩|夜通し|数日後|一週間後|"
-    r"next morning|next day|morning came|night fell)"
-)
-_TIME_ASK_RE = re.compile(r"(今何時|何時|時刻|時間帯|朝か夜|昼か夜)")
-
-
-def time_skip_cued(text):
-    return bool(_TIME_CUE_RE.search(str(text or "")))
-
-
-def time_asked(text):
-    return bool(_TIME_ASK_RE.search(str(text or "")))
-
-
-def time_transition_mentions(text):
-    m = _TIME_MENTION_RE.search(str(text or ""))
-    return m.group(1) if m else ""
-
-
-_SEX_ACTION_TAGS = {
-    "penetration", "vaginal penetration", "anal penetration", "sex", "vaginal", "anal",
-    "fellatio", "deepthroat", "blowjob", "irrumatio", "cunnilingus", "paizuri", "handjob",
-    "fingering", "anal fingering", "masturbation", "orgasm", "creampie", "anal creampie",
-    "cum in mouth", "cum on body", "squirting", "nipple stimulation",
-    "double penetration", "group sex", "intercourse", "vaginal intercourse", "anal intercourse",
-    "oral sex", "titfuck", "footjob", "tribadism", "scissoring", "pegging", "face sitting", "facesitting",
-}
-_COMBAT_ACTION_TAGS = {
-    "fighting", "combat", "battle", "attacking", "slashing", "shooting", "firing",
-    "aiming", "holding weapon", "spell casting", "casting spell", "punching", "kicking",
-    "sword fight", "dodging", "blocking",
-}
-_SEX_JA_RE = re.compile(
-    r"(挿入|結合|ピストン|抽送|フェラ|口淫|咥え|しゃぶ|クンニ|手コキ|パイズリ|"
-    r"絶頂|イッて|射精|中出し|種付け|突かれ|貫かれ|喘ぎ|自慰|オナニー|潮吹き|愛撫|交わり|絡み合|"
-    r"おまんこ|マンコ|アナル|ケツ|膣|尻穴|ペニス|チンポ|肉棒|"
-    r"行為中|セックス中|エッチ中)"
-)
-_COMBAT_RE = re.compile(
-    r"(戦闘|交戦|戦っている|戦って|斬り合|斬りかか|撃ち合|殴り合|銃撃|射撃|"
-    r"爆発|爆炎|詠唱|魔法を放|盾を構|剣を構|武器を構|対峙|敵[がとに]|魔物|モンスター|"
-    r"襲いかか|襲撃|悲鳴|絶叫|血しぶき|倒れ伏|追い詰め|逃亡|逃げ回|防御|避けた|かわした|防戦)"
-)
-
-_NO_PEN_SET = {"なし", "無し", "特になし", "無", "none", "null", "-", "0", "false", "[]"}
-
-
-def scene_is_showpiece(states):
-    """性的行為・戦闘の最中か。stateだけを見る（本文は見ない＝余韻を塞がない）。
-    body_fluids / equipped_items / ahegao も見ない（余韻を塞がないため）。"""
-    if isinstance(states, dict):
-        states = [states]
-    for ch in (states or []):
-        if not isinstance(ch, dict):
-            continue
-        pen_raw = ch.get("penetration")
-        if isinstance(pen_raw, (list, tuple)):
-            pen_raw = " ".join(str(x) for x in pen_raw)
-        pen = str(pen_raw or "").strip().lower()
-        if pen and pen not in _NO_PEN_SET:
-            return True
-
-        acts = ch.get("action")
-        if isinstance(acts, str):
-            acts = [acts]
-        elif isinstance(acts, dict):
-            acts = [acts]
-        elif not isinstance(acts, (list, tuple)):
-            acts = []
-        for a in acts:
-            for tok in re.split(r"[,/;]", str(a).lower()):
-                t = tok.strip()
-                if t in _SEX_ACTION_TAGS or t in _COMBAT_ACTION_TAGS:
-                    return True
-                words = set(t.split())
-                if words & {
-                    "penetration", "intercourse", "fellatio", "blowjob", "cunnilingus",
-                    "paizuri", "titfuck", "handjob", "footjob", "fingering", "masturbation",
-                    "deepthroat", "orgasm", "creampie", "squirting", "tribadism", "pegging",
-                    "fighting", "slashing", "shooting",
-                }:
-                    return True
-                if "sex" in words and not (words & {"unisex", "sexy", "homosexual"}):
-                    return True
-
-        sit = ch.get("situation")
-        if isinstance(sit, str):
-            sit = [sit]
-        elif isinstance(sit, dict):
-            sit = [sit]
-        elif not isinstance(sit, (list, tuple)):
-            sit = []
-        s_text = " ".join(str(x) for x in (list(acts) + list(sit)))
-        if _SEX_JA_RE.search(s_text) or _COMBAT_RE.search(s_text):
-            return True
-    return False
-
-
-def state_prompt(states):
-    if not states:
-        return ""
-    if isinstance(states, list):
-        return json.dumps(states, ensure_ascii=False)
-    return str(states)
-
-
-def apply_reported_time(st, rep_el, *, user_text, gate_states, total_turn):
-    """AIのelapsed_timeを検証。戻り値: (適用したか, 理由)"""
-    if not isinstance(rep_el, dict):
-        return False, "invalid_reported_time"
-    st = st if isinstance(st, dict) else {}
-    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
-    cur_day = _safe_day(cur.get("day"))
-    cur_idx = period_index(cur.get("period"))
-    if cur_idx < 0:
-        cur_idx = period_index("午前")
-
-    rep_idx = period_index(rep_el.get("period"))
-    if rep_idx < 0:
-        return False, "unknown_period"
-
-    cue = time_skip_cued(user_text)
-
-    raw_rep_day = _safe_day(rep_el.get("day"), default=cur_day) if rep_el.get("day") is not None else None
-    if raw_rep_day is None or raw_rep_day == cur_day:
-        if rep_idx < cur_idx:
-            if cue or (cur_idx == len(PERIODS) - 1 and rep_idx == 0):
-                default_day = cur_day + 1
-            else:
-                default_day = cur_day
-        elif rep_idx == cur_idx and cue and re.search(r"(翌日|次の日|明くる日|数日後|一週間後|next day|the next day)", str(user_text or "")):
-            default_day = cur_day + 1
-        else:
-            default_day = cur_day
-    else:
-        default_day = raw_rep_day
-
-    rep_day = _safe_day(default_day, default=cur_day)
-    step = (rep_day - cur_day) * len(PERIODS) + (rep_idx - cur_idx)
-    if step == 0:
-        return False, "hold"
-    if step < 0:
-        return False, "backwards"
-
-    due, _, _ = time_tick_info(st, total_turn)
-    if not due and not cue:
-        return False, "not_due"
-
-    # ★AIの自力ジャンプは時計を動かさない（+1の通常進行だけ許可）
-    if not cue and step > 1:
-        return False, "self_jump"
-    if not cue and scene_is_showpiece(gate_states):
-        return False, "showpiece"
-
-    step = min(step, 30 * len(PERIODS)) if cue else step
-    new_day, new_idx = period_after(cur_day, cur_idx, step)
-    st["elapsed_time"] = {"day": new_day, "period": PERIODS[new_idx]}
-    st["turns_in_period"] = 0
-    st["time_last_turn"] = max(0, _as_int(total_turn, 0))
-    st["time_silent_until_turn"] = 0
-    return True, ""
-
-
-def force_time_tick(st, total_turn):
-    """長期保留時の無言/事後描写用の進行。次ターンで silent か narrate を選ぶ"""
-    st = st if isinstance(st, dict) else {}
-    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
-    cur_day = _safe_day(cur.get("day"))
-    cur_idx = period_index(cur.get("period"))
-    if cur_idx < 0:
-        cur_idx = period_index("午前")
-    new_day, new_idx = period_after(cur_day, cur_idx, 1)
-    old = copy.deepcopy(st.get("elapsed_time"))
-    st["elapsed_time"] = {"day": new_day, "period": PERIODS[new_idx]}
-    st["turns_in_period"] = 0
-    st["time_last_turn"] = max(0, _as_int(total_turn, 0))
-    # 「強制の次ターン」マーカー。次ターンのsceneでsilent/narrateを決める
-    st["time_silent_until_turn"] = max(0, _as_int(total_turn, 0)) + 1
-    return old, st["elapsed_time"]
-
-
-def time_tick_section(st, overdue):
-    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
-    cur_day = _safe_day(cur.get("day"))
-    cur_idx = period_index(cur.get("period"))
-    if cur_idx < 0:
-        cur_idx = period_index("午前")
-    nd, ni = period_after(cur_day, cur_idx, 1)
-    target = json.dumps({"day": nd, "period": PERIODS[ni]}, ensure_ascii=False)
-    text = (
-        f"現在: {cur_day}日目・{PERIODS[cur_idx]} ／ 次: {nd}日目・{PERIODS[ni]}\n"
-        "・会話・移動・休息・場面転換の区切りなら、本文の早い段階で時間帯が進んだことを"
-        "地の文（光・空の色・気温・空気・音・体の感覚）で示す。\n"
-        "・進めるのは1段階だけ。日付を飛ばさない（「翌朝」「翌日」にしない）。\n"
-        "・時刻をセリフで言わない。「夕方になった」のような説明調も避ける。\n"
-        "・戦闘・性行為・絶頂・その直前の見せ場の最中なら進めない。"
-        "elapsed_time を省略し、本文でも時間に触れない。\n"
-        f"・進めたら elapsed_time に {target} を入れ、"
-        "state の background（day/night/evening/sunset）と place も現在に合わせる。\n"
-        "・AIメモに古い時刻があっても、この現在時刻を優先する。"
-    )
-    if overdue >= TIME_ESCALATE_AFTER:
-        text += f"\n・すでに{overdue}ターン保留。見せ場の最中でなければ、このターン必ず進める。"
-    return {"label": "【時間経過】今ターンが進める番", "text": text}
-
-
-def time_cue_section(st):
-    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
-    cur_day = _safe_day(cur.get("day"))
-    cur_idx = period_index(cur.get("period"))
-    if cur_idx < 0:
-        cur_idx = period_index("午前")
-    text = (
-        f"進行前: {cur_day}日目・{PERIODS[cur_idx]}\n"
-        "・ユーザー入力に時間経過（睡眠・翌朝・数日後など）の指示がある。\n"
-        "・指示に合わせて時間を進め、変更後の day と period（早朝/午前/昼/夕方/夜/深夜）を"
-        " elapsed_time に必ず出力する。\n"
-        "・state の background と place も新しい時間帯に合わせる。"
-    )
-    return {"label": "【時間経過】ユーザーの指示", "text": text}
-
-
-def time_after_force_section(st, is_showpiece):
-    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
-    cur_day = _safe_day(cur.get("day"))
-    cur_idx = period_index(cur.get("period"))
-    if cur_idx < 0:
-        cur_idx = period_index("午前")
-    period_name = PERIODS[cur_idx]
-    if is_showpiece:
-        return {
-            "label": "【作中時間】",
-            "text": (
-                f"現在: {cur_day}日目・{period_name}\n"
-                "・行為・戦闘の継続中。時間の経過には一切触れず、そのまま場面を続ける。\n"
-                "・state の background は現在の時間帯に合わせる。"
-            ),
-        }
-    return {
-        "label": "【時間経過】余韻・区切り",
-        "text": (
-            f"現在: {cur_day}日目・{period_name}（直前の場面のあいだに時間が進んでいる）\n"
-            "・行為や戦闘が落ち着いた流れなら、いつの間にかこの時間帯になっていたことを"
-            "地の文（窓の外の光・空気・静けさなど）で一言だけ自然に示す。\n"
-            "・まだ行為や戦闘を続けるなら時間には触れない。\n"
-            "・時計はすでに進んでいるため elapsed_time は出力不要。"
-            "state の background は現在の時間帯に合わせる。"
-        ),
-    }
-
-
-def time_question_section(st):
-    cur = st.get("elapsed_time") if isinstance(st.get("elapsed_time"), dict) else {}
-    cur_day = _safe_day(cur.get("day"))
-    cur_idx = period_index(cur.get("period"))
-    if cur_idx < 0:
-        cur_idx = period_index("午前")
-    return {
-        "label": "【現在の作中時間】",
-        "text": f"{cur_day}日目・{PERIODS[cur_idx]}（時間自体は進めない。elapsed_time は出力しない）",
-    }
-
-
-def infer_initial_period(text):
-    if not text:
-        return "午前"
-    if any(k in text for k in ("深夜", "真夜中", "ベッドの中", "草木も眠る", "午前2時", "午前3時", "未明")):
-        return "深夜"
-    if any(k in text for k in ("夜", "帰宅", "夕食", "晩御飯", "晩ごはん", "お風呂", "入浴", "夜道", "夜更かし")):
-        return "夜"
-    if any(k in text for k in ("放課後", "夕方", "黄昏", "夕焼け", "下校", "終礼", "夕暮れ")):
-        return "夕方"
-    if any(k in text for k in ("昼休み", "昼食", "お弁当", "ランチ", "正午", "お昼", "午後", "5時間目", "6時間目", "昼下がり")):
-        return "昼"
-    if any(k in text for k in ("早朝", "朝焼け", "夜明け", "目覚まし", "起床", "朝練", "朝の", "朝 ")):
-        return "早朝"
-    if any(k in text for k in ("朝", "登校", "ホームルーム", "午前", "1時間目", "始業")):
-        return "午前"
-    return "午前"
-
-
 def restore_latest_snapshot(s, preserve_total_turns=False):
     st = s.get("setting", {})
     msgs = s.get("messages", [])
@@ -2854,6 +2514,7 @@ WIZARD_JOB_KEEP = 3600
 
 REQUIRED_SLOTS = ["partner_type", "world", "tone", "relationship", "player_role"]
 ASKABLE_PRIORITY = [
+    "partner_name",
     "relationship", "start_point", "player_role",
     "world", "tone", "ending", "intensity", "goal",
 ]
@@ -3003,9 +2664,15 @@ def wizard_ids_sorted():
     for wid in wizard_ids():
         d = wizard_load(wid)
         if d:
-            out.append((wid, d))
-    out.sort(key=lambda x: x[1].get("updated") or "", reverse=True)
-    return out
+            # updated は秒単位なので、同じ秒に作った下書きの順序が不定になる。
+            # ファイルの更新時刻を第2キーにして「最後に触った下書き」を一意に決める。
+            try:
+                mt = os.path.getmtime(wizard_path(wid))
+            except OSError:
+                mt = 0.0
+            out.append((wid, d, mt))
+    out.sort(key=lambda x: (str(x[1].get("updated") or ""), x[2]), reverse=True)
+    return [(wid, d) for wid, d, _ in out]
 
 
 def wizard_sweep():
@@ -3018,25 +2685,46 @@ def wizard_sweep():
                 wizard_jobs.pop(jid, None)
     if not os.path.isdir(WIZARD_DIR):
         return 0
-    drafts = []
+    created = []
+    live = []
     for wid in wizard_ids():
         d = wizard_load(wid)
-        if d:
-            drafts.append((wid, d))
-    drafts.sort(key=lambda x: x[1].get("updated") or "")
+        if not d:
+            continue
+        (created if d.get("status") == "created" else live).append((wid, d))
+
+    def _age(d):
+        return time.time() - (_epoch(d.get("updated")) or 0)
+
+    def _evict_rank(d):
+        """先に消してよい順。空の下書き・ユーザーが断った下書き → 内容のある下書き。"""
+        if d.get("status") == "dismissed" or not wizard_draft_has_input(d):
+            return 0
+        return 1
+
+    drop = set()
+    for wid, d in live:
+        if _age(d) > WIZARD_DRAFT_TTL:
+            drop.add(wid)
+    # 件数上限は「生きている下書き」だけで数える（作成済みは TTL で消える）
+    rest = [(wid, d) for wid, d in live if wid not in drop]
+    rest.sort(key=lambda x: (_evict_rank(x[1]), str(x[1].get("updated") or "")))
+    over = len(rest) - WIZARD_DRAFT_LIMIT
+    for wid, _d in rest:
+        if over <= 0:
+            break
+        drop.add(wid)
+        over -= 1
+    for wid, d in created:
+        if _age(d) > WIZARD_CREATED_TTL:
+            drop.add(wid)
     removed = 0
-    for wid, d in drafts:
-        age = time.time() - (_epoch(d.get("updated")) or 0)
-        if d.get("status") == "created":
-            should = age > WIZARD_CREATED_TTL
-        else:
-            should = age > WIZARD_DRAFT_TTL or len(drafts) - removed > WIZARD_DRAFT_LIMIT
-        if should:
-            try:
-                os.remove(wizard_path(wid))
-                removed += 1
-            except OSError:
-                pass
+    for wid in drop:
+        try:
+            os.remove(wizard_path(wid))
+            removed += 1
+        except OSError:
+            pass
     return removed
 
 
@@ -3267,7 +2955,11 @@ def wizard_ready(d):
 
 def wizard_askable_slots(d):
     return [k for k in ASKABLE_PRIORITY
-            if k in WIZARD_SLOTS and wslot_source(d, k) == "unset"]
+            if k in WIZARD_SLOTS and (
+                wslot_source(d, k) == "unset" or (
+                    wslot_source(d, k) == "auto" and not wslot_value(d, k)
+                )
+            )]
 
 
 def wizard_recompute_derived(d):
@@ -3311,15 +3003,15 @@ def wizard_slots_lines(d, only_decided=False):
         if key not in WIZARD_SLOTS:
             continue
         src = wslot_source(d, key)
-        if only_decided and src == "unset":
-            continue
         val = wslot_value(d, key)
+        if only_decided and (src == "unset" or (src == "auto" and not val)):
+            continue
         if isinstance(val, list):
             shown = "、".join(str(x) for x in val)
         else:
             shown = str(val or "")
         if src == "auto":
-            shown = "（おまかせ）"
+            shown = shown or "（おまかせ）"
         elif not shown:
             shown = "（未設定）"
         lines.append(f"- {SLOT_LABEL[key]}: {shown} [{src}]")
@@ -3415,7 +3107,8 @@ def wizard_sanitize_questions(d, raw_questions):
         slot = str(q.get("slot") or "")
         if slot not in askable or slot in seen_slots:
             continue
-        if wslot_source(d, slot) != "unset":
+        src = wslot_source(d, slot)
+        if not (src == "unset" or (src == "auto" and not wslot_value(d, slot))):
             continue
         text = wizard_plain_text(q.get("text"), 120)
         if not text:
@@ -3613,12 +3306,40 @@ def wizard_enqueue_opening_image(s, setting, tags=None):
     return str(first["id"])
 
 
+def wizard_is_school_context(d):
+    """ドラフトの設定から学園・学校モノであるかを判定する。"""
+    if "world_school" in (d.get("selected_tags") or []):
+        return True
+    pattern = re.compile(
+        r"(学園|学校|高校|中学校|生徒|クラスメイト|同級生|後輩|先輩|部活|放課後|制服|校舎|教室|school|classroom)",
+        re.I
+    )
+    for k in ("rough_idea", "work", "world", "relationship", "player_role", "partner_name"):
+        val = wslot_value(d, k)
+        for s in wiz_list(val):
+            if s and pattern.search(str(s)):
+                return True
+    return False
+
+
 def wizard_template_compose(d):
     """AIが使えなくても必ず非空の設定を作る。"""
-    name = str(wslot_value(d, "partner_name") or "ヒロイン")[:40]
-    work = str(wslot_value(d, "work") or "")[:60]
+    is_school = wizard_is_school_context(d)
+
+    work = str(wslot_value(d, "work") or "").strip()[:60]
+    raw_name = str(wslot_value(d, "partner_name") or "").strip()
+    if raw_name:
+        name = raw_name[:40]
+    else:
+        name = f"{work}のお相手" if work else "お相手"
+
+    raw_world = "、".join(wiz_list(wslot_value(d, "world"))).strip()
+    if raw_world:
+        world = raw_world
+    else:
+        world = f"{work}の世界" if work else "現代"
+
     rel = "、".join(wiz_list(wslot_value(d, "relationship"))) or "特別な関係"
-    world = "、".join(wiz_list(wslot_value(d, "world"))) or "現代日本"
     tone = "、".join(wiz_list(wslot_value(d, "tone"))) or "穏やか"
     role = "、".join(wiz_list(wslot_value(d, "player_role"))) or "主人公"
     kinks = "、".join(wiz_list(wslot_value(d, "kinks"))) or "なし"
@@ -3628,7 +3349,11 @@ def wizard_template_compose(d):
     length = str(wizard_effective_value(d, "length") or "medium")
     player = str(wizard_effective_value(d, "player_name") or "あなた")
     player_profile = str(wizard_effective_value(d, "player_profile") or "")
-    goal = str(wizard_effective_value(d, "goal") or "おまかせ")
+
+    goal_raw = str(wizard_effective_value(d, "goal") or "おまかせ")
+    goal_summary = "自由な対話と関係の進展" if goal_raw == "おまかせ" else goal_raw
+    goal_action = "二人の関係を深めていく" if goal_raw == "おまかせ" else f"{goal_raw}に向かう"
+
     ending_label = {
         "happy": "ハッピーエンド",
         "bittersweet": "ビターエンド",
@@ -3637,33 +3362,58 @@ def wizard_template_compose(d):
     }.get(str(wizard_effective_value(d, "ending") or ""), "おまかせ")
     ng = "、".join(wizard_ng_labels(d)) or "なし"
 
-    title = (f"{work} — " if work else "") + rel
+    # タイトル生成（作品名の重複防止）
+    if work:
+        if name == f"{work}のお相手":
+            title = f"{work} — お相手との{rel}"
+        elif name.startswith(work):
+            stripped = name[len(work):].lstrip(" の")
+            title = f"{work} — {stripped or 'お相手'}との{rel}"
+        else:
+            title = f"{work} — {name}との{rel}"
+    else:
+        title = f"{name}との{rel}"
     title = title[:40] or "新しい物語"
-    summary = (
+
+    # rough_idea の反映
+    rough_idea = str(wslot_value(d, "rough_idea") or "").strip()
+    idea_prefix = (rough_idea if rough_idea.endswith(("。", "！", "!", "？", "?", "\n")) else (rough_idea + "。")) if rough_idea else ""
+
+    summary_core = (
         f"{world}を舞台に、{name}との{rel}を描く物語。"
         f"あなたは{role}として、{start}の状況から関わっていく。"
-        f"目的は{goal}。雰囲気は{tone}。"
-    )[:300]
-    scenario = (
+        f"目的は{goal_summary}。雰囲気は{tone}。"
+    )
+    summary = f"{idea_prefix}{summary_core}"[:300] if idea_prefix else summary_core[:300]
+
+    scenario_core = (
         f"{world}。{name}はあなたの目の前にいる。"
         f"二人の関係は{rel}。あなたの立場は{role}。"
-        f"物語は{start}から始まり、{goal}に向かう。"
+        f"物語は{start}から始まり、{goal_action}。"
         f"結末は{ending_label}。{tone}空気の中で、{name}との距離が変わり始める。"
-    )[:2000]
+    )
+    scenario = f"{idea_prefix}{scenario_core}"[:2000] if idea_prefix else scenario_core[:2000]
+
     first = f"「……{name}です。よろしくね」\n{name}は少しだけ視線を逸らして、そう言った。"
     instructions = (
         f"あなたは日本語のインタラクティブ小説の語り手です。"
         f"視点は{pov}、文体は{style}、長さは{length}。"
         f"{name}の性格と口調を一貫させ、{tone}雰囲気を保つ。"
-        f"物語の目的・ゴール: {goal}。結末: {ending_label}。"
+        f"物語の目的・ゴール: {goal_summary}。結末: {ending_label}。"
         f"あなたの設定: {player_profile or 'おまかせ'}。"
         f"特殊要素: {kinks}。NG: {ng}。"
         f"全員18歳以上の成人として描写する。"
     )[:2000]
     chars = wizard_build_chars(d, [], name)
-    opening_image = wizard_opening_tags(d) or ["indoors", "morning", "looking at viewer"]
+    opening_image = wizard_opening_tags(d) or (
+        ["classroom", "morning", "looking at viewer"] if is_school else ["indoors", "morning", "looking at viewer"]
+    )
     warnings = ["AIを使わずにテンプレートで設定を生成しました。プレビューで調整してください。"]
     if not chars[0].get("tags"):
+        if is_school:
+            chars[0]["tags"] = ["1girl", "school uniform", "looking at viewer"]
+        else:
+            chars[0]["tags"] = ["1girl", "looking at viewer"]
         warnings.append("画像タグが空です。必要ならキャラプリセットを選んでください。")
     period = "午前"
     try:
@@ -3678,7 +3428,7 @@ def wizard_template_compose(d):
         "first_message": first,
         "character": {
             "name": name,
-            "age": "24",
+            "age": "なし" if is_school else "24",
             "profile": f"{name}。{rel}としてあなたの前に現れる。{tone}雰囲気を持つ。",
             "speech": f"「……{player}、どうする？」",
         },
@@ -3755,9 +3505,11 @@ def wizard_build_chars(d, raw_chars, name):
     else:
         tags = ai_tags
         src = "ai" if ai_tags else "template"
+    work = str(wslot_value(d, "work") or "").strip()[:60]
+    default_name = f"{work}のお相手" if work else "お相手"
     return [{
         "id": new_id(),
-        "name": wizard_plain_text(name or (preset or {}).get("name") or "ヒロイン", 40),
+        "name": wizard_plain_text(name or (preset or {}).get("name") or default_name, 40),
         "tags": tags,
         "source": src,
         "locked": src == "preset",
@@ -3775,11 +3527,13 @@ def wizard_normalize_chars(chars):
             continue
         locked = bool(c.get("locked"))
         src = str(c.get("source") or ("preset" if locked else "ai"))
-        if src == "preset" or locked:
-            # プリセットはユーザーが固定した「正」。服装・人数・品質タグも削らない。
+        if src in ("preset", "template") or locked:
+            # プリセットやテンプレートは固定の正。服装・人数・品質タグも削らない。
             tags = ", ".join(wizard_preset_tags(c))
         else:
             tags = ", ".join(wizard_clean_tags(c.get("tags")))
+            if not tags:
+                tags = ", ".join(wizard_preset_tags(c))
         if not tags:
             continue
         out.append({
@@ -3827,7 +3581,9 @@ def wizard_sanitize_compose(d, raw):
     ch = raw.get("character")
     if not isinstance(ch, dict):
         ch = {}
-    name = wizard_plain_text(ch.get("name"), 40) or str(wslot_value(d, "partner_name") or "ヒロイン")
+    work = str(wslot_value(d, "work") or "").strip()[:60]
+    default_name = f"{work}のお相手" if work else "お相手"
+    name = wizard_plain_text(ch.get("name"), 40) or str(wslot_value(d, "partner_name") or default_name)
     age = wizard_plain_text(ch.get("age"), 10) or "24"
     aw = wizard_age_warning(age)
     if aw:
@@ -3955,14 +3711,18 @@ def wizard_build_final_setting(d, overrides=None):
     # instructions はプレビューで編集されても、確定事項を必ず末尾に入れる
     base_instr = str(final.get("instructions") or "").strip()
     base_instr = re.sub(r"\n\n# 確定事項\n(?:- .*\n?)*", "", base_instr).strip()
-    facts = (
-        "\n\n# 確定事項\n"
-        f"- 相手の名前: {name}\n"
-        f"- あなたの名前: {user_name}\n"
-        f"- あらすじ: {final.get('summary', '')}\n"
-        f"- 目的・ゴール: {wizard_effective_value(d, 'goal') or 'おまかせ'}\n"
-        f"- NG: {'、'.join(wizard_ng_labels(d)) or 'なし'}"
-    )
+    facts_lines = ["\n\n# 確定事項"]
+    is_placeholder_name = (not name) or name in ("ヒロイン", "お相手") or name.endswith("のお相手")
+    if not is_placeholder_name:
+        facts_lines.append(f"- 相手の名前: {name}")
+    facts_lines.append(f"- あなたの名前: {user_name}")
+    facts_lines.append(f"- あらすじ: {final.get('summary', '')}")
+    goal_val = wizard_effective_value(d, "goal") or "おまかせ"
+    if goal_val == "おまかせ":
+        goal_val = "自由な対話と関係の進展"
+    facts_lines.append(f"- 目的・ゴール: {goal_val}")
+    facts_lines.append(f"- NG: {'、'.join(wizard_ng_labels(d)) or 'なし'}")
+    facts = "\n".join(facts_lines)
     # 確定事項が長い instructions の末尾切れで消えないよう、facts の分を先に確保する
     final["instructions"] = (base_instr[:max(0, 2000 - len(facts))] + facts)[:2000]
 
@@ -4290,6 +4050,12 @@ def wizard_start_job(draft, kind, expected_rev=None):
                         dd["status"] = "ready" if has else "interview"
                         dd["step"] = "preview" if has else "tags"
                         wizard_save(dd, bump=False)
+            elif j.get("kind") == "questions" and j.get("status") == "error":
+                with wizard_lock:
+                    dd = wizard_load(j["draft_id"])
+                    if dd:
+                        dd["step"] = "tags"
+                        wizard_save(dd, bump=False)
 
     threading.Thread(target=run, daemon=True).start()
     return job, public
@@ -4337,17 +4103,7 @@ def wizard_do_questions(job):
     except WizardError as e:
         if job.get("cancel") or job.get("status") == "canceled":
             raise WizardError("キャンセルしました", code="canceled")
-        if e.code in ("stale", "canceled"):
-            raise
-        qs = []
-        with wizard_lock:
-            d = wizard_load(job["draft_id"])
-            _wiz_job_recheck(job, d)
-            d.setdefault("warnings", []).append(f"AI質問を取得できませんでした: {e}")
-            d["done_questions"] = True
-            d["status"] = "ready" if wizard_ready(d) else "interview"
-            wizard_save(d)
-        return {"draft": wizard_public(d, True), "questions": [], "done": True}
+        raise
 
     with wizard_lock:
         d = wizard_load(job["draft_id"])
@@ -4396,13 +4152,14 @@ def wizard_do_compose(job):
             d["status"] = "ready"
             d["step"] = "preview"
             d["done_questions"] = True
-            d["warnings"] = list(warnings)
+            d["warnings"] = list(dict.fromkeys((d.get("warnings") or []) + list(warnings)))
             wizard_save(d)
             pub = wizard_public(d, True)
         return {"draft": pub}
 
     setting = None
     cmeta = None
+    last_error = None
     model = copy.deepcopy(d.get("model") or {})
     for attempt in (1, 2):
         with wizard_lock:
@@ -4428,6 +4185,7 @@ def wizard_do_compose(job):
             setting = candidate
             break
         except WizardError as e:
+            last_error = e
             if job.get("cancel") or job.get("status") == "canceled":
                 raise WizardError("キャンセルしました", code="canceled")
             if e.code in ("stale", "canceled"):
@@ -4441,6 +4199,8 @@ def wizard_do_compose(job):
         raise WizardError("キャンセルしました", code="canceled")
 
     if setting is None:
+        if wizard_ai_enabled(d):
+            raise (last_error or WizardError("AIによる設定生成に失敗しました"))
         setting, warnings = wizard_template_compose(d)
         cmeta = {"source": "template", "warnings": warnings, "title_alternatives": []}
     cmeta = dict(cmeta or {})
@@ -4455,7 +4215,7 @@ def wizard_do_compose(job):
         d["status"] = "ready"
         d["step"] = "preview"
         d["done_questions"] = True
-        d["warnings"] = list(cmeta.get("warnings") or [])
+        d["warnings"] = list(dict.fromkeys((d.get("warnings") or []) + list(cmeta.get("warnings") or [])))
         wizard_save(d)
         pub = wizard_public(d, True)
     return {"draft": pub}
@@ -4861,7 +4621,7 @@ def _wizard_create_locked(d, overrides, use_template=False):
         }
         d["compose_stale"] = False
         d["status"] = "ready"
-        d["warnings"] = list(warnings)
+        d["warnings"] = list(dict.fromkeys((d.get("warnings") or []) + list(warnings)))
         wizard_save(d)
 
     comp = d.get("compose") or {}
@@ -4871,6 +4631,7 @@ def _wizard_create_locked(d, overrides, use_template=False):
         opening_tags = wizard_opening_tags(d)
 
     final, warnings = wizard_build_final_setting(d, overrides)
+    warnings = list(dict.fromkeys((d.get("warnings") or []) + list(warnings)))
     s = create_session(final)
     sid = s.get("id")
     if not sid:
@@ -4976,7 +4737,7 @@ def wizard_manual_create(d, body):
             fresh["created_title"] = title
             fresh["step"] = "preview"
             fresh["updated"] = now()
-            fresh["warnings"] = list(warnings)
+            fresh["warnings"] = list(dict.fromkeys((fresh.get("warnings") or []) + list(warnings)))
             wizard_save(fresh)
             pub = wizard_public(fresh, True)
 
@@ -5140,15 +4901,28 @@ def wizard_draft_from_request(body):
     return d
 
 
+def _wizard_slot_filled(v):
+    """スロットが「入力済み」か。AI 待ちの空プレースホルダ（auto + 空）は入力とみなさない。"""
+    if not isinstance(v, dict):
+        return bool(v)
+    if str(v.get("source") or "") in ("user", "locked"):
+        return True
+    val = v.get("value")
+    return val not in (None, "", [])
+
+
 def wizard_draft_has_input(d):
     """ユーザーが何か進めた下書きか。
 
     何も入力していない下書きで「前回の続きから再開しますか？」を出さないための判定。
     （保存せずに閉じただけの下書きは、次に開いたとき黙って使い回す）
+
+    step は「どの画面を見ていたか」の UI 状態で、1/7 を選んだだけで step="idea" に
+    なるため、入力の有無には数えない（数えると空の下書きでも毎回聞いてしまう）。
     """
     if not d:
         return False
-    if d.get("slots"):
+    if any(_wizard_slot_filled(v) for v in (d.get("slots") or {}).values()):
         return True
     if d.get("questions") or d.get("asked_question_ids") or d.get("asked_slots"):
         return True
@@ -5158,8 +4932,6 @@ def wizard_draft_has_input(d):
         return True
     if d.get("selected_tags") or d.get("custom_ng"):
         return True
-    if str(d.get("step") or "base") != "base":
-        return True
     if str(d.get("last_job") or "") and wizard_job_running(d.get("last_job")):
         return True
     return False
@@ -5168,6 +4940,7 @@ def wizard_draft_has_input(d):
 def wizard_start(body):
     force = bool((body or {}).get("force_new"))
     base_sid = str((body or {}).get("base_sid") or "")
+    dismiss_id = str((body or {}).get("dismiss_id") or "")
     base = None
     if base_sid:
         try:
@@ -5175,29 +4948,43 @@ def wizard_start(body):
         except Exception:
             base = None
 
-    if not force:
-        for wid, d in wizard_ids_sorted():
-            if d.get("base_sid", "") != base_sid:
-                continue
-            if d.get("status") not in ("interview", "composing", "ready"):
-                continue
-            if d.get("status") == "composing" and not wizard_job_running(d.get("last_job")):
-                has = bool((d.get("compose") or {}).get("setting"))
-                d["status"] = "ready" if has else "interview"
-                d["step"] = "preview" if has else "tags"
-                wizard_save(d, bump=False)
-            if not wizard_draft_has_input(d):
-                # 入力が何もない下書きは「再開しますか？」を出さずにそのまま使い回す
-                return {"ok": True, "resumed": False, "draft": wizard_public(d, True)}
-            return {"ok": True, "resumed": True, "draft": wizard_public(d, True)}
+    # 再開候補の探索と新規作成を同じロック内で行う（2タブ同時オープンで
+    # 空の下書きが二重に作られるのを防ぐ）。
+    with wizard_lock:
+        if not force:
+            matches = []
+            for wid, d in wizard_ids_sorted():
+                if d.get("base_sid", "") != base_sid:
+                    continue
+                if d.get("status") not in ("interview", "composing", "ready"):
+                    continue
+                if d.get("status") == "composing" and not wizard_job_running(d.get("last_job")):
+                    has = bool((d.get("compose") or {}).get("setting"))
+                    d["status"] = "ready" if has else "interview"
+                    d["step"] = "preview" if has else "tags"
+                    wizard_save(d, bump=False)
+                matches.append((wid, d))
+            # 内容のある下書きがあれば（新しい順で最初の1件）再開をたずねる
+            for wid, d in matches:
+                if wizard_draft_has_input(d):
+                    return {"ok": True, "resumed": True, "draft": wizard_public(d, True)}
+            # 入力が何もない下書きは「再開しますか？」を出さずにそのまま使い回す
+            if matches:
+                return {"ok": True, "resumed": False, "draft": wizard_public(matches[0][1], True)}
 
-    d = wizard_new_draft(base, wizard_model_from_app())
-    d["base_sid"] = base_sid
-    d["base_title"] = str((base or {}).get("title") or "")
-    d["inherit_base"] = bool(base)
-    wizard_save(d)
-    wizard_sweep()
-    return {"ok": True, "resumed": False, "draft": wizard_public(d, True)}
+        d = wizard_new_draft(base, wizard_model_from_app())
+        d["base_sid"] = base_sid
+        d["base_title"] = str((base or {}).get("title") or "")
+        d["inherit_base"] = bool(base)
+        wizard_save(d)
+        if dismiss_id and WIZARD_ID_RE.match(dismiss_id):
+            old = wizard_load(dismiss_id)
+            # 「新規作成」を選んだ下書きは再び尋ねないように退避する（削除はしない）
+            if old and old.get("status") != "created" and not wizard_job_running(old.get("last_job")):
+                old["status"] = "dismissed"
+                wizard_save(old, bump=False)
+        wizard_sweep()
+        return {"ok": True, "resumed": False, "draft": wizard_public(d, True)}
 
 
 @contextmanager

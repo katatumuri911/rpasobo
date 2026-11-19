@@ -1381,6 +1381,86 @@ async function main() {
     assert.strictEqual(footBar.classList.contains("hidden"), false, "footBar is NOT hidden when back is visible");
   });
 
+  // 10b. 下書きの再開判定：step は UI 状態なので「入力あり」に数えない
+  test("draftHasInput: step だけでは再開確認を出さない（1/7 を選んだだけの下書き）", () => {
+    const env = createWizardEnv();
+    assert.strictEqual(env.t.draftHasInput({ step: "idea", slots: {} }), false, "step=idea だけでは false");
+    assert.strictEqual(env.t.draftHasInput({
+      step: "partner",
+      slots: { rough_idea: { value: null, source: "auto" } },
+    }), false, "AI待ちの空スロットは入力とみなさない");
+    assert.strictEqual(env.t.draftHasInput({
+      step: "idea",
+      slots: { rough_idea: { value: "海辺の町", source: "user" } },
+    }), true, "ユーザー入力のスロットは true");
+    assert.strictEqual(env.t.draftHasInput({ slots: { goal: { value: "", source: "unset" } } }), false, "unset は false");
+    assert.strictEqual(env.t.draftHasInput({ slots: {}, compose: { setting: {} } }), true, "compose は true");
+    assert.strictEqual(env.t.draftHasInput({ slots: {}, custom_ng: ["gore"] }), true, "custom_ng は true");
+  });
+
+  // 10c. 再開ダイアログで「何を再開するか」が分かる
+  test("draftSummary: 引き継ぎ元と画面番号を表示する", () => {
+    const env = createWizardEnv();
+    assert.strictEqual(
+      env.t.draftSummary({ inherit_base: true, base_title: "学園もの", step: "partner" }),
+      "「学園もの」の設定を引き継ぐ・4/7 相手"
+    );
+    assert.strictEqual(
+      env.t.draftSummary({ inherit_base: false, step: "idea" }),
+      "初期設定で作る・2/7 どんな話にしますか"
+    );
+    assert.strictEqual(
+      env.t.draftSummary({ inherit_base: true, base_title: "", step: "preview" }),
+      "設定を引き継ぐ・7/7 プレビュー"
+    );
+  });
+
+  // 10d. 「新規作成」を選んだら旧下書きを退避する（dismiss_id）
+  await testAsync("ensureDraft: 再開を断ると dismiss_id 付きで作り直し、旧下書きを再提示させない", async () => {
+    const env = createWizardEnv({
+      withDom: true,
+      apiHandler: async (path, data) => {
+        if (path !== "/api/wizard/start") return undefined;
+        if (data.force_new) {
+          return { ok: true, resumed: false, draft: { id: "wiz_new", rev: 1, step: "base", slots: {} } };
+        }
+        return { ok: true, resumed: true, draft: {
+          id: "wiz_old", rev: 4, step: "partner", inherit_base: true, base_title: "学園もの",
+          slots: { rough_idea: { value: "海辺", source: "user" } },
+        } };
+      },
+    });
+    const p = env.t.ensureDraft("s_test");
+    await new Promise(r => setTimeout(r, 10));
+    const wrap = env.elements["wizardRoot"].children.find(c => c.classList.contains("wizard-confirm"));
+    assert(wrap, "confirm dialog is shown for a draft with input");
+    assert(wrap._innerHTML.includes("「学園もの」の設定を引き継ぐ・4/7 相手の作りかけが残っています"),
+      "message shows what will be resumed");
+    const btn = new StubEl("", "button", null);
+    btn.dataset.choice = "new";
+    wrap.dispatchEvent({ type: "click", target: btn });
+    await p;
+    const forceCall = env.apiCalls.find(c => c.path === "/api/wizard/start" && c.data.force_new);
+    assert(forceCall, "force_new start is requested");
+    assert.strictEqual(forceCall.data.dismiss_id, "wiz_old", "old draft id is sent as dismiss_id");
+    assert.strictEqual(env.t.draft.id, "wiz_new", "new draft is used");
+  });
+
+  // 10e. 内容のない下書きは確認せず使い回す
+  await testAsync("ensureDraft: 内容のない下書きならダイアログを出さずに使い回す", async () => {
+    const env = createWizardEnv({
+      withDom: true,
+      apiHandler: async (path) => {
+        if (path !== "/api/wizard/start") return undefined;
+        return { ok: true, resumed: false, draft: { id: "wiz_empty", rev: 2, step: "idea", slots: {} } };
+      },
+    });
+    await env.t.ensureDraft("s_test");
+    const wrap = env.elements["wizardRoot"].children.find(c => c.classList.contains("wizard-confirm"));
+    assert(!wrap, "no dialog for an empty draft");
+    assert.strictEqual(env.t.draft.id, "wiz_empty");
+  });
+
   // 11. askText() がダイアログを返し、Esc/キャンセルで null（DOMスタブ環境では null）
   await testAsync("askText: DOMスタブ環境では null を返す", async () => {
     const env = createWizardEnv();
@@ -1471,6 +1551,84 @@ async function main() {
       const res = await p;
       assert.strictEqual(res, null, "returns null on backdrop click");
     }
+  });
+
+  console.log("\n=== [8] Step 6 エラーUI・モデル変更・ボタン検証 ===");
+
+  test("renderJobError: compose エラー画面に retry-compose, change-model, use-template が表示され q-finish は非表示", () => {
+    const env = createWizardEnv();
+    env.elements["wizardFoot"].innerHTML = '<button data-act="cancel-job">キャンセル</button>';
+    env.t.renderJobError({ error: "AIエラー" }, "compose");
+    const bodyHtml = env.elements["wizardBody"].innerHTML;
+    assert(bodyHtml.includes('data-act="retry-compose"'), "retry-compose exists");
+    assert(bodyHtml.includes('data-act="change-model"'), "change-model exists");
+    assert(bodyHtml.includes('data-act="use-template"'), "use-template exists");
+    assert(!bodyHtml.includes('data-act="q-finish"'), "q-finish must NOT exist for compose");
+    assert.strictEqual(env.elements["wizardFoot"].innerHTML, "", "footer is cleared on error");
+    assert.strictEqual(env.t.jobId, "", "jobId is cleared");
+  });
+
+  test("renderJobError: questions エラー画面に retry-questions, change-model, q-finish, use-template が表示される", () => {
+    const env = createWizardEnv();
+    env.elements["wizardFoot"].innerHTML = '<button data-act="cancel-job">キャンセル</button>';
+    env.t.renderJobError({ error: "質問AIエラー" }, "questions");
+    const bodyHtml = env.elements["wizardBody"].innerHTML;
+    assert(bodyHtml.includes('data-act="retry-questions"'), "retry-questions exists");
+    assert(bodyHtml.includes('data-act="change-model"'), "change-model exists");
+    assert(bodyHtml.includes('data-act="q-finish"'), "q-finish exists for questions");
+    assert(bodyHtml.includes('data-act="use-template"'), "use-template exists");
+    assert.strictEqual(env.elements["wizardFoot"].innerHTML, "", "footer is cleared on error");
+  });
+
+  test("onBodyClick: change-model ボタンのクリックで openModelEdit が実行され model 画面へ遷移する", () => {
+    const env = createWizardEnv();
+    env.t.screen = "creating";
+    env.t.navStack = ["tags", "creating"];
+    env.t.renderJobError({ error: "AIエラー" }, "compose");
+
+    const modal = env.elements["wizardRoot"];
+    const changeBtn = new StubEl("", "button", null);
+    changeBtn.dataset.act = "change-model";
+    modal.dispatchEvent({ type: "click", target: changeBtn, preventDefault: () => {} });
+
+    assert.strictEqual(env.t.screen, "model", "screen transitions to model");
+    assert.strictEqual(env.t.modelMode, "edit", "modelMode is set to edit");
+  });
+
+  test("init: #wizardModelChip は jobId が空のエラー停止中にクリック可能で openModelEdit を呼ぶ", () => {
+    const env = createWizardEnv();
+    env.t.screen = "creating";
+    env.t.jobId = ""; // エラー停止中
+    env.t.busy = false;
+    env.t.pending = false;
+
+    const chip = env.elements["wizardModelChip"];
+    chip.onclick();
+
+    assert.strictEqual(env.t.screen, "model", "clicking chip during error state transitions to model");
+    assert.strictEqual(env.t.modelMode, "edit", "modelMode is edit");
+  });
+
+  await testAsync("startJob: 開始時エラー発生で renderJobError が呼ばれ全ボタンが表示される", async () => {
+    const env = createWizardEnv({
+      apiHandler: async (path) => {
+        if (path === "/api/wizard/compose") {
+          return { ok: false, error: "429 枯渇エラー" };
+        }
+        return undefined;
+      },
+    });
+    env.t.draft = { id: "d_test", rev: 1 };
+    env.t.screen = "creating";
+    env.t.navStack = ["tags", "creating"];
+
+    await env.t.startJob("compose");
+
+    const bodyHtml = env.elements["wizardBody"].innerHTML;
+    assert(bodyHtml.includes("429 枯渇エラー"), "error message is displayed");
+    assert(bodyHtml.includes('data-act="change-model"'), "change-model exists on startJob error");
+    assert(bodyHtml.includes('data-act="use-template"'), "use-template exists on startJob error");
+    assert(bodyHtml.includes('data-act="retry-compose"'), "retry-compose exists on startJob error");
   });
 
   console.log(`\n========================================`);

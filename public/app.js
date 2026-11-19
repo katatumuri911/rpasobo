@@ -107,6 +107,7 @@ let ragMemRegenBefore = null;   // 一括再生成の開始時件数（進捗・
 let meta = { app: {} };
 let decensorInfo = null;  // 婉曲→直接の辞書（GET /api/decensor の結果）
 let ideSessions = [];
+let ideSessionsLoaded = false;  // 会話一覧を読み終えたか（未読み込みを「未待機」と誤解させない）
 let ideNewDir = "";  // 「新規会話」で作るフォルダ
 let sysFiles = [];
 let folderOpts = [];  // 登録フォルダごとの {folder, name, ok, files: [{label, path}], more}
@@ -474,7 +475,9 @@ function updateHeaderAndSideStatus() {
 }
 
 // モデルの切り替えは入力欄のお気に入りチップに移したので、footBar は常に footer に置く
-// （ドロワー下段とモデルシートへの移送は廃止。残っているのは Google/Vertex の思考の深さだけ）
+// （ドロワー下段とモデルシートへの移送は廃止。モデル行は CSS で非表示。
+//  思考の深さは設定 → AI・モデル・認証設定（ツールモーダル）に集約したので、
+//  モバイルのフッターには何も出さない）
 function syncFootBarPlacement() {
   const footBar = $("footBar");
   const footer = document.querySelector("footer");
@@ -1483,10 +1486,12 @@ async function loadIdeSessions() {
   try {
     const r = await checked("/api/ide/sessions");
     ideSessions = r.sessions || [];
+    ideSessionsLoaded = true;
     ideNewDir = r.new_dir || "";
     $("ideNew").title = `Antigravity に新しい会話を作って担当にする（フォルダ: ${ideNewDir}。何も送らない。最初の入力で送られる）`;
   } catch (e) {
     ideSessions = [];
+    ideSessionsLoaded = false;
     $("ideState").textContent = "IDEの会話一覧を読めません: " + e.message;
   }
   renderIde();
@@ -1581,6 +1586,68 @@ async function runMoves(pend, force) {
 
 let idePickTarget = "main";  // "main" | "choices"
 
+// 設定 → サポート → トラブルシューティング。会話の選び直し・分岐・解除・全量送信はここだけで行う（日常の画面には出さない）
+// 「目視で一覧を眺める」より、ここの診断情報をAIに貼る方が原因を早く特定できる
+function trblLine(id, fallbackTitle) {
+  if (!id) return '<span class="ide-off">担当なし（新規会話で作れます）</span>';
+  const cur = ideSessions.find((x) => x.id === id);
+  const name = cur?.title || fallbackTitle || "(無題)";
+  const ws = cur?.workspace ? " ・ " + esc(cur.workspace) : "";
+  const state = !ideSessionsLoaded
+    ? '<span class="muted">状態は未読み込み（この項目を開くと読み込みます）</span>'
+    : !cur
+      ? '<span class="ide-off">一覧に見つからない（削除された？）</span>'
+      : cur.waiting
+        ? '<span class="ide-on">● wait_input.py 待機中</span>'
+        : '<span class="ide-off">○ 未待機</span>';
+  const pk = cur?.poke
+    ? ` ・ 最後の合図 ${esc((cur.poke.ts || "").slice(11))}: <span class="${cur.poke.ok ? "ide-on" : "ide-off"}">${esc(cur.poke.msg)}</span>`
+    : "";
+  return `${esc(name)} <span class="muted">${esc(id)}${ws}</span> ${state}${pk}`;
+}
+function renderTroubleshooting() {
+  if (!state) return;
+  const st = state.setting || {};
+  const api = ["google", "vertex"].includes(st.ai_provider);
+  const main = $("trblMain");
+  if (main) {
+    main.innerHTML = api
+      ? '<span class="ide-off">APIプロバイダ（Google/Vertex）では Antigravity 連携を使いません</span>'
+      : trblLine(st.ide_session || "", st.ide_title);
+  }
+  const ch = $("trblChoices");
+  if (ch) ch.innerHTML = api ? "" : trblLine(st.choices_ide_session || "", st.choices_ide_title);
+  if ($("trblPokeMain")) $("trblPokeMain").disabled = !st.ide_session;
+  if ($("trblPokeChoices")) $("trblPokeChoices").disabled = !st.choices_ide_session;
+  if ($("trblForkMain")) $("trblForkMain").disabled = !st.ide_session;
+  if ($("trblClearMain")) $("trblClearMain").disabled = !st.ide_session;
+  if ($("trblClearChoices")) $("trblClearChoices").disabled = !st.choices_ide_session;
+}
+// AIに貼るための1枚。会話の一覧を人が読むより、これを渡して調べてもらう方が早い
+function troubleshootingText() {
+  const st = state?.setting || {};
+  const L = [];
+  const push = (id, label) => {
+    if (!id) { L.push(label + ": (なし)"); return; }
+    const c = ideSessions.find((x) => x.id === id);
+    L.push(label + ": " + id + (c?.title ? " " + c.title : "") + (c?.workspace ? " / " + c.workspace : ""));
+    L.push("  状態: " + (c ? (c.waiting ? "wait_input.py 待機中" : "未待機") : ideSessionsLoaded ? "一覧に見つからない" : "会話一覧を未読み込み")
+      + (c?.steps != null ? " / " + c.steps + " ステップ" : "")
+      + (c?.updated ? " / 更新 " + c.updated : ""));
+    if (c?.poke) L.push("  最後の合図: " + c.poke.ts + " " + (c.poke.ok ? "成功" : "失敗") + " " + c.poke.msg);
+  };
+  L.push("RP Image Chat 診断情報");
+  L.push("日時: " + new Date().toLocaleString("ja-JP"));
+  L.push("チャンネル: " + (st.title || "") + " / " + sid);
+  L.push("プロバイダ: " + (st.ai_provider || "antigravity") + " / 入力の渡し方: " + (st.input_mode || "diff"));
+  L.push("作業フォルダ: " + (st.ide_folder || "(既定)") + " / AGENTS.md: " + (st.agents_md ? "使う" : "使わない"));
+  L.push("8択: " + (st.suggest_choices === false ? "OFF" : "ON") + " / 送信モデル: " + (st.ide_model || "(会話と同じ)"));
+  push(st.ide_session || "", "本文担当");
+  push(st.choices_ide_session || "", "選択肢担当");
+  if (typeof navigator !== "undefined") L.push("画面: " + (navigator.userAgent || ""));
+  return L.join("\n");
+}
+
 function renderIde() {
   if (!state) return;
   const ide = state.setting?.ide_session || "";
@@ -1590,8 +1657,7 @@ function renderIde() {
     : state.setting.ide_auto
       ? "まだなし（Antigravity が起動していれば、数秒で新規会話が付きます。起動していなければ、起動したら付きます）"
       : "指定なし（--ide なしの wait_input.py が受け取る）";
-  $("ideClear").disabled = $("ideFork").disabled = $("ideRename").disabled = !ide;
-  $("idePokeNow").disabled = !ide;
+  $("ideRename").disabled = !ide;
 
   const choicesIde = state.setting?.choices_ide_session || "";
   const curChoices = ideSessions.find((x) => x.id === choicesIde);
@@ -1601,9 +1667,8 @@ function renderIde() {
       ? `${esc(curChoices?.title && curChoices.title !== "(無題)" ? curChoices.title : state.setting.choices_ide_title || "(無題)")} <span class="muted">${esc(choicesIde)}${curChoices?.workspace ? " ・ " + esc(curChoices.workspace) : ""}</span>`
       : "指定なし（メインの会話で順番に生成）";
   }
-  if ($("choicesIdeClear")) $("choicesIdeClear").disabled = !choicesIde;
   if ($("choicesIdeRename")) $("choicesIdeRename").disabled = !choicesIde;
-  if ($("choicesIdePokeNow")) $("choicesIdePokeNow").disabled = !choicesIde;
+  renderTroubleshooting();
   const choicesState = $("choicesIdeState");
   if (choicesState) {
     if (choicesIde) {
@@ -1623,8 +1688,10 @@ function renderIde() {
 
   renderModels();
   const pk = cur?.poke;
-  $("pokeState").innerHTML = ide && pk
-    ? `<span class="${pk.ok ? "ide-on" : "ide-off"}">最後の送信 ${esc(pk.ts.slice(11))}: ${esc(pk.msg)}</span>` : "";
+  if ($("pokeState")) {
+    $("pokeState").innerHTML = ide && pk
+      ? `<span class="${pk.ok ? "ide-on" : "ide-off"}">最後の送信 ${esc(pk.ts.slice(11))}: ${esc(pk.msg)}</span>` : "";
+  }
   if (!ide) {
     if (ideSessions.length) $("ideState").textContent = "";
     return;
@@ -1696,7 +1763,7 @@ function renderIdePicker() {
     const d = document.createElement("div");
     d.className = "ide-conv" + (x.id === ide ? " current" : "");
     d.innerHTML = `${x.steps ? '<button type="button" class="sub fork-btn" title="この会話を途中の発言から分岐する">分岐…</button>' : ""}
-      <button type="button" class="sub fork-btn rename-btn" title="この会話の名前を変える">名前…</button>
+      <button type="button" class="sub fork-btn rename-btn" title="この会話の名前を変える">名前を変更</button>
       <div class="t">${x.waiting ? "● " : ""}${x.id === ide ? "✔ " : ""}${esc(x.title)}</div>
       <div class="s">${esc((x.updated || "").slice(0, 16))} ・ ${x.steps ?? "?"}ステップ ・ ${esc(x.id.slice(0, 8))}${ideFolder ? "" : " ・ " + esc(x.workspace || "")}</div>`;
     d.onclick = async () => { if (await assignIde(x.id, x.title, idePickTarget)) { $("ideModal").classList.add("hidden"); updateFabState(); } };
@@ -1722,8 +1789,17 @@ async function openIdeModal(target = "main") {
   await loadIdeSessions();
   renderIdePicker();
 }
-$("idePick").onclick = () => openIdeModal("main");
-if ($("choicesIdePick")) $("choicesIdePick").onclick = () => openIdeModal("choices");
+$("trblPickMain").onclick = () => openIdeModal("main");
+if ($("trblPickChoices")) $("trblPickChoices").onclick = () => openIdeModal("choices");
+// 開いたときに会話一覧を読み直す（待機中かどうかを出すのに要る）
+if ($("supportBox")) $("supportBox").addEventListener("toggle", () => {
+  if (!$("supportBox").open) return;
+  loadIdeSessions();
+});
+if ($("trblCopy")) $("trblCopy").onclick = async () => {
+  const ok = await copyText(troubleshootingText());
+  flash(ok ? "診断情報をコピーしました（AIに貼ってください）" : "コピーできませんでした");
+};
 $("ideQuery").addEventListener("input", () => { ideFolder = ""; renderIdePicker(); });
 $("ideModalClose").onclick = () => { $("ideModal").classList.add("hidden"); updateFabState(); };
 $("ideModal").addEventListener("click", (e) => { if (e.target === $("ideModal")) { $("ideModal").classList.add("hidden"); updateFabState(); } });
@@ -1735,8 +1811,14 @@ $("ideIdSet").onclick = async () => {
   if (!x && !confirm(`一覧にない会話IDです。このまま担当にする？\n${id}`)) return;
   if (await assignIde(x ? x.id : id, x ? x.title : "", idePickTarget)) { $("ideModal").classList.add("hidden"); updateFabState(); }
 };
-$("ideClear").onclick = () => assignIde("", "", "main");
-if ($("choicesIdeClear")) $("choicesIdeClear").onclick = () => assignIde("", "", "choices");
+if ($("trblClearMain")) $("trblClearMain").onclick = () => {
+  if (!confirm("このチャンネルの Antigravity 会話の担当を外します。\n外すとアプリから合図（スペース）を送れなくなるので、Antigravity 側で自分で wait_input.py を動かすまで入力は届きません。\nそれでも外す？")) return;
+  assignIde("", "", "main");
+};
+if ($("trblClearChoices")) $("trblClearChoices").onclick = () => {
+  if (!confirm("選択肢（8択）担当の会話を外します。\n外すと選択肢は本文の会話で順番に作ります（並列にはなりません）。")) return;
+  assignIde("", "", "choices");
+};
 
 // 会話の名前を変える（Antigravity の一覧の名前。担当にしているチャンネルの控えも変わる）
 async function renameIde(id, cur) {
@@ -1871,7 +1953,7 @@ async function doFork(at, n, label) {
   }
 }
 $("forkMove").onchange = () => { $("forkMoveTo").disabled = !$("forkMove").checked; if ($("forkMove").checked) $("forkMoveTo").focus(); };
-$("ideFork").onclick = () => {
+if ($("trblForkMain")) $("trblForkMain").onclick = () => {
   const ide = state?.setting?.ide_session;
   if (!ide) return;
   const cur = ideSessions.find((x) => x.id === ide);
@@ -3392,29 +3474,7 @@ const ThinkingUI = {
       }
     }
 
-    // 3. FootBar Compact Thinking Section
-    const footSec = $("footThinkingSection");
-    if (footSec) {
-      footSec.classList.toggle("hidden", isAg);
-      footSec.querySelectorAll(".segment-btn").forEach(btn => {
-        const lv = btn.dataset.level;
-        btn.classList.toggle("active", lv === mainLevel);
-        const r = this.resolve(currentModelId, lv);
-        btn.classList.toggle("is-rounded", !!r.rounded);
-      });
-      const footEff = $("footThinkingEff");
-      if (footEff) {
-        footEff.textContent = mainResolved.isNone ? "実効: なし"
-          : mainResolved.rounded ? `実効: ${mainResolved.eff} (丸め)`
-          : `実効: ${mainResolved.eff}`;
-      }
-      const footChoicesSel = $("footChoicesThinkingSelect");
-      if (footChoicesSel && document.activeElement !== footChoicesSel) {
-        footChoicesSel.value = choicesLevel;
-      }
-    }
-
-    // 5. Tool Modal Cards & Pills
+    // 4. Tool Modal Cards & Pills
     if (isGoogle || isVertex) {
       const prefix = isGoogle ? "google" : "vertex";
       const isAuth = isGoogle ? googleConfigured : vertexConfigured;
@@ -4156,31 +4216,24 @@ if ($("agModel")) {
 }
 if ($("agModelsReload")) $("agModelsReload").onclick = loadModels;
 $("ideModelReload").onclick = loadModels;
-$("idePokeNow").onclick = async () => {
-  $("idePokeNow").disabled = true;
+// 合図（poke）の手動送信。ふだんは自動で送るので、これは届くかどうかの確認・自動が不定期なときの再送用
+async function pokeNow(target, btn) {
+  if (btn) btn.disabled = true;
   try {
-    const r = await checked("/api/ide/poke", { sid, now: true, target: "main" });
-    flash((r.ok ? "送信しました: " : "送信できませんでした: ") + r.msg);
+    const r = await checked("/api/ide/poke", { sid, now: true, target });
+    flash((r.ok ? "合図を送りました: " : "合図を送れませんでした: ") + r.msg);
   } catch (e) { alert(e.message); }
-  $("idePokeNow").disabled = false;
+  if (btn) btn.disabled = false;
   loadIdeSessions();
-};
-if ($("choicesIdePokeNow")) {
-  $("choicesIdePokeNow").onclick = async () => {
-    $("choicesIdePokeNow").disabled = true;
-    try {
-      const r = await checked("/api/ide/poke", { sid, now: true, target: "choices" });
-      flash((r.ok ? "選択肢会話に送信しました: " : "送信できませんでした: ") + r.msg);
-    } catch (e) { alert(e.message); }
-    $("choicesIdePokeNow").disabled = false;
-    loadIdeSessions();
-  };
-};
-$("ctxReset").onclick = async () => {
+}
+if ($("trblPokeMain")) $("trblPokeMain").onclick = (e) => pokeNow("main", e.currentTarget);
+if ($("trblPokeChoices")) $("trblPokeChoices").onclick = (e) => pokeNow("choices", e.currentTarget);
+if ($("trblReset")) $("trblReset").onclick = async () => {
+  if (!confirm("次の入力で、設定と会話を最初から全部送り直します。\nふだんは前回の続き（差分）だけを送るので、AIが話を忘れたように見えるときだけ使います。")) return;
   try {
     await checked("/api/context/reset", { sid });
-    $("ideState").textContent = "次の入力では設定と会話を全部送ります";
-    setTimeout(renderIde, 3000);
+    flash("次の入力を全量送信にしました");
+    renderTroubleshooting();
   } catch (e) { alert(e.message); }
 };
 
@@ -10258,20 +10311,6 @@ if ($("choicesThinkingPills")) {
     const btn = e.target.closest(".pill-btn");
     if (!btn || !btn.dataset.choicesLevel) return;
     ThinkingUI.setThinking(undefined, btn.dataset.choicesLevel);
-  });
-}
-
-if ($("footThinkingBar")) {
-  $("footThinkingBar").addEventListener("click", (e) => {
-    const btn = e.target.closest(".segment-btn");
-    if (!btn || !btn.dataset.level) return;
-    ThinkingUI.setThinking(btn.dataset.level);
-  });
-}
-
-if ($("footChoicesThinkingSelect")) {
-  $("footChoicesThinkingSelect").addEventListener("change", (e) => {
-    ThinkingUI.setThinking(undefined, e.target.value);
   });
 }
 

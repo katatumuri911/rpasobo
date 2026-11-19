@@ -34,9 +34,9 @@ assert("#sideAiSummaryText is removed from sidebar", countId("sideAiSummaryText"
 assert("#sideModelContainer is removed from sidebar", countId("sideModelContainer") === 0);
 assert("#agQuotaBadge is removed from composer", countId("agQuotaBadge") === 0);
 assert(".send-quota-layer exists in #sendBtn", html.includes('class="send-quota-layer"'));
-assert("#footThinkingSection exists", countId("footThinkingSection") === 1);
-assert("#footThinkingBar exists", countId("footThinkingBar") === 1);
-assert("#footChoicesThinkingSelect exists", countId("footChoicesThinkingSelect") === 1);
+assert("#footThinkingSection is removed from the composer", countId("footThinkingSection") === 0);
+assert("#footThinkingBar is removed from the composer", countId("footThinkingBar") === 0);
+assert("#footChoicesThinkingSelect is removed from the composer", countId("footChoicesThinkingSelect") === 0);
 assert("#googleThinkingPills exists", countId("googleThinkingPills") === 1);
 assert("#vertexThinkingPills exists", countId("vertexThinkingPills") === 1);
 assert("#choicesThinkingPills exists", countId("choicesThinkingPills") === 1);
@@ -53,10 +53,6 @@ assert("#modelSheet exists (compatibility retained)", countId("modelSheet") === 
 assert("#modelSheetSlot exists (compatibility retained)", countId("modelSheetSlot") === 1);
 assert("#googleKeyModal stub exists", countId("googleKeyModal") === 1);
 assert("#vertexConfigModal stub exists", countId("vertexConfigModal") === 1);
-
-// Verify segment buttons in #footThinkingBar
-const segButtons = (html.match(/class=["'][^"']*segment-btn[^"']*["']/g) || []).length;
-assert("footThinkingBar has 6 segment buttons", segButtons === 6);
 
 // Verify pills in #googleThinkingPills and #vertexThinkingPills
 const googlePills = html.match(/id=["']googleThinkingPills["'][\s\S]*?id=["']google/);
@@ -193,8 +189,7 @@ function getOrCreate(id) {
 
 // Populate elements
 const ids = [
-  "aiSummaryText", "footThinkingSection", "footThinkingEff",
-  "footChoicesThinkingSelect", "googleCardsSection", "googleThinkingPills",
+  "aiSummaryText", "googleCardsSection", "googleThinkingPills",
   "googleThinkingBadge", "googleThinkingGuide", "choicesIdeCard",
   "choicesThinkingPills", "choicesThinkingBadge", "choicesThinkingGuide",
   "googleMaxTokens", "googleMaxTokensBadge", "vertexCardsSection",
@@ -202,14 +197,6 @@ const ids = [
   "vertexMaxTokens", "vertexMaxTokensBadge"
 ];
 ids.forEach(id => getOrCreate(id));
-
-// Add buttons to footThinkingBar
-const footBar = getOrCreate("footThinkingSection");
-["auto", "minimal", "low", "medium", "high", "xhigh"].forEach(lv => {
-  const btn = new MockEl("seg_" + lv);
-  btn.dataset.level = lv;
-  footBar.children.push(btn);
-});
 
 // Add buttons to googleThinkingPills
 const gPills = getOrCreate("googleThinkingPills");
@@ -247,15 +234,6 @@ assert("aiSummaryText is rendered for Google",
 
 T.render.call(T, { ai_provider: "antigravity" });
 T.render.call(T, sandbox.state.setting);
-
-assert("footThinkingBar segment 'minimal' is active and marked as rounded (3.8-flash)",
-  elements.footThinkingSection.children.find(b => b.dataset.level === "minimal").classList.contains("active") &&
-  elements.footThinkingSection.children.find(b => b.dataset.level === "minimal").classList.contains("is-rounded")
-);
-
-assert("footThinkingEff indicates rounded execution (LOW)",
-  elements.footThinkingEff.textContent.includes("LOW (丸め)")
-);
 
 assert("googleThinkingBadge indicates minimal is rounded",
   elements.googleThinkingBadge.textContent.includes("LOW") &&

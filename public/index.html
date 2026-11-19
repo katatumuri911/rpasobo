@@ -6,7 +6,7 @@
 <title>RP Image Chat {{PORT}}</title>
 <link rel="icon" type="image/png" href="icon.png">
 <link rel="apple-touch-icon" href="icon-maskable-512.png">
-<link rel="stylesheet" href="style.css?v=186">
+<link rel="stylesheet" href="style.css?v=187">
 <link rel="stylesheet" href="wizard.css?v=8">
 </head>
 <body>
@@ -263,6 +263,42 @@
           </div>
         </div>
       </details>
+
+      <details id="supportBox">
+        <summary>サポート</summary>
+        <div class="box">
+          <div class="box-title">トラブルシューティング</div>
+          <div class="muted" style="font-size:12px;">
+            ふだんは使いません。Antigravity とつながらない・応答が来ないときに開きます。
+            原因を調べるときは「診断情報をコピー」をAIに貼るのが早いです（担当の会話IDと状態をまとめて渡せます）。
+          </div>
+          <div class="sub-label" style="margin-top:8px;">本文の担当会話</div>
+          <div id="trblMain" class="muted" style="font-size:11px; line-height:1.6;"></div>
+          <div class="row tight">
+            <button id="trblCopy" type="button" class="sub">診断情報をコピー</button>
+            <button id="trblPokeMain" type="button" class="sub" title="自動の合図が届かなかったときの手動送信（動作確認用）">合図を送る（テスト）</button>
+            <button id="trblPickMain" type="button" class="sub" title="いまある会話から選び直す（作らずに付け替える）">会話を選ぶ…</button>
+            <button id="trblForkMain" type="button" class="sub" title="チャンネルはそのままで、Antigravity の会話だけを途中から分岐する">会話だけ分岐…</button>
+            <button id="trblClearMain" type="button" class="sub" title="担当を外す。外すとアプリから合図を送れなくなる">担当を外す</button>
+          </div>
+          <div class="sub-label" style="margin-top:8px;">選択肢（8択）の担当会話</div>
+          <div id="trblChoices" class="muted" style="font-size:11px; line-height:1.6;"></div>
+          <div class="row tight">
+            <button id="trblPickChoices" type="button" class="sub">会話を選ぶ…</button>
+            <button id="trblPokeChoices" type="button" class="sub">合図を送る（テスト）</button>
+            <button id="trblClearChoices" type="button" class="sub">担当を外す</button>
+          </div>
+          <div class="sub-label" style="margin-top:8px;">送り方</div>
+          <div class="muted" style="font-size:11px;">
+            入力すると自動で担当の会話に合図（スペース）を送ります。受け取られなければコマンドを送り直し、10分たつと諦めます。
+            「合図を送る（テスト）」は、それを待たずに手で1回送るものです（届くかどうかの確認用）。
+            「次の入力を全量送信にする」は、AIが話を忘れたように見えるときに1回だけ設定と会話を全部送り直す操作です。
+          </div>
+          <div class="row tight">
+            <button id="trblReset" type="button" class="sub">次の入力を全量送信にする</button>
+          </div>
+        </div>
+      </details>
     </div>
     <div class="row">
       <button id="settingSave">保存</button>
@@ -285,29 +321,6 @@
       <div id="footModelSubRow" class="foot-model-sub-row">
         <span id="footModelSubInfo" class="foot-model-sub-info"></span>
         <button id="ideModelReload" type="button" class="sub" title="残りを読み直す（Antigravity のモデル一覧と残りの利用枠）">↻</button>
-      </div>
-      <div id="footThinkingSection" class="foot-thinking-section hidden">
-        <div class="foot-thinking-bar" id="footThinkingBar" role="group" aria-label="思考の深さ">
-          <button type="button" class="segment-btn" data-level="auto" title="自動: モデル既定">自動</button>
-          <button type="button" class="segment-btn" data-level="minimal" title="最小: 最速">最小</button>
-          <button type="button" class="segment-btn" data-level="low" title="低: 速い">低</button>
-          <button type="button" class="segment-btn" data-level="medium" title="中: バランス">中</button>
-          <button type="button" class="segment-btn" data-level="high" title="高: 長考">高</button>
-          <button type="button" class="segment-btn" data-level="xhigh" title="最大: 超長考">最大</button>
-        </div>
-        <div class="foot-thinking-sub-row">
-          <span class="foot-thinking-eff muted" id="footThinkingEff">実効: -</span>
-          <label class="foot-choices-thinking-label" title="選択肢などの思考（画像推敲・記憶抽出も）">選択肢など:
-            <select id="footChoicesThinkingSelect">
-              <option value="low">⚡低 (推奨)</option>
-              <option value="minimal">💨最小</option>
-              <option value="medium">⚖️中</option>
-              <option value="high">🔍高</option>
-              <option value="same">🔗本文と同じ</option>
-              <option value="auto">自動</option>
-            </select>
-          </label>
-        </div>
       </div>
     </div>
     <div id="attachList" class="attach-list hidden"></div>
@@ -820,30 +833,19 @@
         <span class="muted" style="font-size:12px;">Antigravityの会話を選ぶと、その会話だけがこのチャンネルの入力を受け取ります</span>
         <div id="ideCurrent" class="ide-current">指定なし（--ide なしの wait_input.py が受け取る）</div>
         <div class="row" style="margin-top:4px;">
-          <button id="idePick" type="button" class="sub">会話を選ぶ…</button>
           <button id="ideNew" type="button" class="sub">新規会話</button>
-          <button id="ideFork" type="button" class="sub">分岐…</button>
-          <button id="ideRename" type="button" class="sub">名前…</button>
-          <button id="ideClear" type="button" class="sub">外す</button>
-          <button id="ctxReset" type="button" class="sub">次は全部送る</button>
+          <button id="ideRename" type="button" class="sub">名前を変更</button>
         </div>
         <span id="ideState" class="muted" style="font-size:11px;"></span>
-        <div class="row" style="margin-top:4px;">
-          <span class="muted" style="font-size:11px;">入力から2秒たっても受け取られていなければ、担当の会話にスペース1文字を送る</span>
-          <button id="idePokeNow" type="button" class="sub">今すぐ送信</button>
-        </div>
-        <span id="pokeState" class="muted" style="font-size:11px;"></span>
+        <div class="muted" style="font-size:11px;">会話の選び直し・分岐・解除・合図のテスト・全量送信は「設定 → サポート → トラブルシューティング」</div>
       </div>
 
       <div class="ai-card" style="margin-top:8px;">
         <div class="ai-card-title"><span>選択肢（8択）担当の Antigravity 会話</span></div>
         <div id="choicesIdeCurrent" class="ide-current">指定なし（メインの会話で順番に生成）</div>
         <div class="row" style="margin-top:4px;">
-          <button id="choicesIdePick" type="button" class="sub">会話を選ぶ…</button>
           <button id="choicesIdeNew" type="button" class="sub">新規会話</button>
-          <button id="choicesIdeRename" type="button" class="sub">名前…</button>
-          <button id="choicesIdeClear" type="button" class="sub">外す</button>
-          <button id="choicesIdePokeNow" type="button" class="sub">今すぐ送信</button>
+          <button id="choicesIdeRename" type="button" class="sub">名前を変更</button>
         </div>
         <span id="choicesIdeState" class="muted" style="font-size:11px;"></span>
         <span id="choicesPokeState" class="muted" style="font-size:11px;"></span>
@@ -989,7 +991,7 @@
 </div>
 <script src="prompt_toolbar.js"></script>
 <script src="progress_labels.js?v=14"></script>
-<script src="app.js?v=193"></script>
-<script src="wizard.js?v=9"></script>
+<script src="app.js?v=199"></script>
+<script src="wizard.js?v=12"></script>
 </body>
 </html>

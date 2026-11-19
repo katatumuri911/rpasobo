@@ -906,7 +906,8 @@ footer > * { pointer-events: auto; }
 footer > .foot-bar label.ide-model,
 footer > .foot-bar .foot-model-sub-row { display: none !important; }
 /* 中身（思考の深さ）が無いときは行ごと消す。Antigravity はモデル名に思考が入っているので出ない */
-#footBar:has(#footThinkingSection.hidden) { display: none !important; }
+/* 中身（思考の深さ）は設定側へ集約したので、モバイルのフッターには何も出さない */
+#footBar:not(:has(#footThinkingSection)) { display: none !important; }
 .model-badge {
   display: inline-flex;
   align-items: center;
@@ -4944,79 +4945,6 @@ button.rag-entry-pin.is-pinned {
 }
 
 /* FootBar & Sidebar Compact Thinking */
-.foot-thinking-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  margin-top: 4px;
-}
-.foot-thinking-bar {
-  display: flex;
-  width: 100%;
-  border: 1px solid #3f3f4e;
-  border-radius: 5px;
-  overflow: hidden;
-  background: #18181f;
-}
-.segment-btn {
-  flex: 1;
-  padding: 3px 2px;
-  font-size: 11px;
-  font-weight: 500;
-  border: none;
-  background: transparent;
-  color: #9ca3af;
-  cursor: pointer;
-  text-align: center;
-  border-right: 1px solid #333342;
-  line-height: 1.2;
-}
-.segment-btn:last-child {
-  border-right: none;
-}
-.segment-btn:hover {
-  background: #252532;
-  color: #e5e7eb;
-}
-.segment-btn.active {
-  background: #2563eb;
-  color: #fff;
-  font-weight: 700;
-}
-.segment-btn.is-rounded {
-  opacity: 0.65;
-}
-.foot-thinking-sub-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 11px;
-  gap: 6px;
-}
-.foot-thinking-eff {
-  font-size: 10px;
-  color: #38bdf8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.foot-choices-thinking-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10px;
-  color: #aaa;
-  margin: 0;
-}
-.foot-choices-thinking-label select {
-  font-size: 10px;
-  padding: 1px 4px;
-  background: #18181f;
-  border: 1px solid #3f3f4e;
-  border-radius: 4px;
-  color: #e5e7eb;
-}
 .side-ai-tool-btn {
   padding: 1px 6px;
   font-size: 11px;

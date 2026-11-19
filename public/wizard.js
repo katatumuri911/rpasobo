@@ -157,7 +157,7 @@
     if (chip) {
       chip.textContent = mc.model ? `AI: ${mc.model.split("/").pop()}` : "AI: 未設定";
       chip.classList.toggle("warn", !mc.model);
-      const locked = !!jobId || screen === "creating" || screen === "done" || busy || !!pending;
+      const locked = !!jobId || screen === "done" || busy || !!pending;
       chip.disabled = locked;
       chip.setAttribute("aria-disabled", locked ? "true" : "false");
     }
@@ -232,17 +232,42 @@
 
   // 下書きに何か入力・保存済みのものがあるか。
   // 空の下書き（開いて「保存せずに閉じる」しただけ）で再開確認を出さないための判定。
+  // step は「どの画面を見ていたか」のUI状態で、1/7 を選んだだけで step="idea" になるため数えない。
+  function slotFilled(s) {
+    if (!s) return false;
+    if (s.source === "user" || s.source === "locked") return true;
+    const v = s.value;
+    if (v === null || v === undefined || v === "") return false;
+    return !(Array.isArray(v) && !v.length);
+  }
+
   function draftHasInput(d) {
     if (!d) return false;
     const slots = d.slots || {};
-    if (Object.values(slots).some(s => s && s.source && s.source !== "unset")) return true;
+    if (Object.values(slots).some(slotFilled)) return true;
     if ((d.questions || []).length) return true;
     if ((d.asked_slots || []).length) return true;
     if (d.compose) return true;
     if (String(d.partner_preset_id || "")) return true;
     if ((d.custom_ng || []).length) return true;
-    if (d.step && d.step !== "base") return true;
     return false;
+  }
+
+  // 再開ダイアログで「何を再開するか」が分かるようにする
+  const STEP_LABELS = {
+    idea: "2/7 どんな話にしますか",
+    partner: "4/7 相手",
+    tags: "5/7 関係性",
+    questions: "6/7 質問",
+    preview: "7/7 プレビュー",
+  };
+
+  function draftSummary(d) {
+    const inherit = d && d.inherit_base;
+    const base = inherit
+      ? (d.base_title ? `「${d.base_title}」の設定を引き継ぐ` : "設定を引き継ぐ")
+      : "初期設定で作る";
+    return `${base}・${STEP_LABELS[(d && d.step) || ""] || STEP_LABELS.idea}`;
   }
 
   async function ensureDraft(baseSid) {
@@ -257,14 +282,17 @@
     if (r.resumed && r.draft) {
       const choice = await askChoice({
         title: "前回の下書き",
-        message: "前回の続きから再開しますか？",
+        message: `${draftSummary(r.draft)}の作りかけが残っています。続きから再開しますか？`,
         buttons: [
           { value: "resume", label: "再開", primary: true },
           { value: "new", label: "新規作成" },
         ],
       });
       if (choice === "new") {
-        const n = await apiCall("/api/wizard/start", { base_sid: sidToUse, force_new: true });
+        // 断った下書きは退避して、次回以降に再び尋ねられないようにする
+        const n = await apiCall("/api/wizard/start", {
+          base_sid: sidToUse, force_new: true, dismiss_id: r.draft.id,
+        });
         if (!n || n.error) throw new Error(n.error || "下書きを作成できません");
         draft = n.draft;
       } else {
@@ -1688,12 +1716,24 @@
       else navigate("questions");
       pollJob();
     } catch (e) {
-      chromeFor(kind === "compose" ? "creating" : "questions");
-      setBody(errBox(e.message, `<button type="button" class="wizard-btn" data-act="retry-${kind}">再試行</button>
-        <button type="button" class="wizard-btn ghost" data-act="use-template">AIなしで作る</button>`));
+      renderJobError({ error: e.message }, kind);
     } finally {
       busy = false;
     }
+  }
+
+  function renderJobError(j, kind) {
+    jobId = "";
+    stopPoll();
+    chromeFor(kind === "compose" ? "creating" : "questions");
+    setFoot("");
+    let btns = `<button type="button" class="wizard-btn" data-act="retry-${kind}">再試行</button>`;
+    btns += `<button type="button" class="wizard-btn ghost" data-act="change-model">モデルを変更</button>`;
+    if (kind === "questions") {
+      btns += `<button type="button" class="wizard-btn ghost" data-act="q-finish">質問をスキップして作成</button>`;
+    }
+    btns += `<button type="button" class="wizard-btn ghost" data-act="use-template">AIを使わずにテンプレートで作成</button>`;
+    setBody(errBox((j && j.error) || "生成に失敗しました", btns));
   }
 
   async function pollJob() {
@@ -1723,13 +1763,7 @@
         return;
       }
       if (j.status === "error") {
-        jobId = "";
-        stopPoll();
-        chromeFor(jobKind === "compose" ? "creating" : "questions");
-        const canTemplate = jobKind === "compose";
-        setBody(errBox(j.error || "生成に失敗しました",
-          `<button type="button" class="wizard-btn" data-act="retry-${jobKind}">再試行</button>
-           ${canTemplate ? `<button type="button" class="wizard-btn ghost" data-act="use-template">AIなしで作る</button>` : ""}`));
+        renderJobError(j, jobKind);
         return;
       }
       jobTimer = setTimeout(pollJob, 1500);
@@ -1758,11 +1792,7 @@
           return;
         }
         if (j.status === "error") {
-          chromeFor(kind === "compose" ? "creating" : "questions");
-          const canTemplate = kind === "compose";
-          setBody(errBox(j.error || "生成に失敗しました",
-            `<button type="button" class="wizard-btn" data-act="retry-${kind}">再試行</button>
-             ${canTemplate ? `<button type="button" class="wizard-btn ghost" data-act="use-template">AIなしで作る</button>` : ""}`));
+          renderJobError(j, kind);
           return;
         }
         if (j.status === "queued" || j.status === "running") {
@@ -1979,6 +2009,7 @@
         if (a === "retry-questions") return startJob("questions");
         if (a === "retry-compose") return startJob("compose");
         if (a === "use-template") return runAction("create", () => useTemplate());
+        if (a === "change-model") return openModelEdit();
       } catch (err) {
         say(err.message);
       }
@@ -2033,7 +2064,7 @@
     if (bkBtn) bkBtn.onclick = goBack;
     const mcChip = $("#wizardModelChip");
     if (mcChip) mcChip.onclick = () => {
-      if (busy || jobId || screen === "creating" || screen === "done" || pending) return;
+      if (busy || jobId || screen === "done" || pending) return;
       openModelEdit();
     };
 
@@ -2206,11 +2237,17 @@
       saveModel,
       startCreateChain,
       askText,
+      ensureDraft,
+      draftHasInput,
+      draftSummary,
       syncFootBar,
       setFoot,
       createManual,
       useTemplate,
       doCreate,
+      renderJobError,
+      startJob,
+      get modelMode() { return modelMode; },
     };
   }
 })();
