@@ -1231,7 +1231,13 @@ function teardown(fx) {
   // 進捗はフレックスの子。overflow:hidden だと min-height が 0 になり、高さ0に潰れて見えなくなる
   const progressVisible = /\.progress\s*\{[^}]*flex-shrink:\s*0/i.test(cssText) &&
     !/\.progress\s*\{[^}]*overflow:\s*hidden/i.test(cssText);
-  const progressClamp3 = /\.progress \.p-row\.error \.p-detail\s*\{[^}]*-webkit-line-clamp:\s*3/i.test(cssText);
+  const progressWrap = /\.progress \.p-row \.p-detail\s*\{[^}]*white-space:\s*normal/i.test(cssText) &&
+    /\.progress \.p-row \.p-detail\s*\{[^}]*overflow-wrap:\s*anywhere/i.test(cssText) &&
+    /\.progress \.p-row \.p-text\s*\{[^}]*overflow-wrap:\s*anywhere/i.test(cssText) &&
+    !/\.progress \.p-row\.error \.p-(text|detail)\s*\{[^}]*-webkit-line-clamp/i.test(cssText);
+  // カードは中身に合わせて縦に伸び、上限を超えたらカード内をスクロールする
+  const progressExpands = /\.progress\s*\{[^}]*max-height:\s*min\(/i.test(cssText) &&
+    /\.progress\s*\{[^}]*overflow-y:\s*auto/i.test(cssText);
   // 完了系の通知は、入力待機・日時と同じ最上段の中央に固定する
   const topNoticeRow = /#topNotice\s*\{[^}]*position:\s*fixed/i.test(cssText) &&
     /#topNotice\s*\{[^}]*top:\s*max\(10px,\s*env\(safe-area-inset-top\)\)/i.test(cssText) &&
@@ -1241,7 +1247,7 @@ function teardown(fx) {
     /#toastBackdrop\s*\{[^}]*inset:\s*0/i.test(cssText);
   // 待機行（注記と統合した1行）はオレンジで統一する
   const waitColor = /\.progress \.p-row\.wait \.p-text\s*\{[^}]*color:\s*#ffd27a/i.test(cssText);
-  t("T22: CSS スモーク", bodyNoTouchAction && sidebarTransform && noTransitionAll && backdropRules && progressVisible && progressClamp3 && topNoticeRow && toastBackdropCss && waitColor);
+  t("T22: CSS スモーク", bodyNoTouchAction && sidebarTransform && noTransitionAll && backdropRules && progressVisible && progressWrap && progressExpands && topNoticeRow && toastBackdropCss && waitColor);
 }
 
 // --- T23: CSS スコープ（AC-25 の正） ---

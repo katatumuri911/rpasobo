@@ -379,7 +379,7 @@ button.sub { background: #44444c; }
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 11px; background: #33343e; color: #aaa; }
 .pill.wait { background: #5a4a1a; color: #ffd27a; }
 .pill.ok { background: #1f3d2a; color: #8fdaac; }
-.pill.err { background: #4a1f1f; color: #ff9999; }
+.pill.err { background: #4a1f1f; color: #ff9999; cursor: pointer; }
 .muted { color: #888; font-size: 12px; }
 .hint { color: #999; font-size: 12px; margin-bottom: 6px; }
 
@@ -647,23 +647,28 @@ footer { flex-shrink: 0; }
   border: 1px solid rgba(255, 255, 255, .06);
   border-radius: 10px;
   padding: 6px 8px;
-  /* カードは「3行分」の高さ。行は時系列に積み、はみ出した古い行は上で切れる
-     （＝見えているのは常に最新の3行）。件数はJSで数えない */
-  max-height: 78px;
-  overflow: hidden;
+  /* 行の文章は折り返して全文を見せる。カードは中身に合わせて縦に伸び、
+     画面の6割（最大520px）を超えたらカードの中だけをスクロールする。
+     古い行を切り捨てないので、長い説明やエラー文も最後まで読める。 */
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
 }
-/* エラー行は折り返して縦に伸びる（最大6行）。最新行がエラーのときだけ
-   全文が読める高さまで広げる。エラーが上に流れたら3行窓に戻る */
-.progress.has-error { max-height: min(45vh, 220px); }
-.progress .p-row { display: flex; gap: 6px; align-items: baseline; min-width: 0; color: #9a9aa6; }
-.progress .p-row .p-mark { flex-shrink: 0; width: 1.2em; text-align: center; }
-.progress .p-row .p-text { flex-shrink: 0; color: #e8eaf2; font-size: 13px; font-weight: 600; line-height: 1.4; }
-.progress .p-row .p-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, monospace; font-size: 12px; color: #b9bfce; line-height: 1.5; }
+/* 直近の行にエラーがあるときは枠を赤くして目立たせる（高さは中身に任せる） */
+.progress.has-error { border-color: rgba(255, 153, 153, .32); }
+/* 1行＝マーク＋文章（＋詳細）。詳細は文章の下に回し、どちらも折り返す。
+   横に並べると長いパスやエラー文が入り切らず省略されるため、縦積みにする。 */
+.progress .p-row { display: grid; grid-template-columns: 1.2em minmax(0, 1fr); align-items: start; gap: 1px 6px; min-width: 0; color: #9a9aa6; }
+.progress .p-row .p-mark { grid-column: 1; grid-row: 1; width: 1.2em; text-align: center; }
+.progress .p-row .p-text { grid-column: 2; grid-row: 1; min-width: 0; color: #e8eaf2; font-size: 13px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.progress .p-row .p-detail { grid-column: 2; grid-row: 2; min-width: 0; white-space: normal; overflow-wrap: anywhere; font-family: Consolas, monospace; font-size: 12px; color: #b9bfce; line-height: 1.5; }
 .progress .p-row.now .p-mark { animation: blink 1.4s infinite both; color: #ffd27a; }
 .progress .p-row.now .p-text { color: #ffd27a; }
 .progress .p-row.error .p-text { color: #ff9999; }
 .progress .p-row.filter .p-mark, .progress .p-row.filter .p-text { color: #ffc76b; }
-/* エラー行は説明を3行まで折り返す（1行省略だと対策文が読めないため） */
+/* エラー行は対策文まで全文折り返す（省略しない） */
 .progress .p-row.error {
   display: grid;
   grid-template-columns: 1.2em minmax(0, 1fr);
@@ -679,21 +684,13 @@ footer { flex-shrink: 0; }
 .progress .p-row.error .p-text {
   grid-column: 2;
   min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 .progress .p-row.error .p-detail {
   grid-column: 2;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  min-width: 0;
   white-space: normal;
-  overflow: hidden;
-  text-overflow: clip;
   overflow-wrap: anywhere;
   font-family: inherit;
   font-size: 13px;
@@ -4087,7 +4084,7 @@ button.rag-entry-pin.is-pinned {
   /* .pill.ok 等より id を優先させるため状態色はここで上書き */
   #mobileStatusChip.wait { background: rgba(92, 74, 22, .97); border-color: rgba(255, 210, 122, .45); color: #ffd98f; }
   #mobileStatusChip.ok   { background: rgba(23, 69, 42, .97);  border-color: rgba(143, 218, 172, .45); color: #b0f5cb; }
-  #mobileStatusChip.err  { background: rgba(82, 31, 31, .97);  border-color: rgba(255, 153, 153, .45); color: #ffb8b8; }
+  #mobileStatusChip.err  { background: rgba(82, 31, 31, .97);  border-color: rgba(255, 153, 153, .45); color: #ffb8b8; pointer-events: auto; cursor: pointer; }
   #mobileStatusChip.dim  { opacity: 1; }   /* RP中も薄くしない（読めない方が困る） */
 
   #mobileElapsedChip {

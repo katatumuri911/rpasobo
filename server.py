@@ -575,6 +575,7 @@ DEFAULT_SETTING = {
     "decensor_choices": True,  # 候補の婉曲表現（秘所・後ろの穴など）を辞書で直接語に戻す（辞書はアプリ全体の設定）
     "decensor_reply": False,  # 本文（reply）の婉曲表現も辞書で直接語に戻す（試験的・既定OFF）
     "google_fetch_cache": True,  # fetch 段の署名キャッシュ（既定ON・Vertex の往復削減。異常時は OFF）
+    "google_body_ph": True,  # 本文プロンプトのプレースホルダ変換（既定ON・フィルタ誤検知回避。異常時は OFF）
     "image": {
         "checkpoint": "waiIllustriousSDXL_v170.safetensors",
         "width": 768, "height": 1344, "steps": 8, "cfg": 4,
@@ -774,6 +775,7 @@ def merge_defaults(setting=None):
         out["google_max_output_tokens"] = 8192
     out["google_fetch"] = bool(out.get("google_fetch", True))
     out["google_fetch_cache"] = bool(out.get("google_fetch_cache", True))
+    out["google_body_ph"] = bool(out.get("google_body_ph", True))
     out["google_safety_off"] = bool(out.get("google_safety_off", True))
     tl = str(out.get("thinking_level") or "auto").strip().lower()
     out["thinking_level"] = tl if tl in google_ai.VALID_THINKING_LEVELS else "auto"
@@ -7316,21 +7318,15 @@ def repair_outbox_text(txt):
     return (obj, notes) if isinstance(obj, dict) else None
 
 
-def _log_main_turn(sid, m, outbox_path, ide):
-    """通常応答1ターンの latency と read_file 使用有無を perf.log に記録する（RPCHAT_PERF_LOG=1 のときだけ）。"""
-    if os.environ.get("RPCHAT_PERF_LOG") != "1":
-        return
+def _log_main_turn(sid, m, outbox_path, ide, provider=""):
+    """通常応答1ターンの latency を perf.log に記録する。
+    latency と provider は**常に**記録する（Antigravity の p95 を後から追えるようにするため）。
+    ide_poke 由来の詳細（read_file / tool_calls / spilled）は RPCHAT_PERF_LOG=1 のときだけ取る。"""
+    detailed = os.environ.get("RPCHAT_PERF_LOG") == "1"
     try:
         start_ts = (m.get("claimed_ts") or m.get("poke_ts") or task_ts(m, "user")) if isinstance(m, dict) else ""
         t0 = _epoch(start_ts)
         t1 = os.path.getmtime(outbox_path)
-        usage = ide_poke.tool_usage_since(ide) if (ide and ide_poke) else {}
-        spilled = False
-        if t0:
-            try:
-                spilled = os.path.getmtime(os.path.join(CTX, f"{sid}.md")) >= t0
-            except OSError:
-                spilled = False
         perf = {
             "ts": now(),
             "src": "outbox",
@@ -7338,15 +7334,26 @@ def _log_main_turn(sid, m, outbox_path, ide):
             "sid": sid,
             "mid": m.get("id") if isinstance(m, dict) else None,
             "task": "user",
+            "provider": provider or "",
             "latency_ms": max(0, int((t1 - t0) * 1000)) if t0 else None,
             "latency_from": "claimed/poke/ts",
-            "read_file": bool(usage.get("read_file")),
-            "read_file_checked": bool(usage.get("ok")),
-            "read_file_truncated": bool(usage.get("truncated")),
-            "tool_calls": int(usage.get("total") or 0),
-            "tool_names": usage.get("names") or [],
-            "spilled": spilled,
         }
+        if detailed:
+            usage = ide_poke.tool_usage_since(ide) if (ide and ide_poke) else {}
+            spilled = False
+            if t0:
+                try:
+                    spilled = os.path.getmtime(os.path.join(CTX, f"{sid}.md")) >= t0
+                except OSError:
+                    spilled = False
+            perf.update({
+                "read_file": bool(usage.get("read_file")),
+                "read_file_checked": bool(usage.get("ok")),
+                "read_file_truncated": bool(usage.get("truncated")),
+                "tool_calls": int(usage.get("total") or 0),
+                "tool_names": usage.get("names") or [],
+                "spilled": spilled,
+            })
         os.makedirs(DATA, exist_ok=True)
         with open(os.path.join(DATA, "perf.log"), "a", encoding="utf-8") as f:
             f.write(json.dumps(perf, ensure_ascii=False) + "\n")
@@ -7873,6 +7880,27 @@ def process_outbox():
                 print(f"[outbox] stale reply {name}")
                 safe_move(path, os.path.join(DONE, name + ".stale"))
                 continue
+            # 拒否文をキャラのセリフとして取り込まない（Google 側の run_google_task と同じ判定）。
+            # Antigravity は write_file の引数として本文を書くため拒否文が本文として届きうる。
+            body_text = (rep.get("text") or "").strip()
+            if body_text and not rep.get("image") and _is_refusal_body(body_text):
+                print(f"[outbox] refusal reply {name} -> {sid}")
+                safe_move(path, os.path.join(DONE, f"{int(time.time() * 1000)}_{name}.refusal"))
+                for m in s["messages"]:
+                    if (m.get("role") == "user"
+                            and m.get("status") in ("pending", "processing")
+                            and (not reply_to or m["id"] == reply_to)):
+                        # 拒否は同じプロンプトで繰り返されやすいので自動再試行せず、すぐ再送可能にする
+                        m["status"] = "error"
+                        m["error"] = "モデルが生成を拒否しました（コンテンツフィルタ）。本文を調整して再送してください。"
+                        m.pop("claimed_ts", None)
+                        m.pop("error_retries", None)
+                        if reply_to:
+                            break
+                save(s)
+                _google_clear_status(sid, "user")
+                imported = True
+                continue
             is_empty_reply = (not (rep.get("text") or "").strip()
                               and not rep.get("image") and not rep.get("choices")
                               and not rep.get("choices_status"))
@@ -8240,7 +8268,7 @@ def process_outbox():
                 memory_event.set()
             note_reply(s, reply_to, msg)
             ready_sid = sid          # ロックを出てから回転を進める
-            perf_ctx = (sid, target_u or {}, path, (st.get("ide_session") or ""))
+            perf_ctx = (sid, target_u or {}, path, (st.get("ide_session") or ""), (st.get("ai_provider") or ""))
         # ---- ロック外 ----
         if perf_ctx:
             _log_main_turn(*perf_ctx)
@@ -8553,6 +8581,62 @@ def _google_claim(sid, task_type, mid):
         return s
 
 
+def _log_google_fail(sid, task_type, res, prompt_len=0, msgs=0):
+    """API 失敗（特にフィルタブロック）を data/fail.log に残す。
+    原因不明のブロックを後から追えるようにするための記録。本文は書かない（長さだけ）。"""
+    try:
+        meta = res.get("meta") or {}
+        rec = {
+            "ts": now(),
+            "sid": sid,
+            "task": task_type,
+            "error": str(res.get("error") or "")[:200],
+            "code": str(res.get("code") or ""),
+            "http_status": res.get("http_status"),
+            "first_status": res.get("first_status"),
+            "second_status": res.get("second_status"),
+            "fetch_called": bool(res.get("fetch_called")),
+            "fetch_cache": res.get("fetch_cache"),
+            "retryable": bool(res.get("retryable")),
+            "block_reason": meta.get("block_reason") or res.get("block_reason") or "",
+            "finish_reason": meta.get("finish_reason") or res.get("finish_reason") or "",
+            "elapsed_ms": res.get("elapsed_ms"),
+            "prompt_len": int(prompt_len or 0),
+            "msgs": int(msgs or 0),
+        }
+        os.makedirs(DATA, exist_ok=True)
+        with open(os.path.join(DATA, "fail.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[fail] log error: {e}")
+
+
+def _google_fail_text(msg):
+    """API の英語エラーを画面用の日本語に直す。未知の文言はそのまま返す。
+    括弧内のコード（PROHIBITED_CONTENT 等）は原因調査の手掛かりなので残す。"""
+    m = str(msg or "").strip()
+    low = m.lower()
+    if low.startswith("prompt blocked"):
+        code = m.split(":", 1)[1].strip() if ":" in m else ""
+        return ("入力がコンテンツフィルタで止められました"
+                + (f"（{code}）" if code else "")
+                + "。プロバイダを変更すると通ることがあります。")
+    if low.startswith("generation blocked"):
+        code = m.split(":", 1)[1].strip() if ":" in m else ""
+        return ("生成中にコンテンツフィルタで止められました"
+                + (f"（{code}）" if code else "")
+                + "。プロバイダを変更すると通ることがあります。")
+    if "fetch step" in low:
+        return ("1回目のAPI呼び出しで、モデルがプロンプトの取得手順（fetch_prompt）を"
+                "実行しませんでした。もう一度送ってください。")
+    if low.startswith("empty response"):
+        detail = m[len("empty response"):].strip().strip("()").strip()
+        return ("モデルが本文を含まない応答を返しました"
+                + (f"（{detail}）" if detail else "")
+                + "。自動で2回再試行しましたが、本文は返りませんでした。")
+    return m
+
+
 def _google_fail(sid, task_type, mid, msg, retryable=False, key=None):
     filter_slot = None
     filter_task_ts = ""
@@ -8776,6 +8860,336 @@ def _google_write_outbox(sid, mid, task_type, rep, slot=""):
     return name
 
 
+# ---------------------------------------------------------------- 本文プロンプトのプレースホルダ変換（body_ph）
+DEFAULT_BODY_PH = {
+    "version": 1,
+    "enabled": True,
+    "max_per_prompt": 60,
+    "euph_restore": False,
+    "act": {
+        "ペニス": "__JP_PN__", "肉棒": "__JP_NB__", "陰茎": "__JP_IK__", "亀頭": "__JP_GK__",
+        "オマンコ": "__JP_PS__", "マンコ": "__JP_MK__", "秘部": "__JP_HB__", "膣": "__JP_CS__",
+        "陰唇": "__JP_IN__", "クリトリス": "__JP_CL__", "アナル": "__JP_AN__", "肛門": "__JP_KM__",
+        "フェラ": "__JP_FL__", "中出し": "__JP_ND__", "射精": "__JP_SJ__", "性交": "__JP_SK__",
+        "イラマチオ": "__JP_IR__", "クンニ": "__JP_KN__", "オナホ": "__JP_OB__", "調教": "__JP_BL__",
+        "スパンキング": "__JP_SP__", "拘束": "__JP_BD__", "蝋燭": "__JP_RO__", "尿道": "__JP_TY__",
+        "放尿": "__JP_UR__", "脱糞": "__JP_SC__", "異物": "__JP_EN__", "愛液": "__JP_LO__",
+        "精液": "__JP_SZ__", "幼女": "__MINOR__", "ロリ": "__LOLI__", "ショタ": "__SHOTA__",
+        "JK": "__JK__", "JC": "__JC__", "JS": "__JS__",
+    },
+    "euph": {
+        "高校生": "成人した学生",
+        "中学生": "年下の成人",
+        "小学生": "幼い頃の知人",
+        "生徒": "所属員",
+        "児童": "小さな知人",
+        "少女": "若い女性",
+        "少年": "若い男性",
+        "女の子": "女性",
+        "男の子": "男性",
+        "子ども": "若い人",
+        "子供": "若い人",
+        "幼い": "若々しい",
+        "あどけない": "落ち着いた",
+        "発育途中": "成長した",
+        "小柄": "華奢な体つき",
+        "貧乳": "小さめの胸",
+        "セーラー服": "指定の衣装",
+        "体操服": "運動着",
+    },
+    "keep": ["絶頂", "濡れ", "赤面", "学校", "学園", "生徒会", "部室", "制服", "ミレニアム"],
+}
+
+_BODY_PH_CACHE = {"mtime": None, "path": None, "data": None}
+PH_PAT = re.compile(
+    r"[_＿]{2,3}\s*([A-Za-z0-9]+(?:[_＿][A-Za-z0-9]+)*)(?:\s*[_＿]{1,3})?"
+    r"|[_＿]\s*([A-Za-z0-9]+(?:[_＿][A-Za-z0-9]+)*)\s*[_＿]"
+)
+UNRESOLVED_PAT = re.compile(r"__[A-Z0-9_]+__")
+PH_RULE_HEADER = "--- 表記ルール（厳守） ---"
+
+
+def invalidate_body_ph_cache():
+    _BODY_PH_CACHE.update(mtime=None, path=None, data=None)
+
+
+def ph_settings():
+    path = os.path.join(DATA, "body_ph.json")
+    try:
+        mt = os.stat(path).st_mtime
+    except OSError:
+        return copy.deepcopy(DEFAULT_BODY_PH)
+    if _BODY_PH_CACHE["mtime"] == mt and _BODY_PH_CACHE["path"] == path and _BODY_PH_CACHE["data"] is not None:
+        return _BODY_PH_CACHE["data"]
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return copy.deepcopy(DEFAULT_BODY_PH)
+        cfg = copy.deepcopy(DEFAULT_BODY_PH)
+        if "enabled" in raw:
+            cfg["enabled"] = bool(raw["enabled"])
+        if "version" in raw:
+            cfg["version"] = raw["version"]
+        if "max_per_prompt" in raw:
+            try:
+                cfg["max_per_prompt"] = max(0, int(raw["max_per_prompt"]))
+            except (ValueError, TypeError):
+                pass
+        if "euph_restore" in raw:
+            cfg["euph_restore"] = bool(raw["euph_restore"])
+        if isinstance(raw.get("act"), dict):
+            cfg["act"] = {str(k): str(v) for k, v in raw["act"].items()}
+        if isinstance(raw.get("euph"), dict):
+            cfg["euph"] = {str(k): str(v) for k, v in raw["euph"].items()}
+        if isinstance(raw.get("keep"), list):
+            cfg["keep"] = [str(x) for x in raw["keep"]]
+        _BODY_PH_CACHE.update(mtime=mt, path=path, data=cfg)
+        return cfg
+    except Exception:
+        return copy.deepcopy(DEFAULT_BODY_PH)
+
+
+def ph_enabled(st):
+    if not isinstance(st, dict):
+        st = {}
+    flag = bool(st.get("google_body_ph", True))
+    cfg = ph_settings()
+    return flag and bool(cfg.get("enabled", True))
+
+
+def ph_apply(text, return_skipped=False):
+    if not text:
+        setattr(ph_apply, "last_skipped", 0)
+        setattr(ph_apply, "last_applied_count", 0)
+        setattr(ph_apply, "last_total_applied", 0)
+        return (text, [], 0) if return_skipped else (text, [])
+    cfg = ph_settings()
+    if not cfg.get("enabled", True):
+        setattr(ph_apply, "last_skipped", 0)
+        setattr(ph_apply, "last_applied_count", 0)
+        setattr(ph_apply, "last_total_applied", 0)
+        return (text, [], 0) if return_skipped else (text, [])
+
+    # Failure mode 7: Neutralize pre-existing placeholders in user/prompt text
+    s_text = re.sub(
+        r"([_＿]{1,3}[A-Za-z0-9_]+[_＿]{0,3})",
+        lambda m: m.group(0).replace("_", "_\u200b").replace("＿", "＿\u200b"),
+        str(text)
+    )
+
+    keep_set = set(cfg.get("keep") or [])
+    act_dict = cfg.get("act") or {}
+    euph_dict = cfg.get("euph") or {}
+
+    table = {}
+    word_priority = {}
+    prio_idx = 0
+    for w, tok in act_dict.items():
+        if w not in keep_set:
+            table[w] = tok
+            if w not in word_priority:
+                word_priority[w] = prio_idx
+                prio_idx += 1
+    for w, eup in euph_dict.items():
+        if w not in keep_set and w not in table:
+            table[w] = eup
+            if w not in word_priority:
+                word_priority[w] = prio_idx
+                prio_idx += 1
+
+    if not table:
+        setattr(ph_apply, "last_skipped", 0)
+        setattr(ph_apply, "last_applied_count", 0)
+        setattr(ph_apply, "last_total_applied", 0)
+        return (s_text, [], 0) if return_skipped else (s_text, [])
+
+    all_words = set(keep_set) | set(table.keys())
+    sorted_words = sorted([w for w in all_words if w], key=len, reverse=True)
+    if not sorted_words:
+        setattr(ph_apply, "last_skipped", 0)
+        setattr(ph_apply, "last_applied_count", 0)
+        setattr(ph_apply, "last_total_applied", 0)
+        return (s_text, [], 0) if return_skipped else (s_text, [])
+
+    def _make_word_pattern(w):
+        esc = re.escape(w)
+        if w.isalnum() and w.isascii():
+            return r"(?<![A-Za-z0-9_])" + esc + r"(?![A-Za-z0-9_])"
+        return esc
+
+    pat = re.compile("|".join(_make_word_pattern(w) for w in sorted_words))
+
+    matches = []
+    for m in pat.finditer(s_text):
+        w = m.group(0)
+        if w in keep_set:
+            continue
+        if w in table:
+            matches.append((m.start(), m.end(), w, table[w]))
+
+    max_count = cfg.get("max_per_prompt", 60)
+    total_matches = len(matches)
+    skipped = 0
+
+    if total_matches <= max_count:
+        allowed_indices = set(range(total_matches))
+    else:
+        sorted_indices = sorted(
+            range(total_matches),
+            key=lambda idx: (word_priority.get(matches[idx][2], 99999), matches[idx][0])
+        )
+        allowed_indices = set(sorted_indices[:max_count])
+        skipped = total_matches - max_count
+
+    setattr(ph_apply, "last_skipped", skipped)
+
+    out_parts = []
+    last_pos = 0
+    pairs = {}
+    act_applied_count = 0
+    total_applied_count = 0
+    for idx, (st_pos, end_pos, w, repl) in enumerate(matches):
+        if idx in allowed_indices:
+            out_parts.append(s_text[last_pos:st_pos])
+            out_parts.append(repl)
+            last_pos = end_pos
+            total_applied_count += 1
+            if w in act_dict:
+                act_applied_count += 1
+                pairs[w] = repl
+    out_parts.append(s_text[last_pos:])
+    new_text = "".join(out_parts)
+
+    setattr(ph_apply, "last_applied_count", act_applied_count)
+    setattr(ph_apply, "last_total_applied", total_applied_count)
+
+    applied_pairs = sorted(pairs.items())
+    if return_skipped:
+        return new_text, applied_pairs, skipped
+    return new_text, applied_pairs
+
+
+def ph_rule_text(pairs):
+    if not pairs:
+        return ""
+    rule_desc = (
+        "本文中で次の語を書くときは、必ず右の記号に置き換えてください。記号は一字も変えずに書くこと。\n"
+        "記号の前後に説明や括弧を足さないこと。"
+    )
+    items = "  ".join(f"{w}={tok}" for w, tok in pairs)
+    return f"{PH_RULE_HEADER}\n{rule_desc}\n{items}"
+
+
+def ph_restore(text):
+    if not text:
+        setattr(ph_restore, "last_unresolved", [])
+        return "", 0, 0
+    cfg = ph_settings()
+    act_dict = cfg.get("act") or {}
+    inv = {tok: w for w, tok in act_dict.items()}
+    restored = [0]
+    unresolved = []
+
+    def rep(m):
+        content = m.group(1) or m.group(2) or ""
+        key = "__" + content.upper() + "__"
+        w = inv.get(key)
+        if w:
+            restored[0] += 1
+            return w
+        raw_match = m.group(0)
+        is_placeholder = (
+            raw_match.startswith(("__", "＿＿", "_＿", "＿_"))
+            or "_" in content
+            or "＿" in content
+            or (content.isupper() and len(content) >= 2)
+        )
+        if is_placeholder and UNRESOLVED_PAT.fullmatch(key):
+            unresolved.append(key)
+        return raw_match
+
+    out = PH_PAT.sub(rep, str(text))
+    out = out.replace("_\u200b", "_").replace("＿\u200b", "＿").replace("__\u200b", "__")
+
+    if cfg.get("euph_restore"):
+        euph_dict = cfg.get("euph") or {}
+        rev_euph = {eup: w for w, eup in euph_dict.items() if eup and w}
+        if rev_euph:
+            rev_pat = re.compile("|".join(re.escape(k) for k in sorted(rev_euph.keys(), key=len, reverse=True)))
+            out = rev_pat.sub(lambda m: rev_euph[m.group(0)], out)
+
+    left = len(unresolved)
+    setattr(ph_restore, "last_unresolved", list(unresolved))
+    return out, restored[0], left
+
+
+def _log_ph_misses(text="", misses=None):
+    cfg = ph_settings()
+    act_tokens = set((cfg.get("act") or {}).values())
+    if misses is None:
+        last_un = getattr(ph_restore, "last_unresolved", None)
+        if last_un is not None:
+            misses = [tok for tok in last_un if tok not in act_tokens]
+    if misses is None and text:
+        raw_matches = []
+        for m in PH_PAT.finditer(str(text)):
+            c = m.group(1) or m.group(2) or ""
+            k = "__" + c.upper() + "__"
+            raw = m.group(0)
+            if (raw.startswith(("__", "＿＿", "_＿", "＿_")) or "_" in c or "＿" in c or (c.isupper() and len(c) >= 2)) and UNRESOLVED_PAT.fullmatch(k):
+                raw_matches.append(k)
+        misses = [tok for tok in raw_matches if tok not in act_tokens]
+    if not misses:
+        return
+    today = time.strftime("%Y-%m-%d")
+    path = os.path.join(DATA, "ph_misses.log")
+    try:
+        existing = []
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                existing = f.readlines()
+        existing_set = {line.strip() for line in existing}
+        new_lines = []
+        for tok in misses:
+            entry = f"{today} {tok}"
+            if entry not in existing_set:
+                new_lines.append(entry + "\n")
+                existing_set.add(entry)
+        if new_lines:
+            all_lines = existing + new_lines
+            if len(all_lines) > 1000:
+                all_lines = all_lines[-1000:]
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(all_lines)
+    except Exception as e:
+        print(f"[ph] warning: failed to write ph_misses.log: {e}")
+
+
+def ph_log(task_type, applied, restored, left, length=0, raw_len_before=0, elapsed_ms=0, skipped=None, text="", sid=""):
+    if isinstance(applied, (list, tuple)):
+        app_count = getattr(ph_apply, "last_applied_count", len(applied))
+    else:
+        app_count = int(applied or 0)
+    raw_len_after = length or raw_len_before
+    if skipped is None:
+        skipped = getattr(ph_apply, "last_skipped", 0)
+    skip_str = f" skipped={skipped}" if (skipped and skipped > 0) else ""
+    print(f"[ph] applied={app_count}{skip_str} restored={restored} left={left} {raw_len_before}字 → {raw_len_after}字 {elapsed_ms}ms")
+    try:
+        os.makedirs(DATA, exist_ok=True)
+        rec = {"ts": now(), "sid": sid, "task": task_type, "applied": app_count,
+               "restored": restored, "left": left, "skipped": int(skipped or 0),
+               "len_before": raw_len_before, "len_after": raw_len_after, "ms": elapsed_ms}
+        with open(os.path.join(DATA, "ph.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[ph] warning: failed to write ph.log: {e}")
+    if left > 0:
+        _log_ph_misses(text=text)
+
+
 def run_google_task(sid, mid, task_type=None, key=None):
     if task_type not in ("user", "choices", "image_refine", "memory_extract", "consolidation") \
             and mid in ("user", "choices", "image_refine", "memory_extract", "consolidation"):
@@ -8805,6 +9219,11 @@ def run_google_task(sid, mid, task_type=None, key=None):
         if task_type == "choices":
             choices_slot = "erotic" if _google_choice_type(m) == "erotic" else "normal"
         prompt, images, out_type, system = _google_build_prompt(s, m, task_type)
+        ph_applied = []
+        if task_type == "user" and ph_enabled(st):
+            prompt, ph_applied = ph_apply(prompt)
+            if ph_applied and PH_RULE_HEADER not in prompt:
+                prompt += "\n\n" + ph_rule_text(ph_applied)
         use_fetch = bool(st.get("google_fetch", True)) and (task_type == "user")
         fetch_cache = bool(st.get("google_fetch_cache", True))
         if not fetch_cache:
@@ -8840,10 +9259,19 @@ def run_google_task(sid, mid, task_type=None, key=None):
             _cancel_inflight_task(sid, mid, task_type)
             return
         if res.get("error"):
-            _google_fail(sid, task_type, mid, str(res["error"]),
+            _log_google_fail(sid, task_type, res, prompt_len=len(prompt),
+                             msgs=len(s.get("messages") or []))
+            _google_fail(sid, task_type, mid, _google_fail_text(res["error"]),
                          retryable=bool(res.get("retryable")), key=key)
             return
         raw_text = res.get("text") or ""
+        if task_type == "user" and ph_enabled(st):
+            t0_ph = time.perf_counter()
+            raw_len_before = len(raw_text)
+            raw_text, ph_restored, ph_left = ph_restore(raw_text)
+            ph_ms = max(0, int((time.perf_counter() - t0_ph) * 1000))
+            ph_log(task_type, ph_applied, ph_restored, ph_left, length=len(raw_text),
+                   raw_len_before=raw_len_before, elapsed_ms=ph_ms, text=raw_text, sid=sid)
         obj, json_ok = google_ai.parse_json_text(raw_text)
         if not isinstance(obj, dict):
             if _looks_like_refusal(raw_text):

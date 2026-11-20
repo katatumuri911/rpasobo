@@ -197,7 +197,7 @@ def find_garbage(include_trash=False):
             elif token not in real_sids:
                 # どの正規セッションにも紐づかない孤児ファイル
                 # （ただし設定ファイルなどの特定固定名は除く）
-                if base not in ("agents_md.json", "ide_moves.json", "vapid_keys.json", "push_subscriptions.json", "settings.json", "server.json", "decensor.json", "tag_dictionary.json"):
+                if base not in ("agents_md.json", "ide_moves.json", "vapid_keys.json", "push_subscriptions.json", "settings.json", "server.json", "decensor.json", "tag_dictionary.json", "body_ph.json"):
                     orphan_files.append(f)
 
     # session フォルダ下のゴミチャンネルフォルダ・ファイル

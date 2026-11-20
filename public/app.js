@@ -136,7 +136,7 @@ function isMobileInputDevice() {
 }
 const SHORT_STATUS = {
   "サーバー未接続": "未接続", "AI応答待ち": "応答待ち", "AI応答＆候補生成中": "応答＋候補",
-  "候補生成中": "候補", "タグ推敲中": "推敲", "記憶整理中": "記憶"
+  "候補生成中": "候補", "タグ推敲中": "推敲", "記憶整理中": "記憶", "エラーが発生しました": "エラー"
 };
 
 // 入力欄のプレースホルダ。PC は Enter 送信（Shift+Enter で改行）、スマホは Enter 改行。
@@ -443,6 +443,26 @@ function closeTopmostLayer() {
   return false;
 }
 
+function initStatusPillErrorToast() {
+  [$("statusPill"), $("mobileStatusChip"), $("sideStatusPill")].forEach((el) => {
+    if (!el || el.__errClickBound) return;
+    el.__errClickBound = true;
+    const triggerToast = () => {
+      if (el.classList.contains("err")) {
+        const msg = el.title || el.textContent || "エラーが発生しています";
+        if (typeof toast === "function") toast(msg, { kind: "err", ms: 4000 });
+      }
+    };
+    el.addEventListener("click", triggerToast);
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        triggerToast();
+      }
+    });
+  });
+}
+
 function updateHeaderAndSideStatus() {
   const title = $("title");
   const sideTitle = $("sideTitle");
@@ -457,6 +477,7 @@ function updateHeaderAndSideStatus() {
   if (sideStatusPill && statusPill) {
     sideStatusPill.className = statusPill.className;
     sideStatusPill.textContent = statusPill.textContent;
+    sideStatusPill.title = statusPill.title || "";
   }
 
   const sideRpToggle = $("sideRpToggle");
@@ -470,8 +491,10 @@ function updateHeaderAndSideStatus() {
     const text = statusPill.textContent || "";
     chip.textContent = (mqTiny && mqTiny.matches) ? (SHORT_STATUS[text] || text) : text;
     chip.classList.toggle("dim", !!rpMode);
+    chip.title = statusPill.title || "";
   }
   syncActionControlsVisibility();
+  initStatusPillErrorToast();
 }
 
 // モデルの切り替えは入力欄のお気に入りチップに移したので、footBar は常に footer に置く
@@ -768,7 +791,8 @@ async function refreshSessions() {
   if (typeof document !== "undefined" && document.hidden) return;
   try {
     const r = await api("/api/sessions");
-    sessions = r?.sessions || [];
+    if (!r || !Array.isArray(r.sessions)) return;
+    sessions = r.sessions;
     if (!sessions.find((s) => s.id === sid) && sessions.length) {
       await switchTo(sessions[0].id);
       return;
@@ -971,6 +995,7 @@ function fillForm(st, force = false) {
   if ($("f_decensor_choices") && canSet("f_decensor_choices")) $("f_decensor_choices").checked = st.decensor_choices !== false;
   if ($("f_decensor_reply") && canSet("f_decensor_reply")) $("f_decensor_reply").checked = st.decensor_reply !== false;
   if ($("f_google_fetch_cache") && canSet("f_google_fetch_cache")) $("f_google_fetch_cache").checked = st.google_fetch_cache !== false;
+  if ($("f_google_body_ph") && canSet("f_google_body_ph")) $("f_google_body_ph").checked = st.google_body_ph !== false;
   const sharedEl = $("f_shared_memories");
   if (sharedEl && canSet("f_shared_memories")) sharedEl.checked = !!st.shared_memories;
   for (const [id, k] of Object.entries(CHAR)) {
@@ -995,6 +1020,7 @@ function readForm() {
   st.decensor_choices = $("f_decensor_choices")?.checked ?? true;
   st.decensor_reply = $("f_decensor_reply")?.checked ?? true;
   st.google_fetch_cache = $("f_google_fetch_cache")?.checked ?? true;
+  st.google_body_ph = $("f_google_body_ph")?.checked ?? true;
   st.shared_memories = $("f_shared_memories")?.checked ?? false;
   st.character = st.character || {};
   for (const [id, k] of Object.entries(CHAR)) {
@@ -6284,7 +6310,14 @@ function render() {
         p.id = "progress";
         p.className = "progress";
       }
-      p.innerHTML = progressSid === s.id ? progressHtml : "";
+      const html = progressSid === s.id ? progressHtml : "";
+      if (p.innerHTML !== html) {
+        // 中身を入れ直すとスクロール位置が先頭に戻る。最新行を見ていたなら下端に戻す
+        const atBottom = !p.scrollHeight ||
+          (p.scrollHeight - p.scrollTop - p.clientHeight < 40);
+        p.innerHTML = html;
+        if (atBottom && p.isConnected && p.scrollHeight > p.clientHeight) p.scrollTop = p.scrollHeight;
+      }
       desiredChildren.push(p);
       if (!p.innerHTML) setTimeout(pollProgress, 0);  // 送った直後は2秒待たずに読む
     }
@@ -6308,14 +6341,17 @@ function render() {
   }
 
   const pill = $("statusPill");
-  pill.className = "pill " + (waitingInput ? "wait" : (waitingChoices || waitingRefine || waitingMemory ? "wait" : "ok"));
-  pill.textContent = (waitingInput && waitingChoices)
-    ? "AI応答＆候補生成中"
-    : (waitingInput ? "AI応答待ち" : (waitingChoices ? "候補生成中" : (waitingRefine ? "タグ推敲中" : (waitingMemory ? "記憶整理中" : "入力待機"))));
-  const rotPhase = state?.setting?.rotation?.phase;
-  if (!waitingInput && rotPhase && rotPhase !== "armed") {
-    pill.className = "pill wait";
-    pill.textContent = rotPhase === "cutover" ? "新しいセッションへ切替中…" : "世代交代を準備中…";
+  if (pill) {
+    pill.title = "";
+    pill.className = "pill " + (waitingInput ? "wait" : (waitingChoices || waitingRefine || waitingMemory ? "wait" : "ok"));
+    pill.textContent = (waitingInput && waitingChoices)
+      ? "AI応答＆候補生成中"
+      : (waitingInput ? "AI応答待ち" : (waitingChoices ? "候補生成中" : (waitingRefine ? "タグ推敲中" : (waitingMemory ? "記憶整理中" : "入力待機"))));
+    const rotPhase = state?.setting?.rotation?.phase;
+    if (!waitingInput && rotPhase && rotPhase !== "armed") {
+      pill.className = "pill wait";
+      pill.textContent = rotPhase === "cutover" ? "新しいセッションへ切替中…" : "世代交代を準備中…";
+    }
   }
   syncSendButton(waitingInput);
 
@@ -6533,7 +6569,30 @@ async function poll() {
     // 待っている間にチャンネルを切り替えていたら、前のチャンネルの結果は捨てる
     // （捨てないと前のチャンネルの設定が今のチャンネルの画面に出て、保存すると上書きしてしまう）
     if (want !== sid) return;
-    if (s.error) { sid = ""; resetDecensorToast(); return refreshSessions(); }
+    const isInvalid = !s || typeof s !== "object" || s.error || s.detail || (!s.unchanged && (!s.id || !Array.isArray(s.messages)));
+    if (isInvalid) {
+      let rawErr = "";
+      if (s && typeof s === "object") {
+        if (s.error) rawErr = typeof s.error === "string" ? s.error : (s.error?.message || (Object.keys(s.error).length ? JSON.stringify(s.error) : ""));
+        else if (s.detail) rawErr = typeof s.detail === "string" ? s.detail : JSON.stringify(s.detail);
+        else if (s.message && !s.id) rawErr = typeof s.message === "string" ? s.message : JSON.stringify(s.message);
+      }
+      const errDetail = rawErr ? String(rawErr).trim() : "";
+      const pill = $("statusPill");
+      if (pill) {
+        pill.className = "pill err";
+        pill.textContent = "エラーが発生しました";
+        if (!errDetail) {
+          pill.title = "エラーが発生しました";
+        } else if (/^(?:エラー|error)[:：]/i.test(errDetail)) {
+          pill.title = errDetail;
+        } else {
+          pill.title = "エラー: " + errDetail;
+        }
+      }
+      updateHeaderAndSideStatus();
+      return;
+    }
     if (s.unchanged) {
       if (!state) {
         lastRev = -1;
@@ -6543,16 +6602,22 @@ async function poll() {
         historyState.hasMore = s.has_history;
         render();
       }
-      if ($("statusPill").classList.contains("err")) {
-        $("statusPill").className = "pill ok";
-        $("statusPill").textContent = "入力待機";
-        updateHeaderAndSideStatus();
+      if ($("statusPill")?.classList?.contains("err")) {
+        const pill = $("statusPill");
+        if (pill) pill.title = "";
+        if (state) {
+          render();
+        } else if (pill) {
+          pill.className = "pill ok";
+          pill.textContent = "入力待機";
+          updateHeaderAndSideStatus();
+        }
       }
       markSeen();
       return;
     }
     const key = s.id + ":" + s.rev;  // rev はチャンネルごとの番号なので id と組にして比べる
-    if (key !== lastRev) {
+    if (key !== lastRev || $("statusPill")?.classList?.contains("err")) {
       const first = lastRev === -1;
       const prevState = state;
       lastRev = key;
@@ -6603,8 +6668,19 @@ async function poll() {
     }
     markSeen();
   } catch (e) {
-    $("statusPill").className = "pill err";
-    $("statusPill").textContent = "サーバー未接続";
+    const pill = $("statusPill");
+    if (pill) {
+      pill.className = "pill err";
+      pill.textContent = "サーバー未接続";
+      const errMsg = e?.message ? String(e.message).trim() : "";
+      if (!errMsg) {
+        pill.title = "サーバー未接続";
+      } else if (/^(?:未接続|エラー|error)[:：]/i.test(errMsg)) {
+        pill.title = errMsg;
+      } else {
+        pill.title = "未接続: " + errMsg;
+      }
+    }
     updateHeaderAndSideStatus();
   }
 }
@@ -6643,8 +6719,8 @@ const { stepLabel, stepDetail, stepRaw } = PL;
 
 // トーストは主要なステップだけ（送信・読み込み・書き込み・完了・エラー）。新しい行が出た瞬間に1回だけ
 const STEP_TOAST_KINDS = new Set(["read", "write"]);
-// 進捗カードに何行見えるかは CSS の高さ（3行分）が決める。
-// ここで件数を数えてまとめない（行は時系列に積むだけ）。
+// 進捗カードは行を時系列に積み、文章の長さに合わせて縦に伸びる。
+// ここで件数を数えてまとめない（折り返しと高さは CSS が決める）。
 function notifyProgressStep(items, running, userTime) {
   const s = state;
   if (!s) return;
@@ -6809,7 +6885,7 @@ async function pollProgress() {
     // 消してよいのは「返事が届いたターンのエラー」だけ（下の answered の処理）。
     // wait_input.py の行だけを隠す。以前は最後の wait_input より前を切り捨てていたが、
     // それだと「読み込み→待機」の待機中に直前のステップが消えて1行だけになっていた。
-    // 窓は最後の3件なので、古いターンは自然に押し出される。
+    // 古いターンの行は末尾40件まで残す（カード内をスクロールすれば読める）。
     let shown = items.filter((it) => !it.internal);
     // 本文をまだ待っているのに、前のターンの reply（返答完了）が
     // 現在のステップとして返ってきても表示しない。本文を渡した
@@ -6996,8 +7072,8 @@ async function pollProgress() {
     let statusRow = null;
     if (!stopRow && noteIsError && !hasErrorRow)
       statusRow = { key: "__note_error__", html: `<div class="p-row error"><span class="p-mark">⚠️</span><span class="p-text">${esc(note)}</span></div>` };
-    // 行は時系列に積むだけ（件数でまとめない）。何行見えるかはカードの高さ
-    // （CSSで3行分）が決める。はみ出した古い行は上で切れる。
+    // 行は時系列に積むだけ（件数でまとめない）。カードは文章に合わせて伸び、
+    // 上限を超えたらカード内をスクロールする（古い行も切り捨てない）。
     let windowRows = progressHistory.slice();
     if (statusRow) windowRows = windowRows.concat([statusRow]);
     // 新しく増えた行のうち一番下のものだけをアニメさせる（古い行は動かさない）。
@@ -7018,32 +7094,17 @@ async function pollProgress() {
     const box = $("progress");
     if (box && box.innerHTML !== progressHtml) {
       const nearBottom = !navHoldBottom && !topAlignHold && (log.scrollHeight - log.scrollTop - log.clientHeight < 120);
+      // カードの中も「読んでいた位置」を尊重する。下端にいるときだけ最新行へ寄せる
+      // （古い行を読んでいる最中に、新しい行が来ても勝手に飛ばさないため）。
+      const cardNearBottom = !box.scrollHeight ||
+        (box.scrollHeight - box.scrollTop - box.clientHeight < 40);
       box.innerHTML = progressHtml;
-      // 高さの決め方：ふつうは3行分（CSS）。
-      // エラー行が窓（最後の3行）に入っているときだけ、その行から下が丸ごと見える
-      // 高さまで広げる。行の途中で切れて文字が半分見えるのを避けるため。
-      // エラーが上に流れたら 3行窓に戻る（同じスクロール法則のまま）。
+      // 直近の行にエラーがあれば赤枠を付ける。高さは文章に合わせて CSS が伸ばす
+      // （行を切り捨てず、上限を超えた分だけカード内でスクロールする）。
       const clsOf = (row) => (/^<div class="([^"]*)"/.exec(row.html) || [])[1] || "";
-      const tail3 = windowRows.slice(-3);
-      const hasErr = tail3.some((x) => /(^| )error( |$)/.test(clsOf(x)));
+      const hasErr = windowRows.slice(-3).some((x) => /(^| )error( |$)/.test(clsOf(x)));
       if (box.classList && box.classList.toggle) box.classList.toggle("has-error", hasErr);
-      if (!hasErr) {
-        if (box.style) box.style.maxHeight = "";
-      } else if (box.querySelectorAll) {
-        const els = Array.prototype.slice.call(box.querySelectorAll(".p-row"));
-        let at = -1;
-        for (let i = Math.max(0, els.length - 3); i < els.length; i += 1)
-          if (els[i].classList && els[i].classList.contains("error")) at = i;
-        if (at >= 0) {
-          // エラー行の上2行までは残す（何が起きてから失敗したか分かるように）
-          const rest = els.slice(Math.max(0, at - 2));
-          const need = rest.reduce((n, el) => n + el.getBoundingClientRect().height, 0)
-            + 4 * Math.max(0, rest.length - 1) + 12 + 2;
-          if (box.style) box.style.maxHeight = Math.min(Math.ceil(need), 320) + "px";
-        }
-      }
-      // カードは3行分の高さなので、古い行は上に隠れる。常に最新の行が見えるよう下端へ寄せる
-      if (box.scrollHeight > box.clientHeight) box.scrollTop = box.scrollHeight;
+      if (cardNearBottom && box.scrollHeight > box.clientHeight) box.scrollTop = box.scrollHeight;
       if (nearBottom) { log.scrollTop = log.scrollHeight; pinnedBottom = true; }
     }
   } catch { /* 読めないときは前の表示のまま */ }
@@ -11779,7 +11840,8 @@ if (typeof window !== 'undefined') {
       (m.image && (m.image.status === "queued" || m.image.status === "generating"))
     );
     const hidden = typeof document !== "undefined" && document.hidden;
-    const delay = hidden ? (isWaiting ? 1000 : 5000) : (isWaiting ? 100 : 1500);
+    const isErr = $("statusPill")?.classList?.contains("err");
+    const delay = isErr ? (hidden ? 5000 : 1500) : (hidden ? (isWaiting ? 1000 : 5000) : (isWaiting ? 100 : 1500));
     pollTimer = setTimeout(pollLoop, delay);
   }
 

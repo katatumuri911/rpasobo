@@ -154,6 +154,38 @@ class TestMinimalSpeedup(unittest.TestCase):
         self.assertIsNotNone(turn["latency_ms"])
         self.assertIn("view_file", turn["tool_names"])
 
+    def test_log_main_turn_always_records_latency_without_env(self):
+        """RPCHAT_PERF_LOG 未設定でも latency と provider は常に記録する（AG の p95 を追うため）"""
+        os.environ.pop("RPCHAT_PERF_LOG", None)
+        s = self._session()
+        m = make_msg("user", "こんにちは", "u1")
+        s["messages"].append(m)
+        server.save(s)
+        outbox = os.path.join(server.OUTBOX, "dummy.json")
+        with open(outbox, "w", encoding="utf-8") as f:
+            f.write("{}")
+        m["claimed_ts"] = server.now()
+        with patch.object(server.ide_poke, "tool_usage_since") as usage:
+            server._log_main_turn(s["id"], m, outbox, "ide-1", "antigravity")
+            usage.assert_not_called()          # 詳細計測はオフのとき呼ばない
+        with open(os.path.join(server.DATA, "perf.log"), encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        turn = [r for r in rows if r.get("event") == "turn"][-1]
+        self.assertEqual(turn["provider"], "antigravity")
+        self.assertIsNotNone(turn["latency_ms"])
+        self.assertNotIn("tool_names", turn)
+
+    def test_ph_log_writes_jsonl(self):
+        """ph_log は data/ph.log に1行ずつ JSON で残す（実測用）"""
+        server.ph_log("user", 3, 3, 0, length=100, raw_len_before=120, elapsed_ms=7, sid="sid-x")
+        with open(os.path.join(server.DATA, "ph.log"), encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        self.assertEqual(rows[-1]["sid"], "sid-x")
+        self.assertEqual(rows[-1]["applied"], 3)
+        self.assertEqual(rows[-1]["restored"], 3)
+        self.assertEqual(rows[-1]["left"], 0)
+        self.assertEqual(rows[-1]["task"], "user")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

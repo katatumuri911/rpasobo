@@ -41,7 +41,7 @@
 </aside>
 
 <div id="app">
-  <span id="mobileStatusChip" class="pill">接続中…</span>
+  <span id="mobileStatusChip" class="pill" role="status" aria-live="polite">接続中…</span>
   <button id="mobileElapsedChip" type="button" class="mobile-elapsed-chip" title="作中の時間を変える">📅 <span id="mobileElapsedTimeLabel">1日目・午前 ☀️</span></button>
   <header>
     <button id="sideToggle" class="sub" title="チャンネル一覧">☰</button>
@@ -51,7 +51,7 @@
         <button id="elapsedTimeBtn" type="button" class="sub elapsed-time-btn" title="経過時間（クリックで時間経過メニュー）">📅 <span id="elapsedTimeLabel">1日目・午前 ☀️</span> ▼</button>
         <div id="elapsedTimeDropdown" class="elapsed-time-dropdown hidden"></div>
       </div>
-      <span id="statusPill" class="pill">接続中…</span>
+      <span id="statusPill" class="pill" role="status" aria-live="polite">接続中…</span>
       <button id="rpToggle" title="背景に画像を表示">背景表示</button>
       <button id="ragToggle" title="記憶を管理">🧠 記憶 <span id="ragCount">0</span></button>
       <button id="settingsToggle">設定</button>
@@ -162,6 +162,7 @@
         <input type="checkbox" id="f_decensor_reply" checked> 本文の婉曲表現も自動で戻す
         <span class="muted">「秘所」→「おまんこ」など（語彙はアプリ全体の設定）</span></label>
       <label class="check" title="Vertex AI の第1段（fetch_prompt）をキャッシュし、API往復を2回から1回に減らして高速化します。異常時はOFFにしてください。"><input type="checkbox" id="f_google_fetch_cache" checked> fetch段をキャッシュして高速化（試験的・OFFで従来動作）</label>
+      <label class="check" title="本文プロンプトの危険語・年齢連想語を一時的にプレースホルダに置換してAPIに送り、受信時に復元します。フィルタ誤検知を回避します。"><input type="checkbox" id="f_google_body_ph" checked> 本文プロンプトのプレースホルダ変換（フィルタ回避・既定ON）</label>
       <label class="check" title="検索時に同じキャラ名を持つ他チャンネルの記憶も横断して参照できるようにします（読み込み専用）"><input type="checkbox" id="f_shared_memories"> キャラクター共通記憶 <span class="muted">同名キャラの他チャンネルの記憶も参照</span></label>
       <div class="grid2">
         <label>あなたの呼び名<input id="f_user_name"></label>
