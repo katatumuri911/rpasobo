@@ -302,9 +302,10 @@ def run_arm(arm, prompt, model, provider, sid, run_no, retries=3, retry_wait=45,
 
 
 def run_arm_prod(arm, prompt, model, provider, sid, run_no, retries=2, retry_wait=30,
-                 thinking_level="auto", text_dir="", tag=""):
+                 thinking_level="auto", text_dir="", tag="", sig_cache=False):
     """本番経路（google_ai.generate の2段階＝fetch → 本文）でトータル時間を測る"""
-    in_ph = arm.endswith("in_ph")
+    in_ph = arm.endswith("in_ph") or arm == "sig_ph"
+    use_sig_cache = sig_cache or arm in ("sig", "sig_ph")
     if in_ph:
         newp, in_subs = transform_prompt(prompt, "placeholder")
         p = newp + "\n\n" + PLACEHOLDER_RULE
@@ -316,12 +317,14 @@ def run_arm_prod(arm, prompt, model, provider, sid, run_no, retries=2, retry_wai
            "elapsed_ms": 0, "out_tokens": 0, "thought_tokens": 0, "total_tokens": 0,
            "raw_chars": 0, "chars": 0, "restored": 0, "ph_left": 0,
            "explicit_in_raw": 0, "source": "generate", "in_subs": in_subs,
-           "fetch_called": False, "first_status": None, "second_status": None, "text_file": ""}
+           "fetch_called": False, "first_status": None, "second_status": None, "text_file": "",
+           "fetch_cache": "off"}
     t0 = time.time()
     res = None
     for attempt in range(retries + 1):
         res = google_ai.generate(model, p, SYSTEM, safety_off=True, max_output_tokens=MAX_TOKENS,
-                                 fetch=True, provider=provider, thinking_level=thinking_level)
+                                 fetch=True, provider=provider, thinking_level=thinking_level,
+                                 fetch_cache=use_sig_cache)
         err = str(res.get("error") or "")
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
             if attempt < retries:
@@ -333,6 +336,7 @@ def run_arm_prod(arm, prompt, model, provider, sid, run_no, retries=2, retry_wai
     rec["first_status"] = res.get("first_status")
     rec["second_status"] = res.get("second_status")
     rec["fetch_called"] = bool(res.get("fetch_called"))
+    rec["fetch_cache"] = res.get("fetch_cache", "off")
     meta = res.get("meta") or {}
     um = meta.get("usage") or {}
     rec["out_tokens"] = int(um.get("candidatesTokenCount") or 0)
@@ -400,6 +404,35 @@ def fisher_p(a, n1, b, n2):
     return min(1.0, s)
 
 
+def _calc_p90(vals):
+    if not vals:
+        return 0.0
+    if len(vals) >= 10:
+        return statistics.quantiles(vals, n=10)[8]
+    return max(vals)
+
+
+def _print_fetch_cache_breakdown(recs):
+    has_cache = any(r.get("fetch_cache") and r.get("fetch_cache") != "off" for r in recs)
+    if not has_cache:
+        return
+    print("\n--- fetch_cache 内訳（モデル別）---")
+    head = f"{'model':<24}{'arm':<12}{'n':>3}{'hit':>5}{'miss':>5}{'fallback':>9}{'disabled':>9}{'off':>5}"
+    print(head)
+    print("-" * len(head))
+    groups = {}
+    for r in recs:
+        k = (r.get("model") or "unknown", r.get("arm") or "unknown")
+        groups.setdefault(k, []).append(r)
+    for (m, arm), rs in sorted(groups.items()):
+        hit = sum(1 for r in rs if r.get("fetch_cache") == "hit")
+        miss = sum(1 for r in rs if r.get("fetch_cache") == "miss")
+        fb = sum(1 for r in rs if r.get("fetch_cache") == "hit_fallback")
+        dis = sum(1 for r in rs if r.get("fetch_cache") == "disabled")
+        off = sum(1 for r in rs if r.get("fetch_cache") == "off")
+        print(f"{m:<24}{arm:<12}{len(rs):>3}{hit:>5}{miss:>5}{fb:>9}{dis:>9}{off:>5}")
+
+
 def report(rows, arms, tag=None):
     """ログから集計。tag 指定でそのバッチだけを見る"""
     recs = [r for r in rows if tag is None or r.get("tag") == tag]
@@ -408,7 +441,7 @@ def report(rows, arms, tag=None):
         return
     print(f"\n=== 集計 tag={tag or 'all'} n={len(recs)} ===")
     head = (f"{'arm':<12}{'n':>3}{'ok':>4}{'率':>7}{'blk':>5}{'拒否':>5}{'エラー':>6}"
-            f"{'平均秒':>8}{'中央秒':>8}{'出tok':>7}{'考tok':>7}{'文字':>7}{'復元':>5}{'残':>4}")
+            f"{'平均秒':>8}{'中央秒':>8}{'p90秒':>7}{'最長秒':>7}{'出tok':>7}{'考tok':>7}{'文字':>7}{'復元':>5}{'残':>4}")
     print(head)
     print("-" * len(head))
     for arm in arms:
@@ -417,22 +450,43 @@ def report(rows, arms, tag=None):
             continue
         ok = [r for r in rs if r["ok"]]
         el = [r["elapsed_ms"] / 1000 for r in rs]
+        p90 = _calc_p90(el)
+        max_s = max(el) if el else 0.0
         print(f"{arm:<12}{len(rs):>3}{len(ok):>4}{len(ok) / len(rs) * 100:>6.0f}%"
               f"{sum(1 for r in rs if r['blocked']):>5}"
               f"{sum(1 for r in rs if r['refused']):>5}"
               f"{sum(1 for r in rs if not (r['ok'] or r['blocked'] or r['refused'])):>6}"
-              f"{statistics.mean(el):>8.1f}{statistics.median(el):>8.1f}"
+              f"{statistics.mean(el):>8.1f}{statistics.median(el):>8.1f}{p90:>7.1f}{max_s:>7.1f}"
               f"{statistics.mean([r['out_tokens'] for r in rs]):>7.0f}"
               f"{statistics.mean([r['thought_tokens'] for r in rs]):>7.0f}"
               f"{statistics.mean([r['chars'] for r in rs]):>7.0f}"
               f"{sum(r['restored'] for r in rs):>5}{sum(r['ph_left'] for r in rs):>4}")
+        # sig アームは初回が必ずミスのため、2回目以降の内訳も併記
+        if arm in ("sig", "sig_ph") and len(rs) > 1:
+            sub = [r for r in rs if int(r.get("run") or 0) >= 2]
+            if sub:
+                sub_el = [r["elapsed_ms"] / 1000 for r in sub]
+                sub_ok = [r for r in sub if r["ok"]]
+                print(f" └─(run>=2) {len(sub):>3}{len(sub_ok):>4}{len(sub_ok) / len(sub) * 100:>6.0f}%"
+                      f"{sum(1 for r in sub if r['blocked']):>5}"
+                      f"{sum(1 for r in sub if r['refused']):>5}"
+                      f"{sum(1 for r in sub if not (r['ok'] or r['blocked'] or r['refused'])):>6}"
+                      f"{statistics.mean(sub_el):>8.1f}{statistics.median(sub_el):>8.1f}{_calc_p90(sub_el):>7.1f}{max(sub_el):>7.1f}"
+                      f"{statistics.mean([r['out_tokens'] for r in sub]):>7.0f}"
+                      f"{statistics.mean([r['thought_tokens'] for r in sub]):>7.0f}"
+                      f"{statistics.mean([r['chars'] for r in sub]):>7.0f}"
+                      f"{sum(r['restored'] for r in sub):>5}{sum(r['ph_left'] for r in sub):>4}")
+
+    _print_fetch_cache_breakdown(recs)
+
     # 成功率の差の検定（見たい比較だけ）
     def rate(arm):
         rs = [r for r in recs if r["arm"] == arm]
         return sum(1 for r in rs if r["ok"]), len(rs)
 
     pairs = [("direct", "in_ph"), ("in_ph", "in_ph_tool"), ("direct", "toolcall"),
-             ("in_ph", "toolcall"), ("toolcall", "in_ph_tool")]
+             ("in_ph", "toolcall"), ("toolcall", "in_ph_tool"),
+             ("prod_direct", "sig"), ("prod_direct", "sig_ph"), ("sig", "sig_ph")]
     print("\n--- 成功率の差（Fisher 両側）---")
     for x, y in pairs:
         a, n1 = rate(x)
@@ -443,7 +497,7 @@ def report(rows, arms, tag=None):
 
 def summarize(recs, arms):
     print("\n=== 集計 ===")
-    head = f"{'arm':<12}{'n':>3}{'ok':>4}{'blk':>4}{'拒否':>5}{'平均秒':>8}{'中央秒':>8}{'出tok':>7}{'考tok':>7}{'文字':>7}{'復元':>5}{'破損':>5}"
+    head = f"{'arm':<12}{'n':>3}{'ok':>4}{'blk':>4}{'拒否':>5}{'平均秒':>8}{'中央秒':>8}{'p90秒':>7}{'最長秒':>7}{'出tok':>7}{'考tok':>7}{'文字':>7}{'復元':>5}{'破損':>5}"
     print(head)
     print("-" * len(head))
     for arm in arms:
@@ -452,13 +506,29 @@ def summarize(recs, arms):
             continue
         ok = [r for r in rs if r["ok"]]
         el = [r["elapsed_ms"] / 1000 for r in rs]
+        p90 = _calc_p90(el)
+        max_s = max(el) if el else 0.0
         print(f"{arm:<12}{len(rs):>3}{len(ok):>4}{sum(1 for r in rs if r['blocked']):>4}"
               f"{sum(1 for r in rs if r['refused']):>5}"
-              f"{statistics.mean(el):>8.1f}{statistics.median(el):>8.1f}"
+              f"{statistics.mean(el):>8.1f}{statistics.median(el):>8.1f}{p90:>7.1f}{max_s:>7.1f}"
               f"{statistics.mean([r['out_tokens'] for r in rs]):>7.0f}"
               f"{statistics.mean([r['thought_tokens'] for r in rs]):>7.0f}"
               f"{statistics.mean([r['chars'] for r in rs]):>7.0f}"
               f"{sum(r['restored'] for r in rs):>5}{sum(r['ph_left'] for r in rs):>5}")
+        if arm in ("sig", "sig_ph") and len(rs) > 1:
+            sub = [r for r in rs if int(r.get("run") or 0) >= 2]
+            if sub:
+                sub_el = [r["elapsed_ms"] / 1000 for r in sub]
+                sub_ok = [r for r in sub if r["ok"]]
+                print(f" └─(run>=2) {len(sub):>3}{len(sub_ok):>4}{sum(1 for r in sub if r['blocked']):>4}"
+                      f"{sum(1 for r in sub if r['refused']):>5}"
+                      f"{statistics.mean(sub_el):>8.1f}{statistics.median(sub_el):>8.1f}{_calc_p90(sub_el):>7.1f}{max(sub_el):>7.1f}"
+                      f"{statistics.mean([r['out_tokens'] for r in sub]):>7.0f}"
+                      f"{statistics.mean([r['thought_tokens'] for r in sub]):>7.0f}"
+                      f"{statistics.mean([r['chars'] for r in sub]):>7.0f}"
+                      f"{sum(r['restored'] for r in sub):>5}{sum(r['ph_left'] for r in sub):>5}")
+
+    _print_fetch_cache_breakdown(recs)
     errs = [r for r in recs if r["error"]]
     if errs:
         print("\n--- エラー/ブロック ---")
@@ -485,6 +555,8 @@ def main():
     ap.add_argument("--retries", type=int, default=3, help="429 時の再試行回数")
     ap.add_argument("--prod", action="store_true",
                     help="本番経路（fetch 2段階）でトータル時間を測る。arm は prod_direct / prod_in_ph")
+    ap.add_argument("--sig-cache", action="store_true",
+                    help="fetch 署名キャッシュを有効化（sig / sig_ph アーム、または本番経路でのキャッシュ利用）")
     ap.add_argument("--thinking", default="auto", help="--prod 時の thinking_level")
     ap.add_argument("--save-text", default="", help="生成本文の全文をこのフォルダに保存")
     args = ap.parse_args()
@@ -512,10 +584,11 @@ def main():
     # 交互に実行（時間帯の偏りを相殺する）
     for run_no in range(1, args.runs + 1):
         for arm in arms:
-            if args.prod:
+            if args.prod or arm in ("sig", "sig_ph", "prod_direct", "prod_in_ph"):
                 r = run_arm_prod(arm, prompt, args.model, args.provider, args.sid, run_no,
                                  retries=args.retries, retry_wait=max(args.delay, 30.0),
-                                 thinking_level=args.thinking, text_dir=args.save_text, tag=tag)
+                                 thinking_level=args.thinking, text_dir=args.save_text, tag=tag,
+                                 sig_cache=args.sig_cache)
             else:
                 r = run_arm(arm, prompt, args.model, args.provider, args.sid, run_no,
                             retries=args.retries, retry_wait=max(args.delay, 30.0),

@@ -1829,39 +1829,235 @@ def _parts_with_images(text, images):
     return parts
 
 
-def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=8192,
-             fetch=True, images=None, timeout=180, fetch_name="fetch_prompt", provider="google",
-             thinking_level="auto"):
-    """
+_SIG_LOCK = threading.RLock()
+SIG_CACHE_FILE = os.path.join(DATA, "fetch_signature.json")
+SIG_CACHE_VERSION = 1
+SIG_MAX_BYTES = 65536            # 1 エントリの上限（超えたら disabled）
+SIG_MAX_ENTRIES = 20             # モデル数の上限（超えたら古い順に削除）
+
+# 失敗後の「休み」は時間ではなくターン数で数える（1 ターン約 30 秒なので分単位の待ちは無意味）
+SIG_SKIP_TURNS = (1, 3)          # 失敗1回目 → 次の1ターン休む / 2回目 → 次の3ターン休む
+SIG_GIVE_UP_AFTER = 3            # 3回失敗したら中止（このプロセスでは使わない。再起動で復活）
+
+_SIG_MEM = None                  # 常駐キャッシュ（読み込みは初回の 1 回だけ）
+_SIG_FAIL = {}                   # "provider|model" -> {"streak":n, "skip":k, "given_up":bool}（メモリのみ）
+SIG_OK = {}                      # "provider|model" -> 成功回数（メモリのみ）
+
+_FIRST_SYS = ("あなたは日本語ロールプレイの本文生成器です。"
+              "今回の応答を書く前に、必ず fetch_prompt を呼び出してコンテキストを取得してください。"
+              "取得するまで本文を書いてはいけません。")
+_FIRST_USER = "fetch_prompt を呼び出してコンテキストを取得してください。"
+_FETCH_DESC = "このチャンネルの設定・会話・今回のユーザー発言を取得する。引数はない。"
+
+
+def _sig_fp(fetch_name):
+    """第1段の内容が変わっていないことを確認するハッシュ"""
+    raw = json.dumps({"sys": _FIRST_SYS, "user": _FIRST_USER,
+                      "decl": {"name": fetch_name, "description": _FETCH_DESC},
+                      "name": fetch_name}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _sig_load():
+    """常駐キャッシュを返す（初回のみファイルを読む）。壊れていれば空で初期化"""
+    global _SIG_MEM
+    if _SIG_MEM is None:
+        d = None
+        try:
+            with open(SIG_CACHE_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = None
+        if not isinstance(d, dict) or d.get("version") != SIG_CACHE_VERSION \
+                or not isinstance(d.get("entries"), dict):
+            d = {"version": SIG_CACHE_VERSION, "entries": {}}
+        _SIG_MEM = d
+    return _SIG_MEM
+
+
+def _sig_save():
+    """常駐キャッシュをファイルへ（原子的更新）。失敗しても生成は止めない"""
+    try:
+        os.makedirs(os.path.dirname(SIG_CACHE_FILE) or ".", exist_ok=True)
+        tmp = f"{SIG_CACHE_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_sig_load(), f, ensure_ascii=False)
+        os.replace(tmp, SIG_CACHE_FILE)
+    except Exception as e:
+        print(f"[sig] save failed: {e}")
+
+
+def _sig_drop_parts(key):
+    """署名だけ捨てる（次は第1段から取り直す）。失敗状態には触らない"""
+    with _SIG_LOCK:
+        e = _sig_load()["entries"].get(key)
+        if isinstance(e, dict) and e.get("parts"):
+            e["parts"] = []
+            _sig_save()
+
+
+def sig_cache_status(provider, model, fp):
+    """キャッシュ状態を判定する。
     戻り値:
-      {"text": str, "meta": {...}, "fetch_called": bool, "first_status", "second_status",
-       "elapsed_ms": int, "error": str|None, "retryable": bool, "http_status": int|None}
-    images がある場合は fetch を使わず、1回のリクエストで画像も送る。
+      'hit'      : 有効な署名あり（sig_cache_get で取得可能）
+      'disabled' : エントリが disabled (64KB超等)
+      'skip'     : 休み中（skip > 0 または今ターンが休みターン）
+      'give_up'  : 3回失敗で中止中
+      'miss'     : 署名なし（新規取得・保存対象）
     """
-    if not model:
-        return {"text": "", "meta": {}, "fetch_called": False, "error": "モデルが未設定です",
-                "retryable": False, "http_status": None, "elapsed_ms": 0}
-    _, eff_level, _ = resolve_thinking_config(model, thinking_level)
-    if eff_level in ("XHIGH", "budget:16384"):
-        timeout = max(int(timeout or 180), 240)
-    system = system or "あなたは日本語ロールプレイの本文生成器です。必ずJSONのみを返します。"
-    use_fetch = bool(fetch) and not images
-    safety = _safety_settings(safety_off, provider=provider)
-    t0 = time.time()
+    key = f"{provider}|{model}"
+    with _SIG_LOCK:
+        st = _SIG_FAIL.get(key)
+        if isinstance(st, dict):
+            if st.get("given_up"):
+                return "give_up"
+            if int(st.get("skip") or 0) > 0 or st.get("resting"):
+                return "skip"
+        e = _sig_load()["entries"].get(key)
+        if isinstance(e, dict) and e.get("disabled"):
+            return "disabled"
+        if not isinstance(e, dict) or e.get("fp") != fp:
+            return "miss"
+        parts = e.get("parts")
+        if not isinstance(parts, list) or not any(isinstance(p, dict) and p.get("thoughtSignature")
+                                                  for p in parts):
+            return "miss"
+        return "hit"
+
+
+def sig_cache_get(provider, model, fp):
+    """有効な署名を返す。休み中・中止後・無効なら None（ファイル IO なし）"""
+    key = f"{provider}|{model}"
+    with _SIG_LOCK:
+        st = _SIG_FAIL.get(key)
+        if isinstance(st, dict):
+            if st.get("given_up"):
+                return None
+            if int(st.get("skip") or 0) > 0:
+                st["skip"] = int(st["skip"]) - 1     # 1 ターン消費して休む
+                st["resting"] = True
+                return None
+            st.pop("resting", None)
+        e = _sig_load()["entries"].get(key)
+        if not isinstance(e, dict) or e.get("disabled") or e.get("fp") != fp:
+            return None
+        parts = e.get("parts")
+        if not isinstance(parts, list) or not any(isinstance(p, dict) and p.get("thoughtSignature")
+                                                  for p in parts):
+            return None
+        # 共有状態の破壊を防ぐため複製して返す（payload を組み立てる側が将来 mutable に触っても
+        # キャッシュ本体が汚れないようにする。copy は google_ai.py で import 済み）
+        return {"parts": copy.deepcopy(parts), "role": e.get("role") or "model"}
+
+
+def sig_cache_put(provider, model, model_content, fp):
+    """取得した署名を保存する。
+
+    失敗状態（_SIG_FAIL）には一切触らない。ここでカウントを戻すと
+    「失敗 → フォールバック成功 → 保存で復活 → また失敗」を繰り返し、中止判定に到達しなくなる。
+    """
+    if not isinstance(model_content, dict) or not isinstance(model_content.get("parts"), list):
+        return
+    key = f"{provider}|{model}"
+    with _SIG_LOCK:
+        st = _SIG_FAIL.get(key) or {}
+        if st.get("given_up"):
+            return
+        d = _sig_load()
+        existing = d["entries"].get(key)
+        if isinstance(existing, dict) and existing.get("disabled"):
+            return
+        blob = json.dumps(model_content, ensure_ascii=False)
+        if len(blob) > SIG_MAX_BYTES:
+            # thinking パート等で肥大化した応答は保存しない（以後このキーは試さない）
+            d["entries"][key] = {"fp": fp, "saved_ts": time.time(), "disabled": True,
+                                 "parts": [], "role": "model"}
+            _sig_save()
+            return
+        d["entries"][key] = dict(model_content, fp=fp, saved_ts=time.time(), disabled=False)
+        if len(d["entries"]) > SIG_MAX_ENTRIES:
+            order = sorted(d["entries"], key=lambda k: d["entries"][k].get("saved_ts") or 0)
+            for k in order[:len(d["entries"]) - SIG_MAX_ENTRIES]:
+                d["entries"].pop(k, None)
+        _sig_save()
+
+
+def sig_cache_mark(provider, model, ok):
+    """署名の成否を記録する（メモリのみ・ファイルに書かない）"""
+    key = f"{provider}|{model}"
+    with _SIG_LOCK:
+        if ok:
+            _SIG_FAIL.pop(key, None)                  # 復活
+            SIG_OK[key] = SIG_OK.get(key, 0) + 1
+            return
+        st = _SIG_FAIL.setdefault(key, {"streak": 0, "skip": 0, "given_up": False})
+        st["streak"] = int(st.get("streak") or 0) + 1
+        st.pop("resting", None)
+        if st["streak"] >= SIG_GIVE_UP_AFTER:
+            st["given_up"] = True                     # 中止（再起動 or 設定 OFF→ON で復活）
+            st["skip"] = 0
+            # 署名は消さない: 設定を OFF→ON したときに「同じ署名でもう一度だけ試す」ため
+            print(f"[sig] give up {key} (streak={st['streak']})")
+            return
+        st["skip"] = SIG_SKIP_TURNS[min(st["streak"] - 1, len(SIG_SKIP_TURNS) - 1)]
+        if st["streak"] >= 2:
+            _sig_drop_parts(key)                      # 2回目以降は署名を捨てる
+
+
+def sig_cache_forget_fail_state(provider, model):
+    """失敗状態だけ消す（署名は残す）。設定 OFF の間に呼ぶ＝ON に戻すと再挑戦する。
+
+    署名を消さないので、失敗が一過性だった場合は次のターンで即ヒットに戻る（コスト 0）。
+    """
+    with _SIG_LOCK:
+        _SIG_FAIL.pop(f"{provider}|{model}", None)
+
+
+def sig_cache_reset(provider=None, model=None):
+    """手動クリア（中止状態も解除する。アプリ再起動と同じ効果）"""
+    with _SIG_LOCK:
+        d = _sig_load()
+        if provider and model:
+            d["entries"].pop(f"{provider}|{model}", None)
+            _SIG_FAIL.pop(f"{provider}|{model}", None)
+            SIG_OK.pop(f"{provider}|{model}", None)
+        else:
+            d["entries"] = {}
+            _SIG_FAIL.clear()
+            SIG_OK.clear()
+        _sig_save()
+
+
+def sig_cache_stats():
+    """管理・デバッグ用（ログや REPL から見る。画面には出さない）"""
+    with _SIG_LOCK:
+        d = _sig_load()
+        return {k: {"ok": SIG_OK.get(k, 0),
+                    "streak": int((_SIG_FAIL.get(k) or {}).get("streak") or 0),
+                    "skip": int((_SIG_FAIL.get(k) or {}).get("skip") or 0),
+                    "given_up": bool((_SIG_FAIL.get(k) or {}).get("given_up")),
+                    "disabled": bool(v.get("disabled")),
+                    "saved_ts": float(v.get("saved_ts") or 0)}
+                for k, v in d["entries"].items()}
+
+
+def _generate_core(model, prompt, system, *, use_fetch, safety, safety_off, timeout, provider,
+                   max_output_tokens, thinking_level, fetch_name, t0, images=None,
+                   save_sig=False, fp=None):
+    """現行の try: ブロック全体（use_fetch=True なら 2 段階、False なら直接生成）。
+    戻り値は generate() と同型。振る舞いは現行と 1 ミリも変えない（純粋な切り出し）。
+    第1段が成功して fetch を呼んだ直後に、save_sig なら sig_cache_put(...) を 1 行追加する。
+    """
     first_status = second_status = None
     fetch_called = False
     try:
         if use_fetch:
             first_payload = {
-                "systemInstruction": {"parts": [{"text": (
-                    "あなたは日本語ロールプレイの本文生成器です。"
-                    "今回の応答を書く前に、必ず fetch_prompt を呼び出してコンテキストを取得してください。"
-                    "取得するまで本文を書いてはいけません。"
-                )}]},
-                "contents": [{"role": "user", "parts": [{"text": "fetch_prompt を呼び出してコンテキストを取得してください。"}]}],
+                "systemInstruction": {"parts": [{"text": _FIRST_SYS}]},
+                "contents": [{"role": "user", "parts": [{"text": _FIRST_USER}]}],
                 "tools": [{"functionDeclarations": [{
                     "name": fetch_name,
-                    "description": "このチャンネルの設定・会話・今回のユーザー発言を取得する。引数はない。",
+                    "description": _FETCH_DESC,
                 }]}],
                 "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [fetch_name]}},
                 "generationConfig": _step1_generation_config(model),
@@ -1910,10 +2106,13 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
                         "error": err,
                         "retryable": False, "http_status": first_status}
 
+            if save_sig:
+                sig_cache_put(provider, model, model_content, fp)
+
             second_payload = {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [
-                    {"role": "user", "parts": [{"text": "fetch_prompt を呼び出してコンテキストを取得してください。"}]},
+                    {"role": "user", "parts": [{"text": _FIRST_USER}]},
                     model_content,
                     {"role": "user", "parts": [{"functionResponse": {
                         "name": fetch_name,
@@ -1999,3 +2198,159 @@ def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=819
                 "elapsed_ms": int((time.time() - t0) * 1000),
                 "error": f"内部エラー: {e}", "retryable": False,
                 "http_status": 500, "code": "INTERNAL_ERROR"}
+
+
+def _generate_second(model, prompt, system, model_content, *, safety, safety_off, timeout,
+                     provider, max_output_tokens, thinking_level, fetch_name, t0):
+    """第2段のみ（署名キャッシュヒット用）。
+
+    `_cache_fail` を付けるのは次の 2 つだけ（それ以外は通常の結果として返す）:
+      - 400 かつ `_is_tool_400(str(e))`   ← provider でゲートしない（google でも退避する）
+      - 空応答（text=="" かつ block_reason 無し かつ finish_reason がブロック系でない）
+    SAFETY / block_reason / 429 / 5xx は `_cache_fail` を付けない（429・5xx は例外を伝播）。
+    `_cache_fail` は返す前に `generate()` が `pop` する（`meta` には入れない）。
+    """
+    second_payload = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [
+            {"role": "user", "parts": [{"text": _FIRST_USER}]},
+            model_content,
+            {"role": "user", "parts": [{"functionResponse": {
+                "name": fetch_name,
+                "response": {"context": prompt},
+            }}]},
+        ],
+        "generationConfig": _step2_generation_config(model, max_output_tokens, provider=provider, thinking_level=thinking_level),
+    }
+    if safety:
+        second_payload["safetySettings"] = safety
+
+    try:
+        second_status, second_data = _request_with_fallbacks(model, second_payload, timeout, provider, safety_off)
+    except GoogleAPIError as e:
+        if e.status == 400 and _is_tool_400(str(e)):
+            return {
+                "text": "", "meta": {}, "fetch_called": True,
+                "first_status": None, "second_status": 400,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "error": str(e), "retryable": False,
+                "http_status": 400, "code": e.code,
+                "_cache_fail": "400",
+            }
+        raise
+
+    text, meta = extract_text(second_data)
+    err = None
+    if meta.get("block_reason"):
+        err = f"prompt blocked: {meta['block_reason']}"
+    elif meta.get("finish_reason") in BLOCK_FINISH_REASONS:
+        err = f"generation blocked: {meta['finish_reason']}"
+    elif not text:
+        err = f"empty response (finishReason={meta.get('finish_reason')})"
+
+    res = {
+        "text": text, "meta": meta, "fetch_called": True,
+        "first_status": None, "second_status": second_status,
+        "elapsed_ms": int((time.time() - t0) * 1000),
+        "error": err, "retryable": bool(err and "empty response" in err),
+        "http_status": second_status,
+    }
+    if not text and not meta.get("block_reason") and meta.get("finish_reason") not in BLOCK_FINISH_REASONS:
+        res["_cache_fail"] = "empty"
+    return res
+
+
+def generate(model, prompt, system="", *, safety_off=True, max_output_tokens=8192,
+             fetch=True, images=None, timeout=180, fetch_name="fetch_prompt", provider="google",
+             thinking_level="auto", fetch_cache=False):
+    """
+    戻り値:
+      {"text": str, "meta": {...}, "fetch_called": bool, "first_status", "second_status",
+       "elapsed_ms": int, "error": str|None, "retryable": bool, "http_status": int|None,
+       "fetch_cache": "hit"|"miss"|"off"|"hit_fallback"|"disabled"}
+
+    `fetch_cache` の意味:
+      hit          … キャッシュの署名で第2段のみ実行（API 往復 1 回）
+      miss         … 署名が無かったので現行 2 段階を実行し、取得した署名を保存した
+      off          … キャッシュを使っていない（フラグ OFF / fetch 無し / 休み中 / 中止後）
+      hit_fallback … キャッシュで失敗して現行 2 段階に退避した（理由は `cache_error`）
+      disabled     … 応答が大きすぎて署名を保存しなかったモデル（以後このキーでは試さない）
+
+    追加キー `cache_error`（文字列）: キャッシュ起因で退避したときだけ入る（400 のメッセージ等）。
+    images がある場合は fetch を使わず、1回のリクエストで画像も送る。
+    """
+    if not model:
+        return {"text": "", "meta": {}, "fetch_called": False, "error": "モデルが未設定です",
+                "retryable": False, "http_status": None, "elapsed_ms": 0, "fetch_cache": "off"}
+    _, eff_level, _ = resolve_thinking_config(model, thinking_level)
+    if eff_level in ("XHIGH", "budget:16384"):
+        timeout = max(int(timeout or 180), 240)
+    system = system or "あなたは日本語ロールプレイの本文生成器です。必ずJSONのみを返します。"
+    use_fetch = bool(fetch) and not images
+    safety = _safety_settings(safety_off, provider=provider)
+    t0 = time.time()
+    fp = _sig_fp(fetch_name) if use_fetch else None
+    cache_state = "off"
+    try:
+        if use_fetch and fetch_cache:
+            cached = sig_cache_get(provider, model, fp)
+            if cached:
+                res = _generate_second(model, prompt, system, cached, safety=safety,
+                                       safety_off=safety_off, timeout=timeout, provider=provider,
+                                       max_output_tokens=max_output_tokens,
+                                       thinking_level=thinking_level, fetch_name=fetch_name, t0=t0)
+                fail = res.pop("_cache_fail", "")
+                if not fail:
+                    sig_cache_mark(provider, model, ok=True)
+                    res["fetch_cache"] = "hit"
+                    return res
+                # 署名起因の失敗だけ 2 段階へ退避（SAFETY / block / 429 はここに来ない）
+                cache_error = str(res.get("error") or fail)[:200]
+                print(f"[sig] cache {fail} ({provider}|{model}): {cache_error}")
+                sig_cache_mark(provider, model, ok=False)
+                if (time.time() - t0) < timeout:      # 残り予算ガード（最悪 2 倍を防ぐ）
+                    save_on_fb = (int((_SIG_FAIL.get(f"{provider}|{model}") or {}).get("streak") or 0) < 2)
+                    res2 = _generate_core(model, prompt, system, use_fetch=True, safety=safety,
+                                          safety_off=safety_off, timeout=timeout, provider=provider,
+                                          max_output_tokens=max_output_tokens,
+                                          thinking_level=thinking_level, fetch_name=fetch_name, t0=t0,
+                                          images=images, save_sig=save_on_fb, fp=fp)
+                    res2["fetch_cache"] = "hit_fallback"
+                    res2["cache_error"] = cache_error
+                    return res2
+                res["fetch_cache"] = "hit_fallback"   # 予算不足：そのまま返し、上位のリトライに任せる
+                res["cache_error"] = cache_error
+                res["retryable"] = True
+                return res
+            st_val = sig_cache_status(provider, model, fp)
+            if st_val == "disabled":
+                cache_state = "disabled"
+            elif st_val == "miss":
+                cache_state = "miss"
+            else:
+                cache_state = "off"
+
+        res = _generate_core(model, prompt, system, use_fetch=use_fetch, safety=safety,
+                             safety_off=safety_off, timeout=timeout, provider=provider,
+                             max_output_tokens=max_output_tokens,
+                             thinking_level=thinking_level, fetch_name=fetch_name, t0=t0,
+                             images=images,
+                             save_sig=bool(use_fetch and fetch_cache and cache_state == "miss"), fp=fp)
+        res["fetch_cache"] = cache_state
+        return res
+    except GoogleAPIError as e:
+        is_hit = bool(use_fetch and fetch_cache and ('cached' in locals() and cached))
+        return {"text": "", "meta": {}, "fetch_called": bool(use_fetch and fetch_cache and is_hit),
+                "first_status": None, "second_status": None,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "error": str(e), "retryable": bool(e.retryable),
+                "http_status": e.status, "code": e.code,
+                "fetch_cache": "hit" if is_hit else cache_state}
+    except Exception as e:
+        is_hit = bool(use_fetch and fetch_cache and ('cached' in locals() and cached))
+        return {"text": "", "meta": {}, "fetch_called": bool(use_fetch and fetch_cache and is_hit),
+                "first_status": None, "second_status": None,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "error": f"内部エラー: {e}", "retryable": False,
+                "http_status": 500, "code": "INTERNAL_ERROR",
+                "fetch_cache": "hit" if is_hit else cache_state}

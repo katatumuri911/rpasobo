@@ -161,6 +161,7 @@
       <label class="check" title="AIが書いた本文（reply）の婉曲表現も辞書で直接語に戻します。語彙は「アプリ全体の設定」で編集できます。">
         <input type="checkbox" id="f_decensor_reply" checked> 本文の婉曲表現も自動で戻す
         <span class="muted">「秘所」→「おまんこ」など（語彙はアプリ全体の設定）</span></label>
+      <label class="check" title="Vertex AI の第1段（fetch_prompt）をキャッシュし、API往復を2回から1回に減らして高速化します。異常時はOFFにしてください。"><input type="checkbox" id="f_google_fetch_cache" checked> fetch段をキャッシュして高速化（試験的・OFFで従来動作）</label>
       <label class="check" title="検索時に同じキャラ名を持つ他チャンネルの記憶も横断して参照できるようにします（読み込み専用）"><input type="checkbox" id="f_shared_memories"> キャラクター共通記憶 <span class="muted">同名キャラの他チャンネルの記憶も参照</span></label>
       <div class="grid2">
         <label>あなたの呼び名<input id="f_user_name"></label>

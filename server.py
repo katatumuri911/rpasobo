@@ -574,6 +574,7 @@ DEFAULT_SETTING = {
     "choices_erotic_auto": False,  # 新規ターンから🔞の候補を作る（通常の候補は作らない。選択肢担当の会話が必要）
     "decensor_choices": True,  # 候補の婉曲表現（秘所・後ろの穴など）を辞書で直接語に戻す（辞書はアプリ全体の設定）
     "decensor_reply": False,  # 本文（reply）の婉曲表現も辞書で直接語に戻す（試験的・既定OFF）
+    "google_fetch_cache": True,  # fetch 段の署名キャッシュ（既定ON・Vertex の往復削減。異常時は OFF）
     "image": {
         "checkpoint": "waiIllustriousSDXL_v170.safetensors",
         "width": 768, "height": 1344, "steps": 8, "cfg": 4,
@@ -772,6 +773,7 @@ def merge_defaults(setting=None):
     except (TypeError, ValueError):
         out["google_max_output_tokens"] = 8192
     out["google_fetch"] = bool(out.get("google_fetch", True))
+    out["google_fetch_cache"] = bool(out.get("google_fetch_cache", True))
     out["google_safety_off"] = bool(out.get("google_safety_off", True))
     tl = str(out.get("thinking_level") or "auto").strip().lower()
     out["thinking_level"] = tl if tl in google_ai.VALID_THINKING_LEVELS else "auto"
@@ -879,6 +881,8 @@ def _call_google_generate(model, prompt, *args, **kwargs):
         has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
         if not has_var_kw and "thinking_level" not in sig.parameters:
             kwargs.pop("thinking_level", None)
+        if not has_var_kw and "fetch_cache" not in sig.parameters:
+            kwargs.pop("fetch_cache", None)
     except (ValueError, TypeError):
         pass
     return fn(model, prompt, *args, **kwargs)
@@ -2703,7 +2707,7 @@ STATE_HINT_DELTA = (
     "他は変化時だけ（省略は保持。配列は全体）。"
     "背景・構図は変わった時だけ必要な分（固定3個にしない）。"
     "脱衣・終了は「なし」/[]/false。新キャラは全項目、退場は remove:true。"
-    "アナルゼリーが出た時は body_fluids に「透明なピンク色のアナルゼリーが肛門から溢れている」と書き、situation にも排出の様子を書く。\n"
+    "ローションが出た時は body_fluids に「透明なローションが肛門から溢れている」と書き、situation にも排出の様子を書く。\n"
 )
 STATE_HINT_FULL = "※まだ前の状態がないため、今回は基準として全項目を書く。\n"
 
@@ -2928,7 +2932,7 @@ def output_text(st, is_diff=False, transport="ag"):
                     "  - situation: 1〜2個・各1文以内。姿勢・体調・居場所・カラダの状態。",
                     "  - inner: 2文以内。そのキャラの今の内心・本音。",
                     "  - penis_present: 画面内に男性器が写るか（毎回 true/false）。",
-                    "  - outfit / outerwear / underwear / body_fluids: 変化した時だけ。脱衣・終了は「なし」。アナルゼリーが出た時は body_fluids に「透明なピンク色のアナルゼリーが肛門から溢れている」と書く。",
+                    "  - outfit / outerwear / underwear / body_fluids: 変化した時だけ。脱衣・終了は「なし」。ローションが出た時は body_fluids に「透明なローションが肛門から溢れている」と書く。",
                     "  - equipped_items / action: 変化した時だけ。配列は変更後の全体。解除は []。",
                     "  - background / camera: 変わった時だけ必要な分（目安: 背景2〜4個、構図1〜3個）。"
                     "固定3個にしない。配列は変更後の全体。",
@@ -8802,6 +8806,9 @@ def run_google_task(sid, mid, task_type=None, key=None):
             choices_slot = "erotic" if _google_choice_type(m) == "erotic" else "normal"
         prompt, images, out_type, system = _google_build_prompt(s, m, task_type)
         use_fetch = bool(st.get("google_fetch", True)) and (task_type == "user")
+        fetch_cache = bool(st.get("google_fetch_cache", True))
+        if not fetch_cache:
+            google_ai.sig_cache_forget_fail_state(provider, model)
         _set_google_status(sid, task_type, "requesting", provider=provider, model=model,
                            fetch=use_fetch, images=len(images))
         thinking_level = active_thinking_level(st, task_type)
@@ -8811,6 +8818,7 @@ def run_google_task(sid, mid, task_type=None, key=None):
             max_output_tokens=int(st.get("google_max_output_tokens") or 8192),
             fetch=use_fetch, images=images, provider=provider,
             thinking_level=thinking_level,
+            fetch_cache=fetch_cache,
         )
         if sid in deleted_sessions:
             return
@@ -8901,6 +8909,8 @@ def run_google_task(sid, mid, task_type=None, key=None):
         _set_google_status(sid, task_type, "waiting_import", model=model,
                            fetch=bool(res.get("fetch_called")), outbox=name,
                            elapsed_ms=res.get("elapsed_ms"),
+                           fetch_cache=res.get("fetch_cache"),
+                           cache_error=res.get("cache_error"),
                            usage=(res.get("meta") or {}).get("usage") or {})
         print(f"[google] queued outbox {name} -> {sid} ({task_type})")
     except Exception as e:

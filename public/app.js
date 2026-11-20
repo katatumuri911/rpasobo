@@ -970,6 +970,7 @@ function fillForm(st, force = false) {
   if ($("f_choices_erotic_auto") && canSet("f_choices_erotic_auto")) $("f_choices_erotic_auto").checked = !!st.choices_erotic_auto;
   if ($("f_decensor_choices") && canSet("f_decensor_choices")) $("f_decensor_choices").checked = st.decensor_choices !== false;
   if ($("f_decensor_reply") && canSet("f_decensor_reply")) $("f_decensor_reply").checked = st.decensor_reply !== false;
+  if ($("f_google_fetch_cache") && canSet("f_google_fetch_cache")) $("f_google_fetch_cache").checked = st.google_fetch_cache !== false;
   const sharedEl = $("f_shared_memories");
   if (sharedEl && canSet("f_shared_memories")) sharedEl.checked = !!st.shared_memories;
   for (const [id, k] of Object.entries(CHAR)) {
@@ -993,6 +994,7 @@ function readForm() {
   st.choices_erotic_auto = $("f_choices_erotic_auto")?.checked ?? false;
   st.decensor_choices = $("f_decensor_choices")?.checked ?? true;
   st.decensor_reply = $("f_decensor_reply")?.checked ?? true;
+  st.google_fetch_cache = $("f_google_fetch_cache")?.checked ?? true;
   st.shared_memories = $("f_shared_memories")?.checked ?? false;
   st.character = st.character || {};
   for (const [id, k] of Object.entries(CHAR)) {

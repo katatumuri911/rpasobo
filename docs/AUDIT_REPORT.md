@@ -9,12 +9,13 @@
 
 ## Table of Contents
 1. [Executive Summary & Architecture Overview](#executive-summary--architecture-overview)
-2. [Baseline Verification & Test Suite Execution Status](#baseline-verification--test-suite-execution-status)
-3. [Section 1: Functional Bugs & Defects](#section-1-functional-bugs--defects)
-4. [Section 2: Logic Oversights & Edge Cases](#section-2-logic-oversights--edge-cases)
-5. [Section 3: Performance Bottlenecks & Optimization Proposals](#section-3-performance-bottlenecks--optimization-proposals)
-6. [Section 4: UI/UX & Accessibility Improvement Proposals](#section-4-uiux--accessibility-improvement-proposals)
-7. [Appendix: Independent Verification & Reproduction Guide](#appendix-independent-verification--reproduction-guide)
+2. [優先度ランキング（昇順）](#優先度ランキング昇順)
+3. [Baseline Verification & Test Suite Execution Status](#baseline-verification--test-suite-execution-status)
+4. [Section 1: Functional Bugs & Defects](#section-1-functional-bugs--defects)
+5. [Section 2: Logic Oversights & Edge Cases](#section-2-logic-oversights--edge-cases)
+6. [Section 3: Performance Bottlenecks & Optimization Proposals](#section-3-performance-bottlenecks--optimization-proposals)
+7. [Section 4: UI/UX & Accessibility Improvement Proposals](#section-4-uiux--accessibility-improvement-proposals)
+8. [Appendix: Independent Verification & Reproduction Guide](#appendix-independent-verification--reproduction-guide)
 
 ---
 
@@ -32,7 +33,63 @@ RPasobou ("RPあそぼう") is a rich desktop-integrated web application designe
 - **Logic Oversights & Edge Cases Identified**: 13 items
 - **Performance Bottlenecks & Optimization Proposals**: 8 major areas
 - **UI/UX & Accessibility Proposals**: 9 major areas
+- **優先度内訳（日本語表記）**: 高 11 件 ／ 中 22 件 ／ 低 10 件 — 詳細は「優先度ランキング（昇順）」を参照
 - **Baseline Test Results**: Official test runner `tools/run_tests.py` ran 986 unit tests (OK, 27.97s, 1 skipped) but failed overall (Exit code 1) due to a zero-collection error on `test/test_channel_wizard_module.py`. Pytest passes 10/10 tests. 5 Node/JS UI test scripts fail due to environment stub gaps, CSS indexing regressions, and external bundle changes.
+
+---
+
+## 優先度ランキング（昇順）
+
+各指摘の優先度を日本語表記（高／中／低）に統一し、総合順位の昇順（1位＝最優先）で並べ替えた一覧。本文の各セクション内も同じ順位順に並べ直してある。
+
+- **優先度の基準**: **高** = データ損失・クラッシュ・恒久的な機能不全、**中** = 誤動作・テスト破綻・明確なUX劣化、**低** = 軽微な不整合・将来の保守リスク
+- **内訳**: 高 11 件 ／ 中 22 件 ／ 低 10 件（全 43 件）
+
+| 順位 | ID | 優先度 | 区分 | 概要 |
+| :--: | :-- | :--: | :-- | :-- |
+| 1 | F-01 | 高 | 機能不具合 | outbox エラー復旧時に raw 未定義で UnboundLocalError／前ファイル内容が混入 |
+| 2 | F-02 | 高 | 機能不具合 | write_json の一時ファイル名がプロセス内で衝突し破損・PermissionError |
+| 3 | F-03 | 高 | 機能不具合 | /api/send の二重送信で pending が二重化し片方の応答が永久に喪失 |
+| 4 | L-01 | 高 | ロジック／エッジケース | 過去メッセージの記憶抽出で turn_idx が現在ターンになり decay/TTL が破綻 |
+| 5 | L-02 | 高 | ロジック／エッジケース | fulfilled/inactive 記憶が自動マージ後も復活せず恒久的に注入対象外 |
+| 6 | L-03 | 高 | ロジック／エッジケース | 選択肢が別ターンのユーザーメッセージに誤って紐付けられる |
+| 7 | L-04 | 高 | ロジック／エッジケース | test_channel_wizard_module.py が unittest 未検出でランナーが常時失敗 |
+| 8 | P-04 | 高 | 性能 | Object URL 未 revoke のリークと 40MB Base64 による大規模メモリ消費 |
+| 9 | P-01 | 高 | 性能 | 100ms ポーリングとグローバルロック競合（/api/session・/api/sessions） |
+| 10 | P-02 | 高 | 性能 | サイドバー全 DOM 再生成と入力1文字ごとのレイアウトスラッシング |
+| 11 | U-02 | 高 | UI・UX／アクセシビリティ | サーバーエラー応答で先頭チャンネルへ強制遷移し下書き入力が消失 |
+| 12 | F-04 | 中 | 機能不具合 | truncate/delete/regenerate/edit で記憶ベクトルと claimed_at が残留 |
+| 13 | F-05 | 中 | 機能不具合 | ComfyUI ポーリングで urlopen が閉じられずソケット枯渇 |
+| 14 | F-07 | 中 | 機能不具合 | run_google_task に memory_extract/consolidation の処理分岐が欠落 |
+| 15 | L-05 | 中 | ロジック／エッジケース | inflight_mid の None == None 成立で prev_sent を誤復元 |
+| 16 | L-06 | 中 | ロジック／エッジケース | SQLite の workspace_uris 破損 JSON で /api/ide/sessions が 500 |
+| 17 | L-08 | 中 | ロジック／エッジケース | 空の選択肢応答が無言で握り潰されユーザーに通知されない |
+| 18 | L-13 | 中 | ロジック／エッジケース | wizard が savePreview 失敗を握り潰し古い下書きのまま作成 |
+| 19 | L-10 | 中 | ロジック／エッジケース | update_sessions.py の import sys 欠落で NameError |
+| 20 | L-11 | 中 | ロジック／エッジケース | cleanup_test_sessions.py の旧パス固定で即 FileNotFoundError |
+| 21 | F-09 | 中 | 機能不具合 | hideAgQuota 未定義時の blur で ReferenceError |
+| 22 | F-10 | 中 | 機能不具合 | モバイルレイアウトテストのメディアクエリ探索と .progress 検証の回帰 |
+| 23 | F-11 | 中 | 機能不具合 | favModelBtn が pointerdown ではなく mousedown を購読 |
+| 24 | F-12 | 中 | 機能不具合 | RAG ヒットモーダルテストの style モックに removeProperty が欠落 |
+| 25 | U-04 | 中 | UI・UX／アクセシビリティ | 全10モーダルで Esc・フォーカストラップ・ARIA 属性が未対応 |
+| 26 | U-05 | 中 | UI・UX／アクセシビリティ | サイドバー項目がキーボード操作・支援技術に非対応 |
+| 27 | U-06 | 中 | UI・UX／アクセシビリティ | .sess-rename 等のタップ領域が 24px 未満（WCAG 2.5.8 不適合） |
+| 28 | U-07 | 中 | UI・UX／アクセシビリティ | ダークテーマの副次テキストが 4.5:1 未満（WCAG 2.1 AA 不適合） |
+| 29 | U-09 | 中 | UI・UX／アクセシビリティ | 右クリック／長押しで即削除確認が起動する誤操作リスク |
+| 30 | U-01 | 中 | UI・UX／アクセシビリティ | バックグラウンド更新で「⋯」メニューが勝手に閉じる |
+| 31 | P-03 | 中 | 性能 | MutationObserver が body 全体を監視し全 DOM 変更を走査 |
+| 32 | P-05 | 中 | 性能 | 384 次元 embedding の deepcopy による過剰な複製 |
+| 33 | P-07 | 中 | 性能 | 静的配信が無圧縮・ETag 未対応で毎回 200 全転送 |
+| 34 | F-06 | 低 | 機能不具合 | 添付取り込みで open().read() によりファイルディスクリプタ未クローズ |
+| 35 | F-08 | 低 | 機能不具合 | 保存リトライ全失敗時に .tmp が孤児ファイルとして残留 |
+| 36 | F-13 | 低 | 機能不具合 | Electron asar のハッシュ固定参照で仕様テストが壊れやすい |
+| 37 | L-07 | 低 | ロジック／エッジケース | 文字列形式の旧 image フィールドで .get() が AttributeError |
+| 38 | L-09 | 低 | ロジック／エッジケース | decensor 警告フィルタの恒真条件でフィルタ節がデッドコード |
+| 39 | L-12 | 低 | ロジック／エッジケース | プロバイダ切替失敗の空 catch でユーザー通知なし |
+| 40 | U-03 | 低 | UI・UX／アクセシビリティ | 画像再生成ボタンに待機表示と破壊的操作が混在 |
+| 41 | U-08 | 低 | UI・UX／アクセシビリティ | alert/confirm/prompt の同期ネイティブダイアログ依存 |
+| 42 | P-06 | 低 | 性能 | 共有記憶の重複排除が O(N*M) かつ毎ターン listdir |
+| 43 | P-08 | 低 | 性能 | outbox ワーカーが 300ms 間隔で常時ディレクトリ走査 |
 
 ---
 
@@ -86,7 +143,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-01: `UnboundLocalError` in Outbox Error Recovery Path
 - **File Path**: `server.py`
 - **Line Numbers**: `7370–7394`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **1位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `process_outbox()`, when an outbox JSON file cannot be opened (e.g. temporary Windows file lock `PermissionError` while an AI process is writing, or `UnicodeDecodeError`), an exception is caught at line 7382.
   When the file age exceeds 10 seconds (line 7385), the recovery handler attempts regex extraction:
@@ -103,7 +160,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-02: Race Condition and Process-Wide Temporary File Collisions in `write_json`
 - **File Path**: `server.py`
 - **Line Numbers**: `1109–1113`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **2位**（全43件中）
 - **Trigger Condition & Root Cause**:
   `write_json` is implemented as:
   ```python
@@ -124,7 +181,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-03: Race Condition and Multiple Pending State Desynchronization in `/api/send`
 - **File Path**: `server.py`
 - **Line Numbers**: `11241–11292` and `7904–7910`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **3位**（全43件中）
 - **Trigger Condition & Root Cause**:
   `/api/send` does not verify whether the active session already contains a user message with `status in ("pending", "processing")`. If a user clicks Send twice or a client resends a request, two pending user messages are appended to `s["messages"]`.
   When a single assistant response arrives in `process_outbox()` without an explicit `reply_to` (lines 7904–7910), the loop executes:
@@ -143,7 +200,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-04: Failure to Clear Memory Vectors and Task Claims on Truncate, Delete, Regenerate & Edit
 - **File Path**: `server.py`
 - **Line Numbers**: `11422–11428`, `11493–11504`, `12004–12028`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **12位**（全43件中）
 - **Trigger Condition & Root Cause**:
   Task locks in `claimed_at` and associated memory vectors are leaked across multiple message mutation endpoints:
   1. In `/api/message/truncate` (line 11426), when `drop_target` is `None` (standard truncate):
@@ -165,7 +222,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-05: Socket Exhaustion in ComfyUI Image Generation Polling
 - **File Path**: `server.py`
 - **Line Numbers**: `8253–8279`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **13位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `comfy_run()`:
   ```python
@@ -180,25 +237,10 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### F-06: Unclosed File Descriptors in Attachment Ingestion
-- **File Path**: `server.py`
-- **Line Numbers**: `8704`
-- **Severity Rating**: **Low**
-- **Trigger Condition & Root Cause**:
-  In `_google_prepare_attachments(m)`:
-  ```python
-  raw = open(path, "rb").read()
-  ```
-  Calling `open(...).read()` without a context manager leaves the file descriptor open until CPython garbage collector collects the file object. On Windows, this retains read locks on user attachment files.
-- **Recommended Remediation**:
-  Replace with `with open(path, "rb") as f: raw = f.read()`.
-
----
-
 ### F-07: Incomplete Task Handlers and Prompt Routing in `run_google_task` / `_google_build_prompt`
 - **File Path**: `server.py`
 - **Line Numbers**: `8757`, `8776`, `8894`, `8959–9005`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **14位**（全43件中）
 - **Trigger Condition & Root Cause**:
   Line 8776 accepts `task_type in ("user", "choices", "image_refine", "memory_extract", "consolidation")`. However, line 8757 in `_google_build_prompt` raises `ValueError("unknown task")` for `memory_extract` and `consolidation`. In `run_google_task`, lines 8849–8895 have no handling branches for these tasks, dropping through to `else: return`.
   Architecturally, long-term memory extraction and consolidation are intentionally reserved for local background workers (`memory_worker`, `consolidation_worker`) using local embeddings. This is corroborated by `_google_pick_tasks()` (lines 8959–9005), which explicitly documents `"user / choices / image_refine の3種のみ"` and actively treats `memory_status` / `consolidation_status` as stale to prevent infinite loops. Implementing memory extraction in Google AI would duplicate work and cause outbox write collisions.
@@ -207,28 +249,10 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### F-08: Stale Temporary File Accumulation on Write Retries
-- **File Path**: `server.py`
-- **Line Numbers**: `1164–1175`, `1212–1223`, `1260–1271`
-- **Severity Rating**: **Low**
-- **Trigger Condition & Root Cause**:
-  In `save_choices_data`, `save_states_data`, and `save_images_data`, temporary files are generated as `tmp = f"{p}.{os.getpid()}.tmp"`. If all 10 `os.replace` retry attempts fail (e.g. persistent antivirus scan lock), `tmp` is never deleted, leaving orphaned `.tmp` files in `data/choices/`, `data/states/`, and `data/images/`.
-- **Recommended Remediation**:
-  Add an `else:` clause to the retry `for` loop:
-  ```python
-  if os.path.exists(tmp):
-      try:
-          os.remove(tmp)
-      except OSError:
-          pass
-  ```
-
----
-
 ### F-09: Unhandled `hideAgQuota` ReferenceError in Textarea Blur
 - **File Path**: `public/app.js` and `test/test_enter_send.cjs`
 - **Line Numbers**: `public/app.js:9701`, `test/test_enter_send.cjs:124`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **21位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `public/app.js:9701`:
   ```javascript
@@ -245,7 +269,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-10: Media Query Scope and Overflow Assertion Regressions in Mobile Test
 - **File Path**: `test/test_mobile_layout.cjs`, `public/style.css`
 - **Line Numbers**: `test/test_mobile_layout.cjs:277–315, 1232–1244`, `public/style.css:653, 4957`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **22位**（全43件中）
 - **Trigger Condition & Root Cause**:
   1. `lastMediaBlock(text)` uses `lastIndexOf("@media (max-width: 768px)")` to find mobile CSS rules. An additional media query appended at `public/style.css:4957` causes `lastMediaBlock` to check only the trailing block, failing assertions for `#mobileActionToggle` and `#mobileReveal`.
   2. Test T22 asserts `!/\.progress\s*\{[^}]*overflow:\s*hidden/i.test(cssText)`. Line 653 in `public/style.css` specifies `overflow: hidden;` for `.progress`, triggering an assertion failure.
@@ -257,7 +281,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-11: Event Type Discrepancy on Model Favorites Button
 - **File Path**: `public/app.js`, `test/test_model_favorites_ui.cjs`
 - **Line Numbers**: `public/app.js:9540`, `test/test_model_favorites_ui.cjs:59`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **23位**（全43件中）
 - **Trigger Condition & Root Cause**:
   `test_model_favorites_ui.cjs:59` verifies that `app.js` attaches a `pointerdown` listener to `#favModelBtn` with `preventDefault()` to prevent textarea blur on touchscreen and stylus devices. `public/app.js:9540` attaches `mousedown` instead.
 - **Recommended Remediation**:
@@ -268,7 +292,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### F-12: Missing `removeProperty` Method in RAG Hits Modal Test Sandbox
 - **File Path**: `test/test_rag_hits_modal_ui.cjs`, `public/app.js`
 - **Line Numbers**: `test/test_rag_hits_modal_ui.cjs:224`, `public/app.js:10483`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **24位**（全43件中）
 - **Trigger Condition & Root Cause**:
   `test_rag_hits_modal_ui.cjs` executes `app.js` in a Node VM sandbox. On evaluation, `initRpCardStrength()` calls `applyRpCardStrength()`, which invokes `document.body.style.removeProperty(...)`. The test sandbox mock for `document.body.style` does not provide `removeProperty`, throwing `TypeError: document.body.style.removeProperty is not a function`.
 - **Recommended Remediation**:
@@ -276,10 +300,43 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
+### F-06: Unclosed File Descriptors in Attachment Ingestion
+- **File Path**: `server.py`
+- **Line Numbers**: `8704`
+- **優先度**: **低**（Low） ／ **総合順位**: **34位**（全43件中）
+- **Trigger Condition & Root Cause**:
+  In `_google_prepare_attachments(m)`:
+  ```python
+  raw = open(path, "rb").read()
+  ```
+  Calling `open(...).read()` without a context manager leaves the file descriptor open until CPython garbage collector collects the file object. On Windows, this retains read locks on user attachment files.
+- **Recommended Remediation**:
+  Replace with `with open(path, "rb") as f: raw = f.read()`.
+
+---
+
+### F-08: Stale Temporary File Accumulation on Write Retries
+- **File Path**: `server.py`
+- **Line Numbers**: `1164–1175`, `1212–1223`, `1260–1271`
+- **優先度**: **低**（Low） ／ **総合順位**: **35位**（全43件中）
+- **Trigger Condition & Root Cause**:
+  In `save_choices_data`, `save_states_data`, and `save_images_data`, temporary files are generated as `tmp = f"{p}.{os.getpid()}.tmp"`. If all 10 `os.replace` retry attempts fail (e.g. persistent antivirus scan lock), `tmp` is never deleted, leaving orphaned `.tmp` files in `data/choices/`, `data/states/`, and `data/images/`.
+- **Recommended Remediation**:
+  Add an `else:` clause to the retry `for` loop:
+  ```python
+  if os.path.exists(tmp):
+      try:
+          os.remove(tmp)
+      except OSError:
+          pass
+  ```
+
+---
+
 ### F-13: Fragile Hash Lookup in External Electron Bundle Spec
 - **File Path**: `test/test_v4_spec.mjs`
 - **Line Numbers**: `test/test_v4_spec.mjs:23–24`
-- **Severity Rating**: **Low**
+- **優先度**: **低**（Low） ／ **総合順位**: **36位**（全43件中）
 - **Trigger Condition & Root Cause**:
   `test_v4_spec.mjs` searches an external installed Electron asar (`.../deepai-code-desktop/resources/server.asar`) for hardcoded hash strings (`runtime-DL3Dibca.js`). When the upstream application updates, `find(...)` returns `undefined`, throwing `TypeError: Cannot read properties of undefined (reading 'replace')`.
 - **Recommended Remediation**:
@@ -292,7 +349,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### L-01: Historical Fallback Memory Extraction Timestamp Distortion
 - **File Path**: `memory_extract.py`
 - **Line Numbers**: `248–255`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **4位**（全43件中）
 - **Trigger Condition & Root Cause**:
   When extracting memories from an older message `m` in a session:
   ```python
@@ -308,7 +365,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### L-02: Permanent Trapping of Fulfilled/Inactive Memories Across Categories
 - **File Path**: `memory_store.py`
 - **Line Numbers**: `1473–1497`, `1084`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **5位**（全43件中）
 - **Trigger Condition & Root Cause**:
   Line 1477 explicitly excludes non-active memories only for `cat in ("rule", "calling")`:
   ```python
@@ -326,7 +383,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### L-03: Cross-Turn Parallel Choices Staging Race Condition
 - **File Path**: `server.py`
 - **Line Numbers**: `7763–7767`, `7836–7843`, `8088–8097`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **6位**（全43件中）
 - **Trigger Condition & Root Cause**:
   When choices are generated for assistant response $N$, an outbox choice file is dispatched. If the user rapidly sends turn $N+1$ before the choice file is processed, the new user message is appended with `status: "pending"`.
   In `server.py:7764`, the fallback search for choice destination checks:
@@ -345,7 +402,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### L-04: Test Runner Test Discovery Incompatibility in `test_channel_wizard_module.py`
 - **File Path**: `test/test_channel_wizard_module.py` and `tools/run_tests.py`
 - **Line Numbers**: `test/test_channel_wizard_module.py:1–97`, `tools/run_tests.py:44–50`
-- **Severity Rating**: **High**
+- **優先度**: **高**（High） ／ **総合順位**: **7位**（全43件中）
 - **Trigger Condition & Root Cause**:
   `test/test_channel_wizard_module.py` defines 10 unit tests as pytest-style standalone functions (`def test_*():`). `tools/run_tests.py` relies on `unittest.defaultTestLoader.discover`. Because standard Python `unittest` only discovers test methods in classes that inherit from `unittest.TestCase`, 0 tests are collected from that file. `tools/run_tests.py` treats 0 collected tests from a test module as a hard error, exiting with status code 1.
   *Note on Fixture Compatibility*: Merely wrapping the functions in a `unittest.TestCase` class is insufficient and will cause `TypeError: missing 1 required positional argument: 'monkeypatch'` / `'tmp_path'`. Multiple tests (`test_import_has_no_side_effects`, `test_missing_deps_detection`, `test_missing_getters_detection`) depend on pytest's automatic dependency injection fixtures (`tmp_path`, `monkeypatch`), which standard `unittest` does not provide.
@@ -361,7 +418,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### L-05: Inflight Message Equality Condition `None == None` True Evaluation
 - **File Path**: `server.py`
 - **Line Numbers**: `3498–3504`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **15位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `build_prompt`:
   ```python
@@ -376,7 +433,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### L-06: Unhandled `JSONDecodeError` on External SQLite Workspace URIs
 - **File Path**: `server.py`
 - **Line Numbers**: `5308`, `5322`
-- **Severity Rating**: **Medium**
+- **優先度**: **中**（Medium） ／ **総合順位**: **16位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `load_ide_sessions` and `ide_workspaces`:
   ```python
@@ -390,10 +447,73 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
+### L-08: Silent Swallowing of Empty Choices Output
+- **File Path**: `server.py`
+- **Line Numbers**: `7769–7815`
+- **優先度**: **中**（Medium） ／ **総合順位**: **17位**（全43件中）
+- **Trigger Condition & Root Cause**:
+  If the LLM returns an empty list `[]` or blank text for choices, `normalized_choices` evaluates to empty. The block `if normalized_choices:` (line 7775) is bypassed. Lines 7810–7815 proceed to remove `choices_status` and `choices_error`, and line 7832 moves the file to `DONE`. The pending indicator on the message vanishes, but no choices are populated, leaving the user with no choices and no error notification.
+- **Recommended Remediation**:
+  In the `else:` branch of `if normalized_choices:`, record `target_asst["choices_error"] = "候補が空でした"` and mark `choices_status = "error"`.
+
+---
+
+### L-13: Swallowed Save Promise Rejection in Channel Creation Wizard
+- **File Path**: `public/wizard.js`
+- **Line Numbers**: `1985–1991`
+- **優先度**: **中**（Medium） ／ **総合順位**: **18位**（全43件中）
+- **Trigger Condition & Root Cause**:
+  In `public/wizard.js`:
+  ```javascript
+  if (a === "create") {
+    return runAction("create", async () => {
+      const ov = collectOverrides();
+      await savePreview().catch(() => {});
+      return doCreate(ov);
+    });
+  }
+  ```
+  If `savePreview()` fails (e.g. revision conflict or validation error), the error is silently swallowed, and `doCreate(ov)` immediately proceeds to create the session using stale or uncommitted draft state.
+- **Recommended Remediation**:
+  Do not swallow rejection; await `savePreview()` and halt creation if draft persistence fails.
+
+---
+
+### L-10: Missing `import sys` in Session Migration Script
+- **File Path**: `update_sessions.py`
+- **Line Numbers**: `4–8`, `81–84`
+- **優先度**: **中**（Medium） ／ **総合順位**: **19位**（全43件中）
+- **Trigger Condition & Root Cause**:
+  At line 84:
+  ```python
+  if not success:
+      sys.exit(1)
+  ```
+  `sys` is not in the imported modules list at lines 4–7. If session verification fails, the script crashes with `NameError: name 'sys' is not defined` instead of cleanly exiting with status 1.
+- **Recommended Remediation**:
+  Add `import sys` to top of `update_sessions.py`.
+
+---
+
+### L-11: Hardcoded Legacy Project Directory in Maintenance Script
+- **File Path**: `tools/cleanup_test_sessions.py`
+- **Line Numbers**: `8–11`
+- **優先度**: **中**（Medium） ／ **総合順位**: **20位**（全43件中）
+- **Trigger Condition & Root Cause**:
+  Line 8 hardcodes:
+  ```python
+  ROOT_DIR = r"c:\Users\nukon\rp-image-chat-main"
+  ```
+  In the current repository (`c:\Users\nukon\RPasobou`), running `cleanup_test_sessions.py` fails immediately with `FileNotFoundError: [WinError 3] The system cannot find the path specified`.
+- **Recommended Remediation**:
+  Change `ROOT_DIR` to dynamically resolve from file location: `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`.
+
+---
+
 ### L-07: Legacy String Image Object Import Crash
 - **File Path**: `server.py`
 - **Line Numbers**: `9178–9180`
-- **Severity Rating**: **Low**
+- **優先度**: **低**（Low） ／ **総合順位**: **37位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `clean_import`:
   ```python
@@ -405,21 +525,10 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### L-08: Silent Swallowing of Empty Choices Output
-- **File Path**: `server.py`
-- **Line Numbers**: `7769–7815`
-- **Severity Rating**: **Medium**
-- **Trigger Condition & Root Cause**:
-  If the LLM returns an empty list `[]` or blank text for choices, `normalized_choices` evaluates to empty. The block `if normalized_choices:` (line 7775) is bypassed. Lines 7810–7815 proceed to remove `choices_status` and `choices_error`, and line 7832 moves the file to `DONE`. The pending indicator on the message vanishes, but no choices are populated, leaving the user with no choices and no error notification.
-- **Recommended Remediation**:
-  In the `else:` branch of `if normalized_choices:`, record `target_asst["choices_error"] = "候補が空でした"` and mark `choices_status = "error"`.
-
----
-
 ### L-09: Tautological Filter Logic in Decensor Dictionary Warning Check
 - **File Path**: `decensor_engine.py`
 - **Line Numbers**: `345–350`
-- **Severity Rating**: **Low**
+- **優先度**: **低**（Low） ／ **総合順位**: **38位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `_decensor_validate`:
   ```python
@@ -438,41 +547,10 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### L-10: Missing `import sys` in Session Migration Script
-- **File Path**: `update_sessions.py`
-- **Line Numbers**: `4–8`, `81–84`
-- **Severity Rating**: **Medium**
-- **Trigger Condition & Root Cause**:
-  At line 84:
-  ```python
-  if not success:
-      sys.exit(1)
-  ```
-  `sys` is not in the imported modules list at lines 4–7. If session verification fails, the script crashes with `NameError: name 'sys' is not defined` instead of cleanly exiting with status 1.
-- **Recommended Remediation**:
-  Add `import sys` to top of `update_sessions.py`.
-
----
-
-### L-11: Hardcoded Legacy Project Directory in Maintenance Script
-- **File Path**: `tools/cleanup_test_sessions.py`
-- **Line Numbers**: `8–11`
-- **Severity Rating**: **Medium**
-- **Trigger Condition & Root Cause**:
-  Line 8 hardcodes:
-  ```python
-  ROOT_DIR = r"c:\Users\nukon\rp-image-chat-main"
-  ```
-  In the current repository (`c:\Users\nukon\RPasobou`), running `cleanup_test_sessions.py` fails immediately with `FileNotFoundError: [WinError 3] The system cannot find the path specified`.
-- **Recommended Remediation**:
-  Change `ROOT_DIR` to dynamically resolve from file location: `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`.
-
----
-
 ### L-12: Silent Error Suppression in Frontend AI Provider Switch
 - **File Path**: `public/app.js`
 - **Line Numbers**: `4031–4038`, `4058–4064`
-- **Severity Rating**: **Low**
+- **優先度**: **低**（Low） ／ **総合順位**: **39位**（全43件中）
 - **Trigger Condition & Root Cause**:
   Calls to `/api/ai/provider` inside API key save and delete handlers are wrapped in empty `catch (_) {}` blocks:
   ```javascript
@@ -488,74 +566,12 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### L-13: Swallowed Save Promise Rejection in Channel Creation Wizard
-- **File Path**: `public/wizard.js`
-- **Line Numbers**: `1985–1991`
-- **Severity Rating**: **Medium**
-- **Trigger Condition & Root Cause**:
-  In `public/wizard.js`:
-  ```javascript
-  if (a === "create") {
-    return runAction("create", async () => {
-      const ov = collectOverrides();
-      await savePreview().catch(() => {});
-      return doCreate(ov);
-    });
-  }
-  ```
-  If `savePreview()` fails (e.g. revision conflict or validation error), the error is silently swallowed, and `doCreate(ov)` immediately proceeds to create the session using stale or uncommitted draft state.
-- **Recommended Remediation**:
-  Do not swallow rejection; await `savePreview()` and halt creation if draft persistence fails.
-
----
-
 ## Section 3: Performance Bottlenecks & Optimization Proposals
-
-### P-01: High-Frequency Polling (100ms) and Global Lock Contention in Session List
-- **Affected Components / Paths**:
-  - `public/app.js`: lines 11780–11794, line 11789
-  - `server.py`: lines 9480–9484, 1496–1534, 9493–9500
-- **Rationale for Improvement**:
-  1. During active AI turns (`isWaiting`), `pollLoop` in `public/app.js` polls `/api/session` every **100ms** (10 times/second per open tab).
-  2. Simultaneously, `setInterval(refreshSessions, 3000)` calls `/api/sessions` every 3 seconds. In `/api/sessions`, the server acquires the global `lock`, iterates over all sessions via `list_ids()`, and invokes `load(sid, readonly=True)`. Each `load()` executes **4 `os.stat` system calls** under `with lock:`. For 25 sessions, that is 100 filesystem stats holding the global thread lock every 3 seconds.
-  3. On every 100ms poll to `/api/session`, even when returning `{"unchanged": True}`, `server.py` executes `os.listdir(ARCHIVE_DIR)` with regex evaluations across archive filenames, incurring redundant disk I/O and CPU waste.
-- **Actionable Suggestions & Implementation Outline**:
-  - *Client*: In `public/app.js:11780`, relax the active polling interval from 100ms to **400ms–500ms**. Increase `refreshSessions` interval from 3s to **10s** (or poll only on user drawer interaction).
-  - *Server*: In `server.py:9493`, cache `has_history` in `session_cache` rather than executing `os.listdir(ARCHIVE_DIR)` on every poll. In `/api/sessions`, read metadata from an in-memory summary dictionary rather than `stat`-ing every session file under `with lock:`.
-
----
-
-### P-02: Full-DOM Sidebar Destruction and Keystroke Layout Thrashing
-- **Affected Components / Paths**:
-  - `public/app.js`: lines 709, 720, 10022, 357–376
-- **Rationale for Improvement**:
-  1. `renderSessions()` executes `el.innerHTML = ""` every 3 seconds (triggered by `refreshSessions`), destroying and re-creating all session DOM elements, throwing away hover states, focus, and scroll offsets.
-  2. Typing into `#sessionFilter` triggers `renderSessions` on every input event without debouncing (`oninput = renderSessions`), rebuilding the entire sidebar on every keystroke.
-  3. `autoResizeInput()` mutates `ta.style.height = "auto"` (style write), queries `ta.scrollHeight` (forced reflow), updates height (style write), and then calls `updateFooterHeight()` which reads `footer.offsetHeight` (second forced reflow) and mutates CSS `:root`. This causes severe layout thrashing on every keystroke.
-- **Actionable Suggestions & Implementation Outline**:
-  - *Sidebar Reconciliation*: Update `renderSessions()` to reconcile existing session elements by ID/rev rather than setting `el.innerHTML = ""`.
-  - *Debounce Filter*: Debounce `#sessionFilter.oninput` by 150ms using a timer.
-  - *Batch Layout Reads/Writes*: In `autoResizeInput()`, avoid setting `ta.style.height = "auto"` unless the text line count changes, or wrap height adjustments in `requestAnimationFrame`.
-
----
-
-### P-03: Unscoped Global `MutationObserver` on `document.body`
-- **Affected Components / Paths**:
-  - `public/prompt_toolbar.js`: lines 1201–1220
-- **Rationale for Improvement**:
-  `PromptToolbar` observes `document.body` with `{ childList: true, subtree: true }`. Every single DOM mutation across the entire application (message bubbles added, sidebar updates, progress pills) triggers the observer, and for each added node, `scanAndAttach` runs `root.querySelectorAll(selector)`.
-- **Actionable Suggestions & Implementation Outline**:
-  Scope the observer to target containers only:
-  ```javascript
-  const targetContainers = [document.getElementById("promptModal"), document.getElementById("chatLog")].filter(Boolean);
-  targetContainers.forEach(container => observer.observe(container, { childList: true, subtree: true }));
-  ```
-
----
 
 ### P-04: Memory Leak via Unrevoked Object URLs and Base64 Payload Inefficiency
 - **Affected Components / Paths**:
   - `public/app.js`: lines 7296–7308, 816, 7126, 7275
+- **優先度**: **高**（本監査で新規付与） ／ **総合順位**: **8位**（全43件中）
 - **Rationale for Improvement**:
   1. `URL.createObjectURL(file)` is called on file attach, but `URL.revokeObjectURL(a.preview)` is never called anywhere when attachments are deleted, cleared upon send, or discarded on channel switch. These blob URLs remain pinned in browser memory for the lifetime of the tab.
   2. Files up to 40MB are converted into Base64 strings in browser heap (~53MB string, ~106MB memory in V8) and serialized inside a JSON request to `/api/upload`.
@@ -575,9 +591,55 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
+### P-01: High-Frequency Polling (100ms) and Global Lock Contention in Session List
+- **Affected Components / Paths**:
+  - `public/app.js`: lines 11780–11794, line 11789
+  - `server.py`: lines 9480–9484, 1496–1534, 9493–9500
+- **優先度**: **高**（本監査で新規付与） ／ **総合順位**: **9位**（全43件中）
+- **Rationale for Improvement**:
+  1. During active AI turns (`isWaiting`), `pollLoop` in `public/app.js` polls `/api/session` every **100ms** (10 times/second per open tab).
+  2. Simultaneously, `setInterval(refreshSessions, 3000)` calls `/api/sessions` every 3 seconds. In `/api/sessions`, the server acquires the global `lock`, iterates over all sessions via `list_ids()`, and invokes `load(sid, readonly=True)`. Each `load()` executes **4 `os.stat` system calls** under `with lock:`. For 25 sessions, that is 100 filesystem stats holding the global thread lock every 3 seconds.
+  3. On every 100ms poll to `/api/session`, even when returning `{"unchanged": True}`, `server.py` executes `os.listdir(ARCHIVE_DIR)` with regex evaluations across archive filenames, incurring redundant disk I/O and CPU waste.
+- **Actionable Suggestions & Implementation Outline**:
+  - *Client*: In `public/app.js:11780`, relax the active polling interval from 100ms to **400ms–500ms**. Increase `refreshSessions` interval from 3s to **10s** (or poll only on user drawer interaction).
+  - *Server*: In `server.py:9493`, cache `has_history` in `session_cache` rather than executing `os.listdir(ARCHIVE_DIR)` on every poll. In `/api/sessions`, read metadata from an in-memory summary dictionary rather than `stat`-ing every session file under `with lock:`.
+
+---
+
+### P-02: Full-DOM Sidebar Destruction and Keystroke Layout Thrashing
+- **Affected Components / Paths**:
+  - `public/app.js`: lines 709, 720, 10022, 357–376
+- **優先度**: **高**（本監査で新規付与） ／ **総合順位**: **10位**（全43件中）
+- **Rationale for Improvement**:
+  1. `renderSessions()` executes `el.innerHTML = ""` every 3 seconds (triggered by `refreshSessions`), destroying and re-creating all session DOM elements, throwing away hover states, focus, and scroll offsets.
+  2. Typing into `#sessionFilter` triggers `renderSessions` on every input event without debouncing (`oninput = renderSessions`), rebuilding the entire sidebar on every keystroke.
+  3. `autoResizeInput()` mutates `ta.style.height = "auto"` (style write), queries `ta.scrollHeight` (forced reflow), updates height (style write), and then calls `updateFooterHeight()` which reads `footer.offsetHeight` (second forced reflow) and mutates CSS `:root`. This causes severe layout thrashing on every keystroke.
+- **Actionable Suggestions & Implementation Outline**:
+  - *Sidebar Reconciliation*: Update `renderSessions()` to reconcile existing session elements by ID/rev rather than setting `el.innerHTML = ""`.
+  - *Debounce Filter*: Debounce `#sessionFilter.oninput` by 150ms using a timer.
+  - *Batch Layout Reads/Writes*: In `autoResizeInput()`, avoid setting `ta.style.height = "auto"` unless the text line count changes, or wrap height adjustments in `requestAnimationFrame`.
+
+---
+
+### P-03: Unscoped Global `MutationObserver` on `document.body`
+- **Affected Components / Paths**:
+  - `public/prompt_toolbar.js`: lines 1201–1220
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **31位**（全43件中）
+- **Rationale for Improvement**:
+  `PromptToolbar` observes `document.body` with `{ childList: true, subtree: true }`. Every single DOM mutation across the entire application (message bubbles added, sidebar updates, progress pills) triggers the observer, and for each added node, `scanAndAttach` runs `root.querySelectorAll(selector)`.
+- **Actionable Suggestions & Implementation Outline**:
+  Scope the observer to target containers only:
+  ```javascript
+  const targetContainers = [document.getElementById("promptModal"), document.getElementById("chatLog")].filter(Boolean);
+  targetContainers.forEach(container => observer.observe(container, { childList: true, subtree: true }));
+  ```
+
+---
+
 ### P-05: Inefficient Deepcopy of 384-Dimensional Embedding Vectors
 - **Affected Components / Paths**:
   - `memory_store.py`: lines 697–703, lines 1217–1232
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **32位**（全43件中）
 - **Rationale for Improvement**:
   Every memory contains a 384-element float list (`"embedding": [0.012, -0.045, ...]`). In `load_memories()`, even when the cache is hit, Python's `copy.deepcopy()` is invoked on the entire data tree. `copy.deepcopy` recursively duplicates every individual float object and maintains a memo dictionary. With 100 memories, over 38,400 float objects are cloned on every memory search/load call.
   *Note on Shallow Copy Hazard*: A naive shallow copy `[dict(m) for m in ...]` causes severe in-memory cache corruption. Memory dictionaries contain mutable objects such as `history: list` and `elapsed_time: dict`. During memory consolidation and archiving (`_archive_memory_to_history` at `memory_store.py:1217-1232`), code executes `mem_obj.setdefault("history", []).append(old_hist)`. With shallow copying, `m["history"]` points to the identical list object residing in `_memory_cache`, polluting the cache prior to disk commit.
@@ -601,9 +663,23 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
+### P-07: Uncompressed Static Asset Delivery and Missing HTTP Cache Revalidation
+- **Affected Components / Paths**:
+  - `server.py`: lines 9404–9417
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **33位**（全43件中）
+- **Rationale for Improvement**:
+  1. Synchronous disk reads on every static request without in-memory caching.
+  2. `public/app.js` (514 KB) and `public/style.css` (160 KB) are transmitted uncompressed without `gzip` or `deflate`.
+  3. No `ETag` or `Last-Modified` headers are sent. Although `Cache-Control: no-cache, must-revalidate` is specified, clients cannot revalidate with `If-None-Match` or `If-Modified-Since`, forcing full 200 OK payloads on every page refresh.
+- **Actionable Suggestions & Implementation Outline**:
+  Cache static file bytes in memory. Send `ETag: "<mtime_hash>"`. When `If-None-Match` matches, respond with `304 Not Modified`. Compress `.js`, `.css`, and `.html` with gzip if supported by the client.
+
+---
+
 ### P-06: Quadratic O(N*M) Deduplication and Directory Scan in Shared Memories
 - **Affected Components / Paths**:
   - `memory_store.py`: lines 1029–1045
+- **優先度**: **低**（本監査で新規付与） ／ **総合順位**: **42位**（全43件中）
 - **Rationale for Improvement**:
   On every message turn when `shared_memories` is active:
   1. `os.listdir(RAG_DIR)` scans every memory file in the directory.
@@ -614,21 +690,10 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### P-07: Uncompressed Static Asset Delivery and Missing HTTP Cache Revalidation
-- **Affected Components / Paths**:
-  - `server.py`: lines 9404–9417
-- **Rationale for Improvement**:
-  1. Synchronous disk reads on every static request without in-memory caching.
-  2. `public/app.js` (514 KB) and `public/style.css` (160 KB) are transmitted uncompressed without `gzip` or `deflate`.
-  3. No `ETag` or `Last-Modified` headers are sent. Although `Cache-Control: no-cache, must-revalidate` is specified, clients cannot revalidate with `If-None-Match` or `If-Modified-Since`, forcing full 200 OK payloads on every page refresh.
-- **Actionable Suggestions & Implementation Outline**:
-  Cache static file bytes in memory. Send `ETag: "<mtime_hash>"`. When `If-None-Match` matches, respond with `304 Not Modified`. Compress `.js`, `.css`, and `.html` with gzip if supported by the client.
-
----
-
 ### P-08: High-Frequency Polling in Outbox Background Worker
 - **Affected Components / Paths**:
   - `server.py`: lines 9041–9057
+- **優先度**: **低**（本監査で新規付与） ／ **総合順位**: **43位**（全43件中）
 - **Rationale for Improvement**:
   `outbox_worker` loops continuously, invoking `os.scandir(OUTBOX)` every 300ms when idle, adding constant I/O wakeups.
 - **Actionable Suggestions & Implementation Outline**:
@@ -638,19 +703,10 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ## Section 4: UI/UX & Accessibility Improvement Proposals
 
-### U-01: Action Menu ("⋯") Abruptly Dismissed by Background Poll
-- **Affected Components / Paths**:
-  - `public/app.js`: lines 6210–6211
-- **Rationale for Improvement**:
-  Whenever `render()` executes (which occurs whenever `lastRev` increments due to incoming replies, background choices generation, tag refinement, or ComfyUI generation completions), it unconditionally executes `closeMoreMenu()`. A user reading or about to tap "編集", "削除", or "分岐" has the menu abruptly vanished under their cursor/finger without warning.
-- **Actionable Suggestions & Implementation Outline**:
-  Check whether the message associated with `moreOpen.cur` has actually changed its DOM ID or text. If unchanged, retain the menu open and adjust its positioning rather than closing it.
-
----
-
 ### U-02: Unexpected Channel Navigation and State Loss on Server Error Responses
 - **Affected Components / Paths**:
   - `public/app.js`: lines 6534, 6603–6605, 772–775
+- **優先度**: **高**（本監査で新規付与） ／ **総合順位**: **11位**（全43件中）
 - **Rationale for Improvement**:
   In `loadCurrentSession()` (`public/app.js:6534`):
   ```javascript
@@ -679,25 +735,11 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### U-03: Confusing Interactive Status Label on Image Refine Button
-- **Affected Components / Paths**:
-  - `public/app.js`: lines 5330–5350
-- **Rationale for Improvement**:
-  In `public/app.js:5330-5332`, the tooltip for `waitingGen` states:
-  `rgTitle = "画像の生成待ちです（終わると 🔁 に戻ります。タップで作り直す）";`
-  This confirms that allowing the button to remain clickable during generation was an intentional design choice ("tap to recreate/regenerate with a new seed if taking too long"), rather than an accidental omission of `waitingGen` from disabled checks.
-  However, combining a passive progress indicator ("⏳ 生成待ち…") with a destructive re-generation action creates an affordance conflict: users tap the button assuming it is an inert status indicator or a manual status poll, inadvertently aborting and re-queueing generation.
-- **Actionable Suggestions & Implementation Outline**:
-  Decouple the passive status indicator from the destructive regeneration trigger:
-  - Display a non-interactive progress pill `[⏳ 生成待ち...]`.
-  - Display a distinct, clearly labeled button `[↺ 別のシードで作り直す]` with a confirmation or distinct secondary styling.
-
----
-
 ### U-04: Widespread Absence of Global Escape Key, Focus Trapping, and Dialog ARIA Semantics
 - **Affected Components / Paths**:
   - `public/index.html`: lines 390, 410, 421, 433, 439, 457, 474, 590, 608, 964
   - `public/app.js`: lines 8760–8762
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **25位**（全43件中）
 - **Rationale for Improvement**:
   Across 10 modal dialogs in the application (`promptModal`, `editModal`, `textModal`, `ragHitsModal`, `ideModal`, `forkModal`, `ragModal`, `elapsedModal`, `aiToolModal`, `modelSheet`):
   1. None have `role="dialog"`, `aria-modal="true"`, or `aria-labelledby` attributes.
@@ -731,6 +773,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### U-05: Inaccessible Non-Keyboard Sidebar Items
 - **Affected Components / Paths**:
   - `public/app.js`: lines 723–745
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **26位**（全43件中）
 - **Rationale for Improvement**:
   Project headers and session list items are created as plain `<div>` elements with mouse `onclick` listeners. They lack `tabindex="0"`, `role="button"`, `aria-expanded` (for projects), and `keydown` event listeners (for Enter/Space). Keyboard-only and assistive technology users cannot navigate, collapse, or switch channels via keyboard.
 - **Actionable Suggestions & Implementation Outline**:
@@ -752,6 +795,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### U-06: Sub-Standard Touch Targets on Mobile Devices (WCAG 2.5.5 / 2.5.8 Failure)
 - **Affected Components / Paths**:
   - `public/style.css`: lines 35, 472, 946, 2594, 2733
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **27位**（全43件中）
 - **Rationale for Improvement**:
   `.sess-rename` is positioned inside the session card with a footprint of ~14px × 14px. On touch screens, attempting to tap `.sess-rename` routinely triggers the parent `.sess.onclick`, unintentionally switching channels. Buttons in RAG entries, fork turns, and category filters are far smaller than the WCAG 2.5.8 minimum target size of 24×24px (and recommended 44×44px).
 - **Actionable Suggestions & Implementation Outline**:
@@ -770,6 +814,7 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 ### U-07: Low Contrast Failures on Dark Theme (WCAG 2.1 AA Failure)
 - **Affected Components / Paths**:
   - `public/style.css`: lines 33, 636, 2786, 3054
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **28位**（全43件中）
 - **Rationale for Improvement**:
   On dark backgrounds (`#1a1a1e` / `#202024`):
   - `#777` against `#1a1a1e` yields a contrast ratio of **3.73:1**.
@@ -783,25 +828,54 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
+### U-09: Accidental Channel Deletion Hazard via Right-Click / Long-Press
+- **Affected Components / Paths**:
+  - `public/app.js`: lines 740–745
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **29位**（全43件中）
+- **Rationale for Improvement**:
+  Right-clicking a session card immediately executes `confirm("...を削除？")` instead of opening a context menu. On mobile, touch long-press synthesizes a `contextmenu` event, surprising users with a destructive deletion prompt when attempting to select or preview a channel.
+- **Actionable Suggestions & Implementation Outline**:
+  Replace the direct `confirm("削除？")` on `d.oncontextmenu` with a contextual bottom sheet / popover offering: "名前を変更", "複製", "書き出し", "削除".
+
+---
+
+### U-01: Action Menu ("⋯") Abruptly Dismissed by Background Poll
+- **Affected Components / Paths**:
+  - `public/app.js`: lines 6210–6211
+- **優先度**: **中**（本監査で新規付与） ／ **総合順位**: **30位**（全43件中）
+- **Rationale for Improvement**:
+  Whenever `render()` executes (which occurs whenever `lastRev` increments due to incoming replies, background choices generation, tag refinement, or ComfyUI generation completions), it unconditionally executes `closeMoreMenu()`. A user reading or about to tap "編集", "削除", or "分岐" has the menu abruptly vanished under their cursor/finger without warning.
+- **Actionable Suggestions & Implementation Outline**:
+  Check whether the message associated with `moreOpen.cur` has actually changed its DOM ID or text. If unchanged, retain the menu open and adjust its positioning rather than closing it.
+
+---
+
+### U-03: Confusing Interactive Status Label on Image Refine Button
+- **Affected Components / Paths**:
+  - `public/app.js`: lines 5330–5350
+- **優先度**: **低**（本監査で新規付与） ／ **総合順位**: **40位**（全43件中）
+- **Rationale for Improvement**:
+  In `public/app.js:5330-5332`, the tooltip for `waitingGen` states:
+  `rgTitle = "画像の生成待ちです（終わると 🔁 に戻ります。タップで作り直す）";`
+  This confirms that allowing the button to remain clickable during generation was an intentional design choice ("tap to recreate/regenerate with a new seed if taking too long"), rather than an accidental omission of `waitingGen` from disabled checks.
+  However, combining a passive progress indicator ("⏳ 生成待ち…") with a destructive re-generation action creates an affordance conflict: users tap the button assuming it is an inert status indicator or a manual status poll, inadvertently aborting and re-queueing generation.
+- **Actionable Suggestions & Implementation Outline**:
+  Decouple the passive status indicator from the destructive regeneration trigger:
+  - Display a non-interactive progress pill `[⏳ 生成待ち...]`.
+  - Display a distinct, clearly labeled button `[↺ 別のシードで作り直す]` with a confirmation or distinct secondary styling.
+
+---
+
 ### U-08: Blocking Synchronous Native Dialogs in Modern Mobile/PWA Flows
 - **Affected Components / Paths**:
   - `public/app.js`: lines 742, 753, 7091, 7115, 7153, 10871, 10874
+- **優先度**: **低**（本監査で新規付与） ／ **総合順位**: **41位**（全43件中）
 - **Rationale for Improvement**:
   `window.alert`, `window.confirm`, and `window.prompt` freeze JS execution and cannot be styled. When installed as a mobile PWA or accessed over Android Chrome / iOS Safari, native prompts pop jarring OS dialogs, fail to focus input, or are suppressed by browser security policies. Custom modal sheets (such as `favDeleteModal` and `favNameModal`) are already implemented in the project but are inconsistently adopted.
 - **Actionable Suggestions & Implementation Outline**:
   - Replace `window.prompt` in `renameChannel()` with an in-app dialog (similar to `favNameModal`).
   - Replace `window.confirm` in channel deletion and session reset with a confirmation sheet (similar to `favDeleteModal`).
   - Replace `window.alert` in send failure handlers with dismissible toast notifications (`toast(msg, { kind: "err" })`).
-
----
-
-### U-09: Accidental Channel Deletion Hazard via Right-Click / Long-Press
-- **Affected Components / Paths**:
-  - `public/app.js`: lines 740–745
-- **Rationale for Improvement**:
-  Right-clicking a session card immediately executes `confirm("...を削除？")` instead of opening a context menu. On mobile, touch long-press synthesizes a `contextmenu` event, surprising users with a destructive deletion prompt when attempting to select or preview a channel.
-- **Actionable Suggestions & Implementation Outline**:
-  Replace the direct `confirm("削除？")` on `d.oncontextmenu` with a contextual bottom sheet / popover offering: "名前を変更", "複製", "書き出し", "削除".
 
 ---
 
