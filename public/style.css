@@ -30,11 +30,20 @@ body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-ins
 .sess:hover { background: #26262c; }
 .sess.active { background: #2b2f3f; border-left-color: #6889f5; }
 .sess-title { font-size: 13px; display: flex; justify-content: space-between; gap: 6px; }
-.sess-sub { font-size: 11px; color: #777; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-sub { font-size: 11px; color: #a8a8b2; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badges { font-size: 11px; display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
-.sess-rename { background: none; border: none; padding: 0 2px; font-size: 12px; line-height: 1; cursor: pointer; color: inherit; opacity: 0; }
+.sess-rename {
+  background: none; border: none; font-size: 12px; line-height: 1; cursor: pointer; color: inherit;
+  opacity: 0;
+  padding: 8px; margin: -8px;                 /* 見た目を変えず押し判定だけ 36px に拡大 */
+  min-width: 36px; min-height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
 .sess:hover .sess-rename, .sess.active .sess-rename { opacity: .6; }
 .sess-rename:hover { opacity: 1 !important; }
+@media (hover: none), (pointer: coarse) {
+  .sess-rename { opacity: .6; }
+}
 header h1#title { cursor: pointer; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff6b8b; display: inline-block; }
 #sideToggle { display: none; }
@@ -633,7 +642,7 @@ footer { flex-shrink: 0; }
 .msg.user.md a { color: #fff; }
 .edited-text { color: #ffb74d; background: rgba(255,152,0,.13); border-radius: 2px; }
 .edited-label { font-size: 10px; color: #ffb74d; margin-top: 3px; }
-.meta { font-size: 11px; color: #666; margin-top: 3px; padding: 0 4px; align-self: flex-end; }
+.meta { font-size: 11px; color: #9e9ea6; margin-top: 3px; padding: 0 4px; align-self: flex-end; }
 .typing { align-self: flex-start; color: #999; font-size: 13px; padding: 6px 4px; }
 .typing span { animation: blink 1.4s infinite both; }
 .typing span:nth-child(2) { animation-delay: .2s; } .typing span:nth-child(3) { animation-delay: .4s; }
@@ -2780,7 +2789,7 @@ button.rag-search-clear:active {
 .badge-source { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-right: 5px; }
 .badge-source-auto { background: #33333d; color: #999; }
 .badge-source-manual { background: #33333d; color: #ddd; }
-.rag-mem-meta { font-size: 11px; color: #777; margin-top: 4px; }
+.rag-mem-meta { font-size: 11px; color: #a0a0aa; margin-top: 4px; }
 .badge-status-fulfilled { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 600; margin-right: 5px; background: #1b4332; color: #74c69d; border: 1px solid #2d6a4f; }
 .rag-mem-history { margin-top: 6px; font-size: 11px; background: #19191d; border: 1px solid #2d2d35; border-radius: 4px; padding: 4px 8px; }
 .rag-mem-history summary { cursor: pointer; color: #888; user-select: none; }
@@ -3048,7 +3057,7 @@ button.rag-entry-pin.is-pinned {
 .folder-row { display: flex; gap: 6px; align-items: center; }
 .folder-row .folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .folder-row > .muted { white-space: nowrap; font-size: 12px; }
-.folder-row .st { font-size: 11px; color: #888; white-space: nowrap; }
+.folder-row .st { font-size: 11px; color: #a0a0aa; white-space: nowrap; }
 .folder-row .st.ng { color: #ff9999; }
 .check-list .folder-head { font-size: 11px; color: #9fb0e8; margin-top: 4px; }
 /* スマホで開く */
