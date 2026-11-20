@@ -343,8 +343,7 @@ def parse_decensor_text(text):
         words[norm_frm] = to
     target_words = sorted({_split_context_key(k)[0] for k in words}, key=len, reverse=True)
     for frm, to in words.items():
-        frm_word, _ = _split_context_key(frm)
-        inner = [w for w in target_words if (w != frm_word or w != to) and w in to]
+        inner = [w for w in target_words if w in to]
         if inner:
             warnings.append(f"「{frm}→{to}」は「{inner[0]}」を含むため、保存し直して再適用すると連鎖します")
     return words, warnings

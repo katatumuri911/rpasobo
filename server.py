@@ -3665,7 +3665,7 @@ def build_context(s, m, transport="ag"):
         parts.append(("固定キャラ（画像に写るときこの外見タグが自動で付く）", "chars", chars_block(st["chars"])))
     ide = "" if google else (st.get("ide_session") or "")
     raw_old = {} if google else read_sent(s["id"])
-    if isinstance(m, dict) and raw_old.get("inflight_mid") == m.get("id") and isinstance(raw_old.get("prev_sent"), dict) and raw_old.get("prev_sent"):
+    if isinstance(m, dict) and bool(m.get("id")) and raw_old.get("inflight_mid") == m.get("id") and isinstance(raw_old.get("prev_sent"), dict) and raw_old.get("prev_sent"):
         old = copy.deepcopy(raw_old["prev_sent"])
         prev_snapshot = copy.deepcopy(raw_old["prev_sent"])
     else:
@@ -8006,7 +8006,7 @@ def process_outbox():
                             break
                 if not target_asst and not target_user:
                     for m in reversed(s["messages"]):
-                        if m["role"] == "user" and (m.get("choices_status") in ("pending", "processing") or m.get("status") in ("pending", "processing")):
+                        if m["role"] == "user" and m.get("choices_status") in ("pending", "processing"):
                             target_user = m
                             break
 
@@ -9118,7 +9118,8 @@ def _google_prepare_attachments(m):
             continue
         mime = f.get("type") or mimetypes.guess_type(path)[0] or "application/octet-stream"
         try:
-            raw = open(path, "rb").read()
+            with open(path, "rb") as fp:
+                raw = fp.read()
         except OSError as e:
             extra.append(f"添付ファイル（読めない）: {f.get('name', '')} ({e})")
             continue
@@ -9527,8 +9528,8 @@ def ph_log(task_type, applied, restored, left, length=0, raw_len_before=0, elaps
 
 
 def run_google_task(sid, mid, task_type=None, key=None):
-    if task_type not in ("user", "choices", "image_refine", "memory_extract", "consolidation") \
-            and mid in ("user", "choices", "image_refine", "memory_extract", "consolidation"):
+    if task_type not in ("user", "choices", "image_refine") \
+            and mid in ("user", "choices", "image_refine"):
         task_type, mid = mid, task_type
     try:
         with lock:

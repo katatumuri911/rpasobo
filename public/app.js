@@ -9645,8 +9645,8 @@ if ($("favModelBtn")) {
     openFavModelSheet();
   };
 
-  // PCでのフォーカス外れ防止用（マウスで押したときに textarea が blur して縮むのを防ぐ）
-  favBtn.addEventListener("mousedown", (e) => {
+  // PCでのフォーカス外れ防止用（マウス・タッチで押したときに textarea が blur して縮むのを防ぐ）
+  favBtn.addEventListener("pointerdown", (e) => {
     if (e && typeof e.preventDefault === "function") e.preventDefault();
   });
 
@@ -9807,7 +9807,7 @@ $("messageInput").addEventListener("focus", () => {
 $("messageInput").addEventListener("blur", () => {
   inputIsComposing = false;
   if (inputComposingTimer) { clearTimeout(inputComposingTimer); inputComposingTimer = null; }
-  hideAgQuota();   // フォーカスが外れたら残量バッジも引っ込める（畳んだ入力欄に取り残さない）
+  if (typeof hideAgQuota === "function") hideAgQuota();   // フォーカスが外れたら残量バッジも引っ込める（畳んだ入力欄に取り残さない）
   setComposerExpanded();
   setTypingInput(false);
   updateFabState();
