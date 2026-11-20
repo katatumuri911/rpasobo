@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -305,6 +306,18 @@ class _ServerTempStore(_TempStore):
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    def _post_status(self, path, data):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
     def _get(self, path):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -461,7 +474,7 @@ class TestRegenerateEndpoint(_ServerTempStore):
         self._seed()
         before_ids = {m["id"] for m in self._memories(self.sid)}
         payload = {"session_id": self.sid,
-                   "memories": [{"category": "event", "content": "ラピは pi 記念日に海へ行った"}]}
+                   "memories": [{"category": "event", "content": "ラピは pi 記念日に海へ行った", "source_mid": "e2"}]}
 
         res = self._post("/api/rag/memories/regenerate", payload)
         self.assertFalse(res.get("reset"))
@@ -472,6 +485,276 @@ class TestRegenerateEndpoint(_ServerTempStore):
         # 同じ内容をもう一度送っても増えない（filter_new_items が除外）
         self._post("/api/rag/memories/regenerate", payload)
         self.assertEqual({m["id"] for m in self._memories(self.sid)}, ids)
+
+
+class TestRegenerationSourceProvenance(_ServerTempStore):
+    """§10.4 記憶再生成・直接提供の出所保持（R1～R8）および A7（一覧API往復）"""
+
+    def test_a7_list_api_preserves_null_elapsed_time(self):
+        """A7: /api/rag/memories を呼んでも elapsed_time: None が 1日目・午前に化けず、再保存もされない"""
+        sid = "sess_a7"
+        msgs = [
+            {"id": "m1", "role": "user", "text": "約束", "turn": 1},
+            {"id": "m2", "role": "assistant", "text": "約束ね", "turn": 1}
+        ]
+        self._write_session(sid, msgs, setting={"elapsed_time": {"day": 5, "period": "夜"}})
+
+        # elapsed_time: None の記憶を登録
+        ms.save_extracted_memories(
+            sid, "ラピ",
+            [{"category": "promise", "content": "ラピと約束した", "_source_turn_idx": 1, "_source_elapsed_time": None}],
+            turn_idx=1
+        )
+        mem_before = self._memories(sid)[0]
+        self.assertIsNone(mem_before.get("elapsed_time"))
+
+        # 一覧API経由で取得
+        res = self._get(f"/api/rag/memories?session_id={sid}")
+        self.assertTrue(res.get("ok"))
+        res_mems = res.get("memories", [])
+        self.assertEqual(len(res_mems), 1)
+        self.assertIsNone(res_mems[0].get("elapsed_time"), "一覧APIレスポンスで None が保持されること")
+
+        # ファイル上の再読込でも None のまま
+        reloaded = self._memories(sid)[0]
+        self.assertIsNone(reloaded.get("elapsed_time"), "一覧APIの呼び出しによって再保存・時刻補完されないこと")
+
+    def test_r1_cumulative_turns_eliminated(self):
+        """R1: 41～60の20user, 2chunksで cumulative_turns を廃止し、各項目が出所の45/55ターンと時刻を持つ"""
+        sid = "sess_r1"
+        msgs = []
+        for u in range(41, 61):
+            msgs.append({"id": f"u{u}", "role": "user", "text": f"発言 {u}", "turn": u})
+            a_msg = {
+                "id": f"a{u}",
+                "role": "assistant",
+                "text": f"返答 {u}",
+                "turn": u,
+                "elapsed_time": {"day": 3 if u < 50 else 4, "period": "昼" if u < 50 else "夜"}
+            }
+            if u == 45:
+                a_msg["text"] = "ラピは指揮官から合鍵をもらった"
+            elif u == 55:
+                a_msg["text"] = "「ラピは夜10時以降に部屋から出てはならない」と約束した"
+            msgs.append(a_msg)
+
+        self._write_session(sid, msgs, setting={"total_turns": 60, "elapsed_time": {"day": 5, "period": "朝"}})
+
+        res = self._post("/api/rag/memories/regenerate", {"session_id": sid, "reset": True})
+        self.assertTrue(res.get("ok"))
+        st = self._wait_regen(sid)
+        self.assertEqual(st.get("status"), "completed")
+
+        mems = self._memories(sid)
+        mem45 = next((m for m in mems if "合鍵" in m.get("content", "")), None)
+        mem55 = next((m for m in mems if "10時" in m.get("content", "")), None)
+        self.assertIsNotNone(mem45)
+        self.assertIsNotNone(mem55)
+
+        # チャンク末尾や cumulative (1..20) ではなく、実際の出所通算ターン (45, 55)
+        self.assertEqual(mem45.get("turn_idx"), 45)
+        self.assertEqual(mem45.get("mid"), "a45")
+        self.assertEqual(mem45.get("elapsed_time"), {"day": 3, "period": "昼"})
+
+        self.assertEqual(mem55.get("turn_idx"), 55)
+        self.assertEqual(mem55.get("mid"), "a55")
+        self.assertEqual(mem55.get("elapsed_time"), {"day": 4, "period": "夜"})
+
+    def test_r2_recent_100_turns_absolute_indices(self):
+        """R2: 101+ユーザーターンで直近100件が選ばれても、絶対ターン N-99～N になる"""
+        sid = "sess_r2"
+        msgs = []
+        for u in range(1, 106):
+            msgs.append({"id": f"u{u}", "role": "user", "text": f"発言 {u}", "turn": u})
+            a_msg = {"id": f"a{u}", "role": "assistant", "text": f"返答 {u}", "turn": u}
+            if u == 102:
+                a_msg["text"] = "ラピは指揮官から合鍵をもらった"
+            msgs.append(a_msg)
+
+        self._write_session(sid, msgs, setting={"total_turns": 105})
+        self._post("/api/rag/memories/regenerate", {"session_id": sid, "reset": True})
+        self._wait_regen(sid)
+
+        mems = self._memories(sid)
+        mem102 = next((m for m in mems if "合鍵" in m.get("content", "")), None)
+        self.assertIsNotNone(mem102)
+        self.assertEqual(mem102.get("turn_idx"), 102)
+
+    def test_r3_chunk_limit_and_new_source_preference(self):
+        """R3: reset=False でチャンク内上限5件、同内容重複は新しい出所を採用"""
+        sid = "sess_r3"
+        msgs = []
+        for u in range(1, 11):
+            msgs.append({"id": f"u{u}", "role": "user", "text": f"発言 {u}", "turn": u})
+            a_msg = {"id": f"a{u}", "role": "assistant", "text": f"返答 {u}", "turn": u}
+            if u == 2:
+                a_msg["text"] = "ラピは指揮官から合鍵をもらった"
+            elif u == 8:
+                # 8ターン目で同じ合鍵の文
+                a_msg["text"] = "ラピは指揮官から合鍵をもらった"
+            msgs.append(a_msg)
+
+        self._write_session(sid, msgs, setting={"total_turns": 10})
+        self._post("/api/rag/memories/regenerate", {"session_id": sid, "reset": False})
+        self._wait_regen(sid)
+
+        mems = self._memories(sid)
+        mem = next((m for m in mems if "合鍵" in m.get("content", "")), None)
+        self.assertIsNotNone(mem)
+        self.assertEqual(mem.get("turn_idx"), 8, "古いターン2ではなく新しいターン8が採用されること")
+        self.assertEqual(mem.get("mid"), "a8")
+
+    def test_r4_reset_true_destructive_preserves_correct_provenance(self):
+        """R4: reset=True で古い順に処理され、出所情報が正しく保存される"""
+        sid = "sess_r4"
+        msgs = [
+            {"id": "u1", "role": "user", "text": "u1", "turn": 1},
+            {"id": "a1", "role": "assistant", "text": "「ラピは夜10時以降に部屋から出てはならない」と約束した", "turn": 1,
+             "elapsed_time": {"day": 1, "period": "朝"}},
+            {"id": "u2", "role": "user", "text": "u2", "turn": 2},
+            {"id": "a2", "role": "assistant", "text": "ラピは指揮官から合鍵をもらった", "turn": 2,
+             "elapsed_time": {"day": 1, "period": "昼"}},
+        ]
+        self._write_session(sid, msgs, setting={"total_turns": 2})
+        self._seed_auto("event", "消えるべき旧自動記憶", 1, "old_mid", session_id=sid)
+
+        self._post("/api/rag/memories/regenerate", {"session_id": sid, "reset": True})
+        self._wait_regen(sid)
+
+        mems = self._memories(sid)
+        self.assertNotIn("消えるべき旧自動記憶", [m.get("content") for m in mems])
+        mem1 = next(m for m in mems if "10時" in m.get("content", ""))
+        mem2 = next(m for m in mems if "合鍵" in m.get("content", ""))
+        self.assertEqual(mem1.get("turn_idx"), 1)
+        self.assertEqual(mem1.get("elapsed_time"), {"day": 1, "period": "朝"})
+        self.assertEqual(mem2.get("turn_idx"), 2)
+        self.assertEqual(mem2.get("elapsed_time"), {"day": 1, "period": "昼"})
+
+    def test_r5_missing_elapsed_time_preserves_none(self):
+        """R5: 時刻欠落メッセージの再生成で None が保持され、一覧API後も維持"""
+        sid = "sess_r5"
+        msgs = [
+            {"id": "u1", "role": "user", "text": "u1", "turn": 1},
+            {"id": "a1", "role": "assistant", "text": "ラピは指揮官から合鍵をもらった", "turn": 1}  # elapsed_time なし
+        ]
+        self._write_session(sid, msgs, setting={"total_turns": 1, "elapsed_time": {"day": 10, "period": "夜"}})
+
+        self._post("/api/rag/memories/regenerate", {"session_id": sid, "reset": True})
+        self._wait_regen(sid)
+
+        mems = self._memories(sid)
+        self.assertEqual(len(mems), 1)
+        self.assertIsNone(mems[0].get("elapsed_time"), "セッション現在時刻10日目・夜で補填されず None であること")
+
+        # 一覧API
+        res = self._get(f"/api/rag/memories?session_id={sid}")
+        self.assertIsNone(res["memories"][0].get("elapsed_time"))
+
+    def test_r6_direct_memories_unregistered_source_mid_returns_400(self):
+        """R6: 未登録 source_mid の直接提供は 400 で拒否され、reset=True でも自動記憶が消去されない"""
+        sid = "sess_r6"
+        msgs = [{"id": "m1", "role": "user", "text": "u1"}, {"id": "m2", "role": "assistant", "text": "a1"}]
+        self._write_session(sid, msgs)
+        self._seed_auto("rule", "既存の保護されるべき自動記憶", 1, "m2", session_id=sid)
+        trash_before = len(self._trash_files())
+
+        payload = {
+            "session_id": sid,
+            "reset": True,
+            "memories": [{"category": "event", "content": "不正な出所", "source_mid": "ghost_mid"}]
+        }
+        status, body = self._post_status("/api/rag/memories/regenerate", payload)
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+
+        # 自動記憶が消去されていないこと
+        mems = self._memories(sid)
+        self.assertEqual(len(mems), 1)
+        self.assertEqual(mems[0]["content"], "既存の保護されるべき自動記憶")
+        # ゴミ箱バックアップも作られていないこと
+        self.assertEqual(len(self._trash_files()), trash_before)
+
+    def test_r6b_direct_memories_invalid_content_or_category_returns_400(self):
+        """R6b: 不正な本文（空文字）や不正カテゴリの直接提供は 400 で拒否され、reset=True でも自動記憶が消去されない"""
+        sid = "sess_r6b"
+        msgs = [{"id": "m1", "role": "user", "text": "u1"}, {"id": "m2", "role": "assistant", "text": "a1"}]
+        self._write_session(sid, msgs)
+        self._seed_auto("rule", "既存の保護されるべき自動記憶", 1, "m2", session_id=sid)
+
+        # 1. 空の content
+        payload1 = {
+            "session_id": sid,
+            "reset": True,
+            "memories": [{"category": "event", "content": "   ", "source_mid": "m2"}]
+        }
+        status1, body1 = self._post_status("/api/rag/memories/regenerate", payload1)
+        self.assertEqual(status1, 400)
+        self.assertIn("error", body1)
+
+        # 2. 不正な category
+        payload2 = {
+            "session_id": sid,
+            "reset": True,
+            "memories": [{"category": "unknown_nonsense_category", "content": "有効な本文", "source_mid": "m2"}]
+        }
+        status2, body2 = self._post_status("/api/rag/memories/regenerate", payload2)
+        self.assertEqual(status2, 400)
+        self.assertIn("error", body2)
+
+        # 3. 空リスト memories: []
+        payload3 = {
+            "session_id": sid,
+            "reset": True,
+            "memories": []
+        }
+        status3, body3 = self._post_status("/api/rag/memories/regenerate", payload3)
+        self.assertEqual(status3, 400)
+        self.assertIn("error", body3)
+
+        # 自動記憶が消去されていないこと
+        mems = self._memories(sid)
+        self.assertEqual(len(mems), 1)
+        self.assertEqual(mems[0]["content"], "既存の保護されるべき自動記憶")
+
+    def test_r7_direct_memories_valid_source_mid(self):
+        """R7: 有効な source_mid による出所再計算。外部の偽時刻・偽ターンは信用されない"""
+        sid = "sess_r7"
+        msgs = [
+            {"id": "u1", "role": "user", "text": "u1", "turn": 1},
+            {"id": "a1", "role": "assistant", "text": "a1", "turn": 1, "elapsed_time": {"day": 2, "period": "昼"}},
+            {"id": "u2", "role": "user", "text": "u2", "turn": 2},
+            {"id": "a2", "role": "assistant", "text": "a2", "turn": 2, "elapsed_time": {"day": 3, "period": "夜"}}
+        ]
+        self._write_session(sid, msgs, setting={"total_turns": 2})
+
+        payload = {
+            "session_id": sid,
+            "memories": [{
+                "category": "event",
+                "content": "ラピは海へ行った",
+                "source_mid": "a1",
+                # クライアントが送ってきた偽の情報
+                "turn_idx": 999,
+                "elapsed_time": {"day": 100, "period": "偽"}
+            }]
+        }
+        status, body = self._post_status("/api/rag/memories/regenerate", payload)
+        self.assertEqual(status, 200)
+
+        mems = self._memories(sid)
+        self.assertEqual(len(mems), 1)
+        mem = mems[0]
+        # a1 から再計算された値であること
+        self.assertEqual(mem.get("turn_idx"), 1)
+        self.assertEqual(mem.get("mid"), "a1")
+        self.assertEqual(mem.get("elapsed_time"), {"day": 2, "period": "昼"})
+
+    def test_r8_deleted_session_guard(self):
+        """R8: 削除されたセッションでの再生成は安全に中断する"""
+        sid = "sess_r8_deleted"
+        # セッションファイルを作らない
+        server.run_memory_regeneration(sid, [[{"role": "user", "text": "約束"}]], "ラピ")
+        self.assertNotIn(sid, server.memory_regen_state)
 
 
 if __name__ == "__main__":

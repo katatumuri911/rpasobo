@@ -30,6 +30,7 @@ from memory_extract import *
 from decensor_engine import *
 from image_engine import *
 from rpchat.util import _as_int, _safe_int_env
+from rpchat.turn_index import calc_turn_idx, turn_index_base, build_source_index, resolve_source
 from rpchat.story_time import (
     TIME_FIRST_TURNS,
     TIME_EVERY_TURNS,
@@ -718,17 +719,7 @@ def archive_sort_key(fname):
     return (0, 0)
 
 
-def calc_turn_idx(msgs, i, total_turns=None):
-    """メッセージリスト msgs 内のインデックス i における通算ユーザーターン番号を計算する。
-    ローテーション後のアクティブセッションやアーカイブ snapshot でも正確な通算ターンを返す。"""
-    idx_in_file = len([x for x in msgs[:i + 1] if x.get("role") == "user"])
-    if not idx_in_file:
-        return 0
-    if total_turns is not None and total_turns > 0:
-        file_total_user = len([x for x in msgs if x.get("role") == "user"])
-        if file_total_user > 0 and total_turns >= file_total_user:
-            return total_turns - (file_total_user - idx_in_file)
-    return idx_in_file
+# calc_turn_idx は rpchat.turn_index から import 済み (後方互換性のため維持)
 
 
 def merge_defaults(setting=None):
@@ -2173,10 +2164,7 @@ def user_turns_of(msgs):
 def total_turns_base(st, file_turns):
     """通算ターン番号の基準。total_turns が未設定(0)の旧セッションだけ回転回数から補う。
     既存の読み取り側フォールバック (rot_cnt * ROTATION_PERIOD + in_file) と**同じ式**にすること。"""
-    total = int(st.get("total_turns") or 0)
-    if total > 0:
-        return total
-    return (int(st.get("rotation_count") or 0) * ROTATION_PERIOD) + int(file_turns)
+    return turn_index_base(st, file_turns, ROTATION_PERIOD)
 
 
 def rotation_state(s):
@@ -4825,7 +4813,7 @@ def build_consolidation_context(s, m):
     }
 
 
-def run_memory_regeneration(sid, chunks, char_name, reset=False):
+def run_memory_regeneration(sid, chunks, char_name, reset=False, source_index=None):
     """会話ログから記憶を再抽出する。
 
     reset=False（既定）: 非破壊モード。既存記憶は消さず、content_hash が一致しない項目だけを
@@ -4855,6 +4843,12 @@ def run_memory_regeneration(sid, chunks, char_name, reset=False):
 
         s_data = load(sid, readonly=True)
         st = s_data.get("setting", {})
+        if source_index is None:
+            # ここで作るマップはこの関数が読んだ s_data のメッセージ実体に紐づく。
+            # 呼び出し元の chunks が別スナップショットのコピーで、かつメッセージIDを持たない
+            # 場合は配列上の同一性も取れないため、その項目は出所不明として保存しない（§6.3）。
+            source_index = build_source_index(s_data.get("messages", []), st, ROTATION_PERIOD)
+
         user_name = st.get("user_name") or "ユーザー"
         extra = []
         if user_name and user_name not in ("ユーザー", "あなた", ""):
@@ -4864,7 +4858,6 @@ def run_memory_regeneration(sid, chunks, char_name, reset=False):
                 extra.append(c["name"])
 
         total = len(chunks)
-        cumulative_turns = 0
         for idx, chunk_msgs in enumerate(chunks):
             with lock:
                 st_regen = memory_regen_state.get(sid)
@@ -4883,14 +4876,27 @@ def run_memory_regeneration(sid, chunks, char_name, reset=False):
             current = idx + 1
             user_msgs = [m for m in chunk_msgs if m.get("role") == "user"]
             asst_msgs = [m for m in chunk_msgs if m.get("role") == "assistant"]
-            cumulative_turns += len(user_msgs)
 
             extracted = []
             for u in user_msgs:
+                src = resolve_source(source_index, u.get("id") or u)
+                if src is None:
+                    print(f"[run_memory_regeneration] skip unknown source user message: {u.get('id') or 'no-id'}")
+                    continue
                 for item in extract_memories_from_text(user_text=u.get("text", ""), char_name=char_name, user_name=user_name, extra_names=extra):
+                    item["_source_turn_idx"] = src["turn_idx"]
+                    item["_source_mid"] = src["mid"]
+                    item["_source_elapsed_time"] = src["elapsed_time"]
                     extracted.append(item)
             for a in asst_msgs:
+                src = resolve_source(source_index, a.get("id") or a)
+                if src is None:
+                    print(f"[run_memory_regeneration] skip unknown source asst message: {a.get('id') or 'no-id'}")
+                    continue
                 for item in extract_memories_from_text(asst_text=a.get("text", ""), char_name=char_name, user_name=user_name, extra_names=extra):
+                    item["_source_turn_idx"] = src["turn_idx"]
+                    item["_source_mid"] = src["mid"]
+                    item["_source_elapsed_time"] = src["elapsed_time"]
                     extracted.append(item)
 
             if extracted and not reset:
@@ -4913,26 +4919,13 @@ def run_memory_regeneration(sid, chunks, char_name, reset=False):
                     return
 
             if extracted:
-                chunk_elapsed = None
-                for a in reversed(asst_msgs):
-                    if a.get("elapsed_time"):
-                        chunk_elapsed = a["elapsed_time"]
-                        break
-                if not chunk_elapsed:
-                    try:
-                        s_data = load(sid, readonly=True)
-                        chunk_elapsed = s_data.get("setting", {}).get("elapsed_time")
-                    except Exception:
-                        pass
-                if not chunk_elapsed:
-                    chunk_elapsed = {"day": 1, "period": "午前"}
                 memory_store.save_extracted_memories(
                     sid,
                     char_name,
                     extracted,
-                    turn_idx=cumulative_turns,
-                    mid=(asst_msgs[-1]["id"] if (reset and asst_msgs) else None),
-                    elapsed_time=chunk_elapsed,
+                    turn_idx=None,
+                    mid=None,
+                    elapsed_time=None,
                     # 一括再生成は1ターン上限を外す（非破壊モードは控えめに5件まで）
                     max_new=(max(3, len(user_msgs) * 3) if reset else 5),
                     touch=bool(reset)
@@ -8425,7 +8418,8 @@ def process_outbox():
 
             # チャット本文を save(s) で即座に確定させた後、長期記憶の抽出・保存を専用ワーカーへキューイングする
             if appended:
-                turn_idx = st.get("total_turns") or ((st.get("rotation_count", 0) * ROTATION_PERIOD) + len([x for x in s["messages"] if x.get("role") == "user"]))
+                user_msgs = [x for x in s["messages"] if isinstance(x, dict) and x.get("role") == "user"]
+                turn_idx = turn_index_base(st, len(user_msgs), ROTATION_PERIOD)
                 ch_name = (st.get("character") or {}).get("name", "")
                 raw_el = msg.get("elapsed_time") or st.get("elapsed_time") or {"day": 1, "period": "午前"}
                 el_snapshot = copy.deepcopy(raw_el) if isinstance(raw_el, dict) else {"day": 1, "period": "午前"}
@@ -10930,7 +10924,7 @@ class H(BaseHTTPRequestHandler):
                         fallback_el = s.get("setting", {}).get("elapsed_time")
                         backfilled = False
                         for mem in data.get("memories", []):
-                            if not mem.get("elapsed_time"):
+                            if "elapsed_time" not in mem:
                                 mid = mem.get("mid")
                                 m_obj = msg_map.get(mid) if mid else None
                                 el = (m_obj.get("elapsed_time") if m_obj else None) or fallback_el
@@ -11651,6 +11645,72 @@ class H(BaseHTTPRequestHandler):
                     except Exception:
                         return self.send_json({"error": "no such session"}, 404)
 
+                    # 出所マップをチャンク切り出し・消去の前にセッション全体から構築
+                    source_index = build_source_index(s.get("messages", []), s.get("setting", {}), ROTATION_PERIOD)
+
+                    if "memories" in d:
+                        provided = d.get("memories")
+                        if not isinstance(provided, list) or not provided:
+                            return self.send_json({"error": "memories must be a non-empty list"}, 400)
+
+                        # 全入力と全 source_mid の検証が完了するまで clear_auto_memories は実行しない（§8.2）
+                        valid_provided = []
+                        for item in provided:
+                            if not isinstance(item, dict):
+                                return self.send_json({"error": "each memory item must be an object"}, 400)
+                            cat_raw = str(item.get("category") or item.get("type") or item.get("cat") or "").strip().lower()
+                            content = str(item.get("content") or item.get("text") or item.get("memory") or item.get("detail") or "").strip()
+                            norm_cat = memory_store.resolve_category(cat_raw, content)
+                            if not content:
+                                return self.send_json({"error": "content is required for each memory item"}, 400)
+                            if norm_cat not in memory_store.VALID_CATEGORIES:
+                                return self.send_json({"error": f"invalid category: {cat_raw}"}, 400)
+                            source_mid = item.get("source_mid")
+                            if source_mid is None or not str(source_mid).strip():
+                                return self.send_json({"error": "source_mid is required"}, 400)
+                            source_mid = str(source_mid).strip()
+                            src = resolve_source(source_index, source_mid)
+                            if not src:
+                                return self.send_json({"error": f"source_mid not found in session: {source_mid}"}, 400)
+
+                            item_copy = copy.deepcopy(item)
+                            item_copy["category"] = norm_cat
+                            item_copy["content"] = content
+                            item_copy["_source_turn_idx"] = src["turn_idx"]
+                            item_copy["_source_mid"] = src["mid"]
+                            item_copy["_source_elapsed_time"] = src["elapsed_time"]
+                            valid_provided.append(item_copy)
+
+                        reset = bool(d.get("reset"))
+                        before_count = len(memory_store.load_memories(sid).get("memories", []))
+                        memory_regen_meta[sid] = {"before": before_count, "reset": reset, "after": before_count}
+                        if reset:
+                            memory_store.clear_auto_memories(sid)
+
+                        if not reset:
+                            # 非破壊モード: 既存と同じ内容は追加しない（履歴の肥大化も防ぐ）
+                            valid_provided = memory_store.filter_new_items(sid, valid_provided)
+                        if valid_provided:
+                            memory_store.save_extracted_memories(
+                                sid,
+                                char_name,
+                                valid_provided,
+                                turn_idx=None,
+                                elapsed_time=None,
+                                max_new=200,  # 一括再生成は1ターン上限を外す
+                                touch=reset
+                            )
+                        mem_data = memory_store.load_memories(sid)
+                        mem_count = len(mem_data.get("memories", []))
+                        memory_regen_meta[sid]["after"] = mem_count
+                        memory_regen_state[sid] = {
+                            "running": False, "current": 1, "total": 1,
+                            "processed_chunks": 1, "total_chunks": 1,
+                            "progress": 100, "memories_count": mem_count, "status": "completed"
+                        }
+                        return self.send_json({"ok": True, "total": 1, "current": 1, "status": "completed",
+                                               "before": before_count, "after": mem_count, "reset": reset})
+
                     # reset=True のときだけ破壊的に全消しする（既定は非破壊で追加のみ）
                     reset = bool(d.get("reset"))
                     before_count = len(memory_store.load_memories(sid).get("memories", []))
@@ -11673,32 +11733,6 @@ class H(BaseHTTPRequestHandler):
                             end_i = len(s["messages"])
                         chunks.append(s["messages"][start_i:end_i])
 
-                    if d.get("memories"):
-                        provided = d.get("memories")
-                        if not reset:
-                            # 非破壊モード: 既存と同じ内容は追加しない（履歴の肥大化も防ぐ）
-                            provided = memory_store.filter_new_items(sid, provided)
-                        if provided:
-                            memory_store.save_extracted_memories(
-                                sid,
-                                char_name,
-                                provided,
-                                turn_idx=(s["setting"].get("total_turns") or len(user_indices)),
-                                elapsed_time=s.get("setting", {}).get("elapsed_time"),
-                                max_new=200,  # 一括再生成は1ターン上限を外す
-                                touch=reset
-                            )
-                        mem_data = memory_store.load_memories(sid)
-                        mem_count = len(mem_data.get("memories", []))
-                        memory_regen_meta[sid]["after"] = mem_count
-                        memory_regen_state[sid] = {
-                            "running": False, "current": len(chunks), "total": len(chunks),
-                            "processed_chunks": len(chunks), "total_chunks": len(chunks),
-                            "progress": 100, "memories_count": mem_count, "status": "completed"
-                        }
-                        return self.send_json({"ok": True, "total": len(chunks), "current": len(chunks), "status": "completed",
-                                               "before": before_count, "after": mem_count})
-
                     total = len(chunks)
                     if total == 0:
                         mem_data = memory_store.load_memories(sid)
@@ -11718,7 +11752,7 @@ class H(BaseHTTPRequestHandler):
                         "progress": 0, "memories_count": len(memory_store.load_memories(sid).get("memories", [])),
                         "status": "processing"
                     }
-                    threading.Thread(target=run_memory_regeneration, args=(sid, chunks, char_name, reset), daemon=True).start()
+                    threading.Thread(target=run_memory_regeneration, args=(sid, chunks, char_name, reset, source_index), daemon=True).start()
                     return self.send_json({"ok": True, "total": total, "current": 0, "status": "processing",
                                            "before": before_count, "reset": reset})
 

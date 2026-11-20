@@ -779,7 +779,7 @@ def load_memories(session_id, character_name=""):
             if not isinstance(mem.get("history"), list):
                 mem["history"] = []
                 needs_resave = True
-            if not mem.get("elapsed_time"):
+            if "elapsed_time" not in mem:
                 try:
                     sess_path = os.path.join(DATA, "sessions", f"{session_id}.json")
                     if os.path.exists(sess_path):
@@ -794,7 +794,7 @@ def load_memories(session_id, character_name=""):
                                 needs_resave = True
                 except Exception:
                     pass
-                if not mem.get("elapsed_time"):
+                if "elapsed_time" not in mem:
                     mem["elapsed_time"] = {"day": 1, "period": "午前"}
                     needs_resave = True
             if "priority" in mem or "boost" in mem:
@@ -1184,7 +1184,8 @@ def filter_new_items(session_id, items):
     """既存記憶の content_hash に無い項目だけを返す（一括再生成の併合モード用）。
 
     新しい記憶を追加するだけで、既存記憶には一切触れない。手動記憶・自動記憶の区別なく
-    同じ内容（content_hash 一致）のものは除外する。入力に同じ内容が複数あっても1件に縮退する。
+    同じ内容（content_hash 一致）のものは除外する。入力に同じ内容が複数ある場合は、
+    より新しい出所ターン（_source_turn_idx）の項目を優先して1件に縮退する。
     """
     if not items:
         return []
@@ -1206,8 +1207,8 @@ def filter_new_items(session_id, items):
         except Exception as e:
             print(f"[filter_new_items] load_memories error: {e}")
 
-    result = []
-    seen = set(existing_hashes)
+    candidates_by_hash = {}
+    order_of_hashes = []
     for item in items:
         if isinstance(item, str):
             item = {"category": "event", "content": item}
@@ -1221,13 +1222,39 @@ def filter_new_items(session_id, items):
         if cat not in VALID_CATEGORIES:
             continue
         h = compute_hash(content)
-        if h in seen:
+        if h in existing_hashes:
             continue
-        seen.add(h)
         new_item = dict(item)
         new_item["category"] = cat
         new_item["content"] = content
-        result.append(new_item)
+        if h not in candidates_by_hash:
+            order_of_hashes.append(h)
+            candidates_by_hash[h] = []
+        candidates_by_hash[h].append(new_item)
+
+    def _turn_val(it):
+        raw = it.get("_source_turn_idx") if "_source_turn_idx" in it else it.get("turn_idx")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return None
+
+    result = []
+    for h in order_of_hashes:
+        cands = candidates_by_hash[h]
+        if len(cands) == 1:
+            result.append(cands[0])
+        else:
+            best = cands[0]
+            best_t = _turn_val(best)
+            for c in cands[1:]:
+                c_t = _turn_val(c)
+                if c_t is not None and (best_t is None or c_t > best_t):
+                    best = c
+                    best_t = c_t
+            result.append(best)
     return result
 
 
@@ -1246,6 +1273,64 @@ def _archive_memory_to_history(mem_obj, now_ts):
     if mem_obj.get("priority"):
         old_hist["priority"] = mem_obj["priority"]
     mem_obj.setdefault("history", []).append(old_hist)
+
+
+def _to_int(v, default=None):
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
+
+
+def _is_stale_merge(new_turn, existing_turn):
+    """new_turn < existing_turn なら True (stale / 巻き戻し)。
+
+    どちらかが None/不正値の場合は stale とはみなさない (False)。
+    """
+    n_t = _to_int(new_turn)
+    e_t = _to_int(existing_turn)
+    if n_t is None or e_t is None:
+        return False
+    return n_t < e_t
+
+
+def _merge_into_memory(ex_mem, content, new_tokens, new_vec, new_hash,
+                       item_turn, item_mid, item_elapsed_time,
+                       now_ts, touch=True):
+    """既存記憶へ併合する。
+
+    stale (new_turn < existing_turn) の場合は touch に関係なく False を返して一切更新しない。
+    併合成功時は True を返す。
+    """
+    ex_turn = ex_mem.get("turn_idx")
+    if _is_stale_merge(item_turn, ex_turn):
+        return False
+
+    _archive_memory_to_history(ex_mem, now_ts)
+    ex_mem["content"] = content
+    ex_mem["tokens"] = new_tokens
+    ex_mem["embedding"] = new_vec
+    ex_mem["content_hash"] = new_hash
+
+    if touch:
+        ex_mem["updated_at"] = now_ts
+        if item_turn is not None:
+            ex_mem["turn_idx"] = item_turn
+        if item_mid:
+            ex_mem["mid"] = item_mid
+        if item_elapsed_time is not None:
+            ex_mem["elapsed_time"] = copy.deepcopy(item_elapsed_time)
+    else:
+        # touch=False（非破壊モード）：本文・embedding・tokens・hash は更新するが
+        # 既存の turn_idx / mid / elapsed_time / updated_at は上書きしない。
+        # ただし既存 turn_idx が None/不正値で新規 turn が有効なら補填する。
+        if _to_int(ex_turn) is None:
+            t_new = _to_int(item_turn)
+            if t_new is not None:
+                ex_mem["turn_idx"] = t_new
+    return True
 
 
 def save_extracted_memories(session_id, character_name, new_memories, resolved_ids=None, turn_idx=None, mid=None, elapsed_time=None, max_new=None, touch=True):
@@ -1275,8 +1360,7 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
     elif isinstance(new_memories, str):
         new_memories = [{"category": "event", "content": new_memories}]
 
-    valid_items = []
-    seen_items = set()
+    raw_candidates = []
     for item in (new_memories or []):
         if isinstance(item, str):
             item = {"category": "event", "content": item}
@@ -1295,15 +1379,79 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
         # （最大の誤爆源。誤って作ると Tier1/Tier2 を感情ノイズで埋めるので破棄する）
         if cat == "relationship" and should_skip_relationship_extraction(content):
             continue
-        pair = (cat, content)
-        if pair in seen_items:
-            continue
-        seen_items.add(pair)
-        valid_items.append(pair)
+
+        # 項目固有の出所メタ（無ければ呼び出し引数にフォールバック）
+        if "_source_turn_idx" in item:
+            try:
+                cand_turn = int(item["_source_turn_idx"]) if item["_source_turn_idx"] is not None else None
+            except (ValueError, TypeError):
+                cand_turn = None
+        else:
+            cand_turn = turn_idx
+
+        if "_source_mid" in item:
+            cand_mid = str(item["_source_mid"]).strip() or None if item["_source_mid"] is not None else None
+        else:
+            cand_mid = mid
+
+        has_src_el = "_source_elapsed_time" in item
+        if has_src_el:
+            cand_el = copy.deepcopy(item["_source_elapsed_time"]) if isinstance(item.get("_source_elapsed_time"), dict) else None
+        else:
+            cand_el = None
+
+        raw_candidates.append({
+            "category": cat,
+            "content": content,
+            "turn_idx": cand_turn,
+            "mid": cand_mid,
+            "has_src_elapsed": has_src_el,
+            "elapsed_time": cand_el,
+        })
+
+    # 同一バッチ内の同内容重複（同一 (cat, content)）は、出所ターンが大きい方（新しい方）を残す（2パス縮退）。
+    candidates_by_key = {}
+    order_of_keys = []
+    for cand in raw_candidates:
+        pair = (cand["category"], cand["content"])
+        if pair not in candidates_by_key:
+            order_of_keys.append(pair)
+            candidates_by_key[pair] = []
+        candidates_by_key[pair].append(cand)
+
+    valid_candidates = []
+    for pair in order_of_keys:
+        cands = candidates_by_key[pair]
+        if len(cands) == 1:
+            valid_candidates.append(cands[0])
+        else:
+            best = cands[0]
+            best_t = best["turn_idx"]
+            for c in cands[1:]:
+                c_t = c["turn_idx"]
+                if c_t is not None and (best_t is None or c_t > best_t):
+                    best = c
+                    best_t = c_t
+            valid_candidates.append(best)
+
+    fallback_elapsed = None
+    if elapsed_time is None and session_id:
+        try:
+            sess_path = os.path.join(DATA, "sessions", f"{session_id}.json")
+            if os.path.exists(sess_path):
+                with open(sess_path, encoding="utf-8-sig") as sf:
+                    s_data = json.load(sf)
+                    fallback_elapsed = copy.deepcopy(s_data.get("setting", {}).get("elapsed_time"))
+        except Exception:
+            pass
+    if fallback_elapsed is None and elapsed_time is not None and isinstance(elapsed_time, dict):
+        fallback_elapsed = copy.deepcopy(elapsed_time)
+    if fallback_elapsed is None or not isinstance(fallback_elapsed, dict):
+        fallback_elapsed = {"day": 1, "period": "午前"}
 
     prepared_items = []
-    if valid_items:
-        texts = [c for _, c in valid_items]
+    if valid_candidates:
+        texts = [c["content"] for c in valid_candidates]
         try:
             embeddings = get_embeddings_batch(texts)
         except Exception as e:
@@ -1312,28 +1460,24 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
         if len(embeddings) != len(texts):
             embeddings = [[] for _ in texts]
 
-        for (cat, content), new_vec in zip(valid_items, embeddings):
+        for cand, new_vec in zip(valid_candidates, embeddings):
+            content = cand["content"]
+            cat = cand["category"]
             try:
                 tokens = extract_tokens(content)
             except Exception as e:
                 print(f"[save_extracted_memories] extract_tokens error: {e}")
                 tokens = []
             h = compute_hash(content)
-            prepared_items.append((cat, content, new_vec, tokens, h))
 
-    if elapsed_time is None and session_id:
-        try:
-            sess_path = os.path.join(DATA, "sessions", f"{session_id}.json")
-            if os.path.exists(sess_path):
-                with open(sess_path, encoding="utf-8-sig") as sf:
-                    s_data = json.load(sf)
-                    elapsed_time = copy.deepcopy(s_data.get("setting", {}).get("elapsed_time"))
-        except Exception:
-            pass
-    if elapsed_time is None or not isinstance(elapsed_time, dict):
-        elapsed_time = {"day": 1, "period": "午前"}
-    else:
-        elapsed_time = copy.deepcopy(elapsed_time)
+            item_turn = cand["turn_idx"]
+            item_mid = cand["mid"]
+            if cand["has_src_elapsed"]:
+                item_el = cand["elapsed_time"]
+            else:
+                item_el = copy.deepcopy(fallback_elapsed)
+
+            prepared_items.append((cat, content, new_vec, tokens, h, item_turn, item_mid, item_el))
 
     SEMANTIC_THRESHOLDS = {
         "calling": 0.70,
@@ -1359,7 +1503,7 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                         m["status"] = "fulfilled"
                         m["resolved_turn"] = turn_idx
                         m["resolved_mid"] = mid
-                        m["resolved_elapsed_time"] = copy.deepcopy(elapsed_time) if elapsed_time else None
+                        m["resolved_elapsed_time"] = copy.deepcopy(fallback_elapsed) if fallback_elapsed else None
                         m["updated_at"] = time.time()
 
         if prepared_items:
@@ -1371,7 +1515,7 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                 prepared_items.sort(key=lambda x: MEMORY_PRIORITY.get(x[0], 9))
             appended_new = 0
             current_batch_ids = set()
-            for cat, content, new_vec, new_tokens, new_hash in prepared_items:
+            for cat, content, new_vec, new_tokens, new_hash, item_turn, item_mid, item_el in prepared_items:
                 if cat in ("event", "promise"):
                     best_recent_sim = -1.0
                     best_recent_idx = -1
@@ -1384,25 +1528,21 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                             if cat == "promise" and existing.get("status", "active") != "active":
                                 continue
                             ex_turn = existing.get("turn_idx")
-                            if turn_idx is not None and ex_turn is not None and abs(turn_idx - ex_turn) <= 1:
+                            t_item = _to_int(item_turn)
+                            t_ex = _to_int(ex_turn)
+                            if t_item is not None and t_ex is not None and abs(t_item - t_ex) <= 1:
                                 sim = cosine_similarity(new_vec, existing.get("embedding") or [])
                                 if sim > best_recent_sim:
                                     best_recent_sim = sim
                                     best_recent_idx = idx
 
                     if best_recent_sim >= 0.85 and best_recent_idx >= 0:
-                        _archive_memory_to_history(memories[best_recent_idx], now_ts)
-                        memories[best_recent_idx]["content"] = content
-                        memories[best_recent_idx]["tokens"] = new_tokens
-                        memories[best_recent_idx]["embedding"] = new_vec
-                        memories[best_recent_idx]["content_hash"] = new_hash
-                        if touch:
-                            memories[best_recent_idx]["updated_at"] = now_ts
-                            memories[best_recent_idx]["turn_idx"] = turn_idx
-                            if mid:
-                                memories[best_recent_idx]["mid"] = mid
-                            if elapsed_time:
-                                memories[best_recent_idx]["elapsed_time"] = copy.deepcopy(elapsed_time)
+                        if _merge_into_memory(
+                            memories[best_recent_idx], content, new_tokens, new_vec, new_hash,
+                            item_turn, item_mid, item_el,
+                            now_ts, touch=touch
+                        ):
+                            current_batch_ids.add(memories[best_recent_idx].get("id"))
                     else:
                         if appended_new >= limit_new:
                             continue
@@ -1412,9 +1552,9 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                         memories.append({
                             "id": new_id,
                             "session_id": session_id,
-                            "mid": mid,
-                            "turn_idx": turn_idx,
-                            "elapsed_time": copy.deepcopy(elapsed_time) if elapsed_time else None,
+                            "mid": item_mid,
+                            "turn_idx": item_turn,
+                            "elapsed_time": copy.deepcopy(item_el) if item_el else None,
                             "source": "auto",
                             "category": cat,
                             "status": "active",
@@ -1443,18 +1583,12 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                                 best_idx = idx
 
                     if best_idx >= 0 and best_sim >= 0.85:
-                        _archive_memory_to_history(memories[best_idx], now_ts)
-                        memories[best_idx]["content"] = content
-                        memories[best_idx]["tokens"] = new_tokens
-                        memories[best_idx]["embedding"] = new_vec
-                        memories[best_idx]["content_hash"] = new_hash
-                        if touch:
-                            memories[best_idx]["updated_at"] = now_ts
-                            memories[best_idx]["turn_idx"] = turn_idx
-                            if mid:
-                                memories[best_idx]["mid"] = mid
-                            if elapsed_time:
-                                memories[best_idx]["elapsed_time"] = copy.deepcopy(elapsed_time)
+                        if _merge_into_memory(
+                            memories[best_idx], content, new_tokens, new_vec, new_hash,
+                            item_turn, item_mid, item_el,
+                            now_ts, touch=touch
+                        ):
+                            current_batch_ids.add(memories[best_idx].get("id"))
                     else:
                         if appended_new >= limit_new:
                             continue
@@ -1464,9 +1598,9 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                         memories.append({
                             "id": new_id,
                             "session_id": session_id,
-                            "mid": mid,
-                            "turn_idx": turn_idx,
-                            "elapsed_time": copy.deepcopy(elapsed_time) if elapsed_time else None,
+                            "mid": item_mid,
+                            "turn_idx": item_turn,
+                            "elapsed_time": copy.deepcopy(item_el) if item_el else None,
                             "source": "auto",
                             "category": cat,
                             "status": "active",
@@ -1499,18 +1633,12 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                                 best_idx = idx
 
                     if best_idx >= 0 and best_sim >= thresh:
-                        _archive_memory_to_history(memories[best_idx], now_ts)
-                        memories[best_idx]["content"] = content
-                        memories[best_idx]["tokens"] = new_tokens
-                        memories[best_idx]["embedding"] = new_vec
-                        memories[best_idx]["content_hash"] = new_hash
-                        if touch:
-                            memories[best_idx]["updated_at"] = now_ts
-                            memories[best_idx]["turn_idx"] = turn_idx
-                            if mid:
-                                memories[best_idx]["mid"] = mid
-                            if elapsed_time:
-                                memories[best_idx]["elapsed_time"] = copy.deepcopy(elapsed_time)
+                        if _merge_into_memory(
+                            memories[best_idx], content, new_tokens, new_vec, new_hash,
+                            item_turn, item_mid, item_el,
+                            now_ts, touch=touch
+                        ):
+                            current_batch_ids.add(memories[best_idx].get("id"))
                     else:
                         if appended_new >= limit_new:
                             continue
@@ -1520,9 +1648,9 @@ def save_extracted_memories(session_id, character_name, new_memories, resolved_i
                         memories.append({
                             "id": new_id,
                             "session_id": session_id,
-                            "mid": mid,
-                            "turn_idx": turn_idx,
-                            "elapsed_time": copy.deepcopy(elapsed_time) if elapsed_time else None,
+                            "mid": item_mid,
+                            "turn_idx": item_turn,
+                            "elapsed_time": copy.deepcopy(item_el) if item_el else None,
                             "source": "auto",
                             "category": cat,
                             "status": "active",

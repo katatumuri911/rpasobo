@@ -3,6 +3,7 @@ import os
 import re
 
 import memory_store
+from rpchat.turn_index import calc_turn_idx, turn_index_base, resolve_message_elapsed_time
 
 # server.py の ROTATION_TURNS - ROTATION_KEEP_TURNS と同値。
 # server.py 側が起動時に実値を代入するので、通常はこの既定値は使われない。
@@ -233,6 +234,23 @@ def extract_memories_fallback(sid, s, m):
     try:
         if not sid or not isinstance(s, dict) or not isinstance(m, dict):
             return
+        if m.get("role") != "assistant":
+            return
+
+        msgs = s.get("messages", [])
+        m_id = m.get("id")
+        if m_id:
+            idx = next((i for i, x in enumerate(msgs) if isinstance(x, dict) and x.get("id") == m_id), -1)
+            if idx == -1:
+                return
+        else:
+            if m in msgs:
+                idx = msgs.index(m)
+            else:
+                return
+        if idx < 0:
+            return
+
         st = s.get("setting", {})
         char_name = (st.get("character") or {}).get("name", "")
         user_name = st.get("user_name") or "ユーザー"
@@ -243,26 +261,28 @@ def extract_memories_fallback(sid, s, m):
             if isinstance(c, dict) and c.get("name"):
                 extra.append(c["name"])
 
-        msgs = s.get("messages", [])
-        m_id = m.get("id") if isinstance(m, dict) else None
-        idx = next((i for i, x in enumerate(msgs) if m_id and x.get("id") == m_id), -1)
-        if idx == -1:
-            idx = msgs.index(m) if m in msgs else len(msgs) - 1
-        user_msgs = [x for x in msgs[:idx + 1] if x.get("role") == "user"]
-        turn_idx = st.get("total_turns") or ((st.get("rotation_count", 0) * ROTATION_PERIOD) + len(user_msgs))
+        all_user_msgs = [x for x in msgs if isinstance(x, dict) and x.get("role") == "user"]
+        base_total = turn_index_base(st, len(all_user_msgs), ROTATION_PERIOD)
+        turn_idx = calc_turn_idx(msgs, idx, base_total)
+
+        user_msgs = [x for x in msgs[:idx + 1] if isinstance(x, dict) and x.get("role") == "user"]
         user_m = user_msgs[-1] if user_msgs else None
         user_text = user_m.get("text", "") if user_m else ""
         asst_text = m.get("text", "")
 
         extracted = extract_memories_from_text(user_text, asst_text, char_name=char_name, user_name=user_name, extra_names=extra)
         if extracted:
-            elapsed_time = m.get("elapsed_time") or st.get("elapsed_time") or {"day": 1, "period": "午前"}
+            elapsed_time = resolve_message_elapsed_time(msgs, idx)
+            for item in extracted:
+                item["_source_turn_idx"] = turn_idx
+                item["_source_mid"] = m_id
+                item["_source_elapsed_time"] = elapsed_time
             memory_store.save_extracted_memories(
                 sid,
                 char_name,
                 extracted,
                 turn_idx=turn_idx,
-                mid=m.get("id"),
+                mid=m_id,
                 elapsed_time=elapsed_time
             )
             print(f"[auto_extract_fallback] saved {len(extracted)} memories for {sid} (turn {turn_idx})")

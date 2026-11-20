@@ -30,17 +30,7 @@ def archive_sort_key(fname):
     return (0, 0)
 
 
-def calc_turn_idx(msgs, i, total_turns=None):
-    """メッセージリスト msgs 内のインデックス i における通算ユーザーターン番号を計算する。
-    ローテーション後のアクティブセッションやアーカイブ snapshot でも正確な通算ターンを返す。"""
-    idx_in_file = len([x for x in msgs[:i + 1] if x.get("role") == "user"])
-    if not idx_in_file:
-        return 0
-    if total_turns is not None and total_turns > 0:
-        file_total_user = len([x for x in msgs if x.get("role") == "user"])
-        if file_total_user > 0 and total_turns >= file_total_user:
-            return total_turns - (file_total_user - idx_in_file)
-    return idx_in_file
+from rpchat.turn_index import calc_turn_idx
 
 
 def get_default_port():
