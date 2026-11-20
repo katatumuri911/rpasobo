@@ -914,10 +914,20 @@ _REFUSAL_PATTERNS = (
     "i cannot fulfill", "i can't fulfill", "i am unable to", "i'm unable to",
     "i cannot generate", "i can't generate", "i cannot assist", "i can't assist",
     "cannot help with", "can't help with", "against my safety", "safety policies",
+    "i'm not able to", "i am not able to", "not able to provide",
     "お応えできません", "お答えできません", "対応できません", "生成できません",
     "生成することはできません", "作成できません", "お断りします",
+    # 実測で見逃していた形（gemini-3.8-flash が実際に返す拒否文）
+    "応じられません", "応じることができません", "応じることはできません",
+    "応じかねます", "対応いたしかねます",
+    "参加できません", "お引き受けできません", "お手伝いできません",
     "ポリシーにより", "安全性に関する", "禁止されています",
 )
+
+
+# 拒否文は必ず短い（実測: 20〜80字）。本文は通常 300 字以上ある。
+# 「短い応答だけを対象」にすることで、キャラのセリフ中の「応じられません」等を誤検知しない。
+_REFUSAL_BODY_MAX_CHARS = 300
 
 
 def _looks_like_refusal(text):
@@ -927,6 +937,45 @@ def _looks_like_refusal(text):
         return False
     head = low[:400]
     return any(p in head for p in _REFUSAL_PATTERNS)
+
+
+def _is_refusal_body(text):
+    """JSON の text に拒否文が入って返ってきたケースを検出する。
+    _looks_like_refusal は「JSON にならなかった時」しか使われておらず、
+    {"text":"申し訳ありませんが…"} のように正しい JSON で拒否されると、
+    拒否文がそのままキャラのセリフとして保存されていた。
+    本文は長いので「短い」を条件にし、さらに「応じられません」のような
+    セリフでも使う語は手がかり語と同時に現れた時だけ拒否と見なす。"""
+    s = str(text or "").strip()
+    if not s or len(s) > _REFUSAL_BODY_MAX_CHARS:
+        return False
+    low = s.lower()
+    if any(p in low for p in _REFUSAL_BODY_STRONG):
+        return True
+    return (any(p in low for p in _REFUSAL_BODY_AMBIGUOUS)
+            and any(c in low for c in _REFUSAL_BODY_CONTEXT))
+
+
+# 本文用: これだけで拒否と断定できる形
+_REFUSAL_BODY_STRONG = (
+    "お応えできません", "お答えできません", "対応できません", "生成できません",
+    "生成することはできません", "作成できません", "お断りします",
+    # 応じる＋できません系は「は」と「が」の両方が実測で出る（両方必要）
+    "応じることができません", "応じることはできません",
+    "応じることができかねます", "応じることはいたしかねます",
+    "対応いたしかねます", "提供できません",
+    # 実測で追加で見つかった形（参加/お引き受け/お手伝い 系）
+    "参加できません", "参加いたしかねます", "お引き受けできません",
+    "お手伝いできません", "サポートできません", "ご期待に沿えません",
+    "i cannot fulfill", "i can't fulfill", "i cannot generate", "i can't generate",
+    "i cannot assist", "i can't assist", "against my safety", "safety policies",
+    "i'm not able to", "i am not able to", "not able to provide",
+)
+
+# 本文用: キャラのセリフにも出る語なので、手がかり語との同時出現でだけ拒否と判定
+_REFUSAL_BODY_AMBIGUOUS = ("応じられません", "応じかねます", "控えさせていただきます")
+_REFUSAL_BODY_CONTEXT = ("申し訳", "恐れ入ります", "要求には", "リクエストには",
+                         "安全性", "ポリシー", "コンテンツ", "ガイドライン", "制約")
 
 
 FILTER_NAME_WORDS = (
@@ -8802,6 +8851,13 @@ def run_google_task(sid, mid, task_type=None, key=None):
             if not text:
                 _google_fail(sid, task_type, mid, "応答JSONに text がありません", retryable=True, key=key)
                 return
+            # 正しい JSON で拒否文が返ってきた場合は本文として確定させず、再試行に回す
+            # （拒否は確率的で、同じプロンプトでも次で通ることがある）
+            if _is_refusal_body(text):
+                _google_fail(sid, task_type, mid,
+                             "モデルが生成を拒否しました（コンテンツフィルタ）",
+                             retryable=True, key=key)
+                return
             rep = {k: v for k, v in obj.items() if k not in ("session", "reply_to", "type")}
             rep["text"] = text
             rep.setdefault("memories", [])
@@ -8817,6 +8873,14 @@ def run_google_task(sid, mid, task_type=None, key=None):
                 _google_fail(sid, task_type, mid, "応答JSONに choices がありません", retryable=True, key=key)
                 return
             rep = {"choices": choices, "slot": choices_slot}
+            # 全候補が拒否文なら「拒否」として扱う（候補として保存しない）
+            ctexts = [str(c.get("text") or "") for c in choices if isinstance(c, dict)]
+            ctexts = [t for t in ctexts if t.strip()]
+            if ctexts and all(_is_refusal_body(t) for t in ctexts):
+                _google_fail(sid, task_type, mid,
+                             "モデルが生成を拒否しました（コンテンツフィルタ）",
+                             retryable=False, key=key)
+                return
             if obj.get("target_id"):
                 rep["target_id"] = obj["target_id"]
         elif task_type == "image_refine":

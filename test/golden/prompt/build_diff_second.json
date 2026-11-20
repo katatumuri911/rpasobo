@@ -1,0 +1,14 @@
+{
+  "mode": "diff",
+  "reason": "",
+  "sections": [
+    {
+      "label": "キャラの状態（前の応答のとき。これを踏まえて書き、応答の state で更新する）",
+      "sha256": "cd8c58d7b12fe4f3fbe0c27a4334266cf1db35414e3f3264de6cb4c32946da6b"
+    },
+    {
+      "label": "ユーザーの発言（これに応答する）",
+      "sha256": "38179e1c4e3f99af4846efae800f9ffc587641371f70f83c66255a0dbf196beb"
+    }
+  ]
+}
