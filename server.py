@@ -93,6 +93,8 @@ DONE = os.path.join(OUTBOX, "done")
 COMFY = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_OUT = os.path.abspath(os.path.normpath(os.environ.get(
     "COMFYUI_OUTPUT_DIR", os.path.join(ROOT, "..", "ComfyUI", "output"))))
+COMFY_POLL_MIN = 0.1   # 通常時のポーリング間隔（秒）
+COMFY_POLL_MAX = 1.0   # エラー・待機時バックオフの上限間隔（秒）
 PORT = int(os.environ.get("RPCHAT_PORT", "8200"))
 RUNNING = os.path.join(DATA, "server.json")  # 起動中のサーバーの番号（同じ data/ に2台目を立てないため）
 HOST = os.environ.get("RPCHAT_HOST", "127.0.0.1")
@@ -7552,6 +7554,7 @@ def process_outbox():
     for name in sorted(entries):
         ready_sid = ""
         perf_ctx = None
+        raw = ""  # [F-01] ループ先頭で初期化（前ファイルの残留防止）
         path = os.path.join(OUTBOX, name)
         if not os.path.exists(path):
             continue
@@ -7569,40 +7572,54 @@ def process_outbox():
                 rep, notes = repaired
                 print(f"[outbox] repaired {name}: {', '.join(notes)}")
         except Exception as e:
-            if not os.path.exists(path):
+            try:
+                if not os.path.exists(path):
+                    continue
+                mtime = os.path.getmtime(path)
+            except OSError:
                 continue
-            if time.time() - os.path.getmtime(path) > 10:
+            if time.time() - mtime > 10:
+                bad_path = os.path.join(DONE, name + ".bad")
+                safe_move(path, bad_path)
+                # [F-01] 排他ロック等で移動できなかった場合は処理を中断し次周期へ（リトライ爆発防止）
+                if os.path.exists(path) or not os.path.exists(bad_path):
+                    continue
+                # [F-01] 移動成功後にログ出力（ロック中のコンソール氾濫防止）
                 print(f"[outbox] invalid json {name}: {e}")
-                safe_move(path, os.path.join(DONE, name + ".bad"))
                 imported = True
                 cand_mid = None
-                m_rt = re.search(r'"reply_to"\s*:\s*"([^"]+)"', raw)
-                m_sid = re.search(r'"session(?:_id)?"\s*:\s*"([^"]+)"', raw)
-                target_sid = m_sid.group(1) if m_sid else None
-                if m_rt:
-                    cand_mid = m_rt.group(1)
-                    if not target_sid:
-                        target_sid = session_of_msg(cand_mid)
-                if not target_sid:
-                    base = name[:-5] if name.lower().endswith(".json") else name
+                target_sid = None
+                # [F-01] raw が取得できた場合のみ正規表現および展開を行う（m_rt 残留漏れ防止）
+                if raw:
+                    m_rt = re.search(r'"reply_to"\s*:\s*"([^"]+)"', raw)
+                    m_sid = re.search(r'"session(?:_id)?"\s*:\s*"([^"]+)"', raw)
+                    if m_sid:
+                        target_sid = m_sid.group(1)
+                    if m_rt:
+                        cand_mid = m_rt.group(1)
+                        if not target_sid:
+                            target_sid = session_of_msg(cand_mid)
+                base = name[:-5] if name.lower().endswith(".json") else name
+                if not target_sid or target_sid in deleted_sessions or not os.path.exists(spath(target_sid)):
+                    target_sid = None
                     for cand in sorted(list_ids(), key=len, reverse=True):
                         if base == cand or base.startswith(cand + "_"):
                             if cand not in deleted_sessions:
                                 target_sid = cand
                                 break
-                    if target_sid and not cand_mid:
-                        rest_name = base[len(target_sid) + 1:] if base.startswith(target_sid + "_") else base
-                        tokens = [t for t in rest_name.split("_") if t]
-                        if os.path.exists(spath(target_sid)):
-                            try:
-                                s_tmp = load(target_sid)
-                                u_mids = {mb["id"] for mb in s_tmp.get("messages", []) if mb.get("role") == "user"}
-                                for tok in tokens:
-                                    if tok in u_mids:
-                                        cand_mid = tok
-                                        break
-                            except Exception:
-                                pass
+                if target_sid and not cand_mid:
+                    rest_name = base[len(target_sid) + 1:] if base.startswith(target_sid + "_") else base
+                    tokens = [t for t in rest_name.split("_") if t]
+                    if os.path.exists(spath(target_sid)):
+                        try:
+                            s_tmp = load(target_sid, readonly=True)
+                            u_mids = {mb["id"] for mb in s_tmp.get("messages", []) if mb.get("role") == "user"}
+                            for tok in tokens:
+                                if tok in u_mids:
+                                    cand_mid = tok
+                                    break
+                        except Exception:
+                            pass
                 if target_sid and target_sid not in deleted_sessions and os.path.exists(spath(target_sid)):
                     try:
                         with lock:
@@ -7618,6 +7635,7 @@ def process_outbox():
                                     if retries > 2:
                                         mb["status"] = "error"
                                         mb["error"] = "応答のJSONが壊れていました。再送してください。"
+                                        _google_clear_status(target_sid, "user")
                                     else:
                                         mb["status"] = "pending"
                                         mb["poke_ts"] = time.time()
@@ -8507,29 +8525,124 @@ def process_outbox():
 def comfy_run(workflow, timeout=900):
     payload = json.dumps({"prompt": workflow, "client_id": str(uuid.uuid4())}).encode("utf-8")
     req = urllib.request.Request(f"{COMFY}/prompt", data=payload, headers={"Content-Type": "application/json"})
-    pid = json.loads(urllib.request.urlopen(req, timeout=15).read())["prompt_id"]
-    start = time.time()
-    while time.time() - start < timeout:
-        time.sleep(0.1)  # 0.3秒から0.1秒へ短縮し、画像完了検知を高速化
+
+    # 1. /prompt 投入: HTTPError を確実に捕捉し、エラーメッセージを抽出・ソケットを解放
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            if not isinstance(data, dict) or not data.get("prompt_id"):
+                raise ValueError(f"Invalid response from ComfyUI /prompt: {data}")
+            pid = data["prompt_id"]
+    except urllib.error.HTTPError as e:
+        err_msg = ""
         try:
-            h = json.loads(urllib.request.urlopen(f"{COMFY}/history/{pid}", timeout=10).read())
+            err_msg = e.read().decode("utf-8", "replace")[:300]
         except Exception:
+            pass
+        try:
+            e.close()
+        except Exception:
+            pass
+        raise RuntimeError(f"ComfyUI がプロンプトを拒否しました (HTTP {e.code}): {err_msg}")
+    except Exception as e:
+        if isinstance(e, AssertionError):
+            raise
+        if hasattr(e, "close"):
+            try:
+                e.close()
+            except Exception:
+                pass
+        raise RuntimeError(f"ComfyUI への接続に失敗しました: {e}")
+
+    # 2. ポーリングループ: バックオフと型別例外処理、間引きログ
+    start = time.time()
+    delay = COMFY_POLL_MIN
+    consecutive_errors = 0
+
+    while time.time() - start < timeout:
+        time.sleep(delay)
+        ok = False
+        try:
+            with urllib.request.urlopen(f"{COMFY}/history/{pid}", timeout=10) as resp:
+                h = json.loads(resp.read())
+                if not isinstance(h, dict):
+                    raise ValueError(f"ComfyUI history returned non-dict: {type(h).__name__}")
+                ok = True
+                consecutive_errors = 0
+        except urllib.error.HTTPError as e:
+            consecutive_errors += 1
+            if consecutive_errors % 10 == 0:
+                print(f"[comfy] poll HTTPError {e.code} (x{consecutive_errors}): {e}")
+            try:
+                e.close()
+            except Exception:
+                pass
+            delay = min(delay * 2, COMFY_POLL_MAX)
             continue
-        if pid not in h:
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            consecutive_errors += 1
+            if consecutive_errors % 10 == 0:
+                print(f"[comfy] poll network/json error (x{consecutive_errors}): {e}")
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
+            delay = min(delay * 2, COMFY_POLL_MAX)
             continue
-        entry = h[pid]
-        st = entry.get("status", {})
+        except Exception as e:
+            if isinstance(e, AssertionError):
+                raise
+            consecutive_errors += 1
+            if consecutive_errors % 10 == 0:
+                print(f"[comfy] poll unexpected error (x{consecutive_errors}): {e}")
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
+            delay = min(delay * 2, COMFY_POLL_MAX)
+            continue
+
+        if not ok or pid not in h:
+            # 正常応答を受信したがまだ未完了（空辞書 {} 等）
+            # 完了検知を素早く保つためポーリング間隔は最小値（0.1s）に維持
+            delay = COMFY_POLL_MIN
+            continue
+
+        entry = h.get(pid)
+        if not isinstance(entry, dict):
+            delay = COMFY_POLL_MIN
+            continue
+
+        st = entry.get("status")
+        if not isinstance(st, dict):
+            st = {}
         if st.get("status_str") == "error":
-            for kind, info in st.get("messages", []):
-                if kind == "execution_error":
-                    raise RuntimeError(info.get("exception_message", "ComfyUI error").strip())
+            for item in (st.get("messages") or []):
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    kind, info = item[0], item[1]
+                    if kind == "execution_error" and isinstance(info, dict):
+                        msg = info.get("exception_message")
+                        if msg:
+                            raise RuntimeError(str(msg).strip())
+                        raise RuntimeError("ComfyUI error")
             raise RuntimeError("ComfyUI error")
-        for out in entry.get("outputs", {}).values():
-            for im in out.get("images", []):
-                sub = im.get("subfolder", "")
-                return (sub + "/" if sub else "") + im["filename"]
+        outputs = entry.get("outputs")
+        if isinstance(outputs, dict):
+            for out in outputs.values():
+                if not isinstance(out, dict):
+                    continue
+                images = out.get("images")
+                if isinstance(images, list):
+                    for im in images:
+                        if isinstance(im, dict) and im.get("filename"):
+                            sub = im.get("subfolder") or ""
+                            return (sub + "/" if sub else "") + str(im["filename"])
         if st.get("completed"):
             raise RuntimeError("no image output")
+        delay = COMFY_POLL_MIN
+
     raise RuntimeError("timeout")
 
 
@@ -12996,8 +13109,9 @@ def already_running():
     ports = [PORT, last.get("port") if isinstance(last, dict) else None]
     for port in dict.fromkeys(p for p in ports if isinstance(p, int)):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/meta", timeout=1.5).read()
-            return port
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/meta", timeout=1.5) as resp:
+                resp.read()
+                return port
         except Exception:
             pass
     return None

@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import time
+from unittest.mock import patch
 
 import server
 from test.support import IsolatedTestCase
@@ -270,3 +272,202 @@ class TestOutboxContract(IsolatedTestCase):
         self.assertIsNotNone(asst.get("elapsed_time"))
         self.assertEqual(asst["elapsed_time"].get("day"), 3)
         self.assertEqual(asst["elapsed_time"].get("period"), "昼")
+
+    # -------------------------------------------------------------------------
+    # F-01 契約テスト群: 読み込み失敗時の UnboundLocalError 及び セッション混入防止
+    # -------------------------------------------------------------------------
+
+    def test_f01_first_file_unreadable_no_unbound_error(self):
+        """Case 1: 1件目のファイルが読み込み不可でも UnboundLocalError を起こさず .bad へ隔離され、ファイル名からリトライが実行されること"""
+        s, u = self._create_user_session(status="processing")
+        sid = s["id"]
+        uid = u["id"]
+        out_fname = f"{sid}_reply_{uid}.json"
+        out_path = os.path.join(server.OUTBOX, out_fname)
+
+        with open(out_path, "wb") as f:
+            f.write(b"\x80\x81\x82\xff\xfe")
+
+        os.utime(out_path, (time.time() - 20, time.time() - 20))
+
+        res = server.process_outbox()
+        self.assertTrue(res, "process_outbox should return True after moving bad file")
+
+        self.assertFalse(os.path.exists(out_path), "File should no longer exist in OUTBOX")
+        bad_path = os.path.join(server.DONE, out_fname + ".bad")
+        self.assertTrue(os.path.exists(bad_path), "File should have moved to DONE as .bad")
+
+        s_after = server.load(sid)
+        u_after = server.find_msg(s_after, uid)
+        self.assertEqual(u_after.get("status"), "pending")
+        self.assertEqual(u_after.get("error_retries"), 1)
+
+    def test_f01_broken_json_then_unreadable_file_no_cross_contamination(self):
+        """Case 2: 1件目が破損JSON、2件目が不可読ファイルの場合に相互汚染なく両セッションそれぞれ正しくリトライされること"""
+        s1, u1 = self._create_user_session(status="processing")
+        s2, u2 = self._create_user_session(status="processing")
+
+        if s1["id"] < s2["id"]:
+            s_a, u_a = s1, u1
+            s_b, u_b = s2, u2
+        else:
+            s_a, u_a = s2, u2
+            s_b, u_b = s1, u1
+
+        fname_a = f"{s_a['id']}_reply_{u_a['id']}.json"
+        fname_b = f"{s_b['id']}_reply_{u_b['id']}.json"
+        path_a = os.path.join(server.OUTBOX, fname_a)
+        path_b = os.path.join(server.OUTBOX, fname_b)
+
+        # File A: 読み込めるが JSON 構文破壊 (raw は取得できる)
+        with open(path_a, "w", encoding="utf-8") as f:
+            f.write(f'{{"session": "{s_a["id"]}", "reply_to": "{u_a["id"]}", "text": "破損')
+
+        # File B: 不正バイナリで読み込み自体に失敗 (raw は取得できず空)
+        with open(path_b, "wb") as f:
+            f.write(b"\x80\x81\x82\xff\xfe")
+
+        now = time.time()
+        os.utime(path_a, (now - 20, now - 20))
+        os.utime(path_b, (now - 20, now - 20))
+
+        res = server.process_outbox()
+        self.assertTrue(res)
+
+        self.assertFalse(os.path.exists(path_a))
+        self.assertFalse(os.path.exists(path_b))
+        self.assertTrue(os.path.exists(os.path.join(server.DONE, fname_a + ".bad")))
+        self.assertTrue(os.path.exists(os.path.join(server.DONE, fname_b + ".bad")))
+
+        # 両セッションともそれぞれ1回だけリトライされること（セッション混入や2回加算がないこと）
+        s_a_after = server.load(s_a["id"])
+        s_b_after = server.load(s_b["id"])
+        u_a_after = server.find_msg(s_a_after, u_a["id"])
+        u_b_after = server.find_msg(s_b_after, u_b["id"])
+
+        self.assertEqual(u_a_after.get("status"), "pending")
+        self.assertEqual(u_a_after.get("error_retries"), 1)
+
+        self.assertEqual(u_b_after.get("status"), "pending")
+        self.assertEqual(u_b_after.get("error_retries"), 1)
+
+    def test_f01_orphan_unreadable_file_dropped_to_bad(self):
+        """Case 3: どのセッションにも属さない孤児不可読ファイルが安全に .bad へ移動しクラッシュしないこと"""
+        fname = "orphan_unknown_reply_u1.json"
+        path = os.path.join(server.OUTBOX, fname)
+        with open(path, "wb") as f:
+            f.write(b"\x80\x81\x82\xff\xfe")
+        os.utime(path, (time.time() - 20, time.time() - 20))
+
+        res = server.process_outbox()
+        self.assertTrue(res)
+        self.assertFalse(os.path.exists(path))
+        self.assertTrue(os.path.exists(os.path.join(server.DONE, fname + ".bad")))
+
+    def test_f01_young_unreadable_file_retained_in_outbox(self):
+        """Case 4: 作成後10秒以内の不可読ファイルは OUTBOX に留まり、時期尚早なリトライ消費を行わないこと"""
+        s, u = self._create_user_session(status="processing")
+        fname = f"{s['id']}_reply_{u['id']}.json"
+        path = os.path.join(server.OUTBOX, fname)
+        with open(path, "wb") as f:
+            f.write(b"\x80\x81\x82\xff\xfe")
+
+        res = server.process_outbox()
+        self.assertFalse(res)
+        self.assertTrue(os.path.exists(path), "Young file should remain in OUTBOX")
+        self.assertFalse(os.path.exists(os.path.join(server.DONE, fname + ".bad")))
+
+        s_after = server.load(s["id"])
+        u_after = server.find_msg(s_after, u["id"])
+        self.assertEqual(u_after.get("status"), "processing")
+        self.assertIsNone(u_after.get("error_retries"))
+
+    def test_f01_unreadable_file_retry_escalation_to_error(self):
+        """Case 5: 不可読ファイルが3回連続した場合、3回目で正しく status='error' に昇格すること"""
+        s, u = self._create_user_session(status="processing")
+        sid = s["id"]
+        uid = u["id"]
+
+        for i in range(1, 4):
+            fname = f"{sid}_reply_{uid}_{i}.json"
+            path = os.path.join(server.OUTBOX, fname)
+            with open(path, "wb") as f:
+                f.write(b"\x80\x81\x82\xff\xfe")
+            os.utime(path, (time.time() - 20, time.time() - 20))
+
+            server.process_outbox()
+
+            s_cur = server.load(sid)
+            u_cur = server.find_msg(s_cur, uid)
+            if i < 3:
+                self.assertEqual(u_cur.get("status"), "pending")
+                self.assertEqual(u_cur.get("error_retries"), i)
+            else:
+                self.assertEqual(u_cur.get("status"), "error")
+                self.assertEqual(u_cur.get("error_retries"), 3)
+                self.assertIn("壊れていました", u_cur.get("error", ""))
+
+    def test_f01_locked_file_safe_move_failure_no_retry_explosion(self):
+        """Case 6: Windows排他ロック等で safe_move が失敗した場合、リトライを加算せず待機すること"""
+        s, u = self._create_user_session(status="processing")
+        sid = s["id"]
+        uid = u["id"]
+        fname = f"{sid}_reply_{uid}.json"
+        path = os.path.join(server.OUTBOX, fname)
+
+        with open(path, "wb") as f:
+            f.write(b"\x80\x81\x82\xff\xfe")
+        os.utime(path, (time.time() - 20, time.time() - 20))
+
+        # 排他ロックで移動できない状況をシミュレート
+        with patch("shutil.move", side_effect=PermissionError("Permission denied: file locked")):
+            for _ in range(5):
+                res = server.process_outbox()
+                self.assertFalse(res)
+
+                s_chk = server.load(sid)
+                u_chk = server.find_msg(s_chk, uid)
+                self.assertEqual(u_chk.get("status"), "processing", "Status should not prematurely change while locked")
+                self.assertIsNone(u_chk.get("error_retries"), "Retries must not be consumed while locked")
+                self.assertTrue(os.path.exists(path), "File must remain in OUTBOX while locked")
+
+        # ロック解除後の通常実行
+        res = server.process_outbox()
+        self.assertTrue(res)
+        self.assertFalse(os.path.exists(path))
+        self.assertTrue(os.path.exists(os.path.join(server.DONE, fname + ".bad")))
+
+        s_final = server.load(sid)
+        u_final = server.find_msg(s_final, uid)
+        self.assertEqual(u_final.get("status"), "pending")
+        self.assertEqual(u_final.get("error_retries"), 1)
+
+    def test_f01_broken_json_missing_reply_to_resolves_cand_mid_from_filename(self):
+        """Case 7: raw に session のみがあり reply_to が無い破損JSONでも、ファイル名から cand_mid を特定し対象発言のみリトライすること"""
+        s = server.create_session({"ide_session": "test"})
+        u1 = server.add_user_msg(s, "1通目", status="processing")
+        u2 = server.add_user_msg(s, "2通目", status="processing")
+        server.save(s)
+
+        sid = s["id"]
+        # u2 への応答ファイル
+        fname = f"{sid}_reply_{u2['id']}.json"
+        path = os.path.join(server.OUTBOX, fname)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f'{{"session": "{sid}", "text": "途中で途切れた構文エラーJSON')
+        os.utime(path, (time.time() - 20, time.time() - 20))
+
+        res = server.process_outbox()
+        self.assertTrue(res)
+
+        s_after = server.load(sid)
+        m1 = server.find_msg(s_after, u1["id"])
+        m2 = server.find_msg(s_after, u2["id"])
+
+        # u1 は巻き添えを受けず processing のまま
+        self.assertEqual(m1.get("status"), "processing")
+        self.assertIsNone(m1.get("error_retries"))
+
+        # u2 は正しくリトライ対象になる
+        self.assertEqual(m2.get("status"), "pending")
+        self.assertEqual(m2.get("error_retries"), 1)

@@ -219,9 +219,9 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
 
 ---
 
-### F-05: Socket Exhaustion in ComfyUI Image Generation Polling
+### F-05: Connection Churn and Brittle Error Handling in ComfyUI Image Generation Polling
 - **File Path**: `server.py`
-- **Line Numbers**: `8253–8279`
+- **Line Numbers**: `8525–8615` (旧 `8253–8279`)
 - **優先度**: **中**（Medium） ／ **総合順位**: **13位**（全43件中）
 - **Trigger Condition & Root Cause**:
   In `comfy_run()`:
@@ -230,10 +230,18 @@ Across 17 JavaScript/Node test scripts in `test/`, 12 pass and 5 fail:
       time.sleep(0.1)
       try:
           h = json.loads(urllib.request.urlopen(f"{COMFY}/history/{pid}", timeout=10).read())
+      except Exception:
+          continue
   ```
-  `urllib.request.urlopen` is invoked every 100ms without a context manager (`with ... as resp:`). On Windows, socket handles are not immediately closed upon garbage collection. During slow image generations (60–120 seconds), hundreds of sockets remain in `TIME_WAIT`, creating socket handle exhaustion and descriptor leaks.
+  1. **Connection Churn & Excessive Polling**: Polling at a rigid 100ms (10Hz) interval without backoff generates up to ~9,000 short-lived TCP connections (`Connection: close`) over a generation timeout. When ComfyUI is under heavy load or restarting, this aggressive retry rate floods the accept queue and network stack.
+  *(Note: Prior claims that CPython leaks unclosed sockets on Windows without `with` were inaccurate; CPython's reference counting closes sockets deterministically upon exiting the `except` block. However, reliance on implicit GC cleanup is unhygienic and does not mitigate connection churn or TIME_WAIT accumulation on active-close endpoints).*
+  2. **Unhandled `/prompt` Failures**: `/prompt` dispatch lacked `urllib.error.HTTPError` handling, leaving HTTP 400/500 responses unparsed and socket streams unclosed upon submission failure.
+  3. **Brittle Polling Exception Handling**: Catching all exceptions with a silent `continue` obscured underlying transport failures, omitted diagnostic logging, and lacked exponential backoff on errors.
 - **Recommended Remediation**:
-  Wrap all `urlopen` calls in `with urllib.request.urlopen(...) as resp: h = json.loads(resp.read())`.
+  1. Implement exponential backoff (`COMFY_POLL_MIN = 0.1` to `COMFY_POLL_MAX = 1.0`) during polling errors while maintaining 0.1s responsiveness on active valid poll responses.
+  2. Use deterministic context managers (`with urllib.request.urlopen(...) as resp:`) and safely close `HTTPError` instances (`try: e.close() except Exception: pass`).
+  3. Catch specific exception types (`urllib.error.HTTPError`, `(urllib.error.URLError, OSError, ValueError)`) and add throttled diagnostic warning logs (every 10 consecutive failures).
+  4. Safeguard `/prompt` submission with explicit `HTTPError` response decoding and cleanup.
 
 ---
 

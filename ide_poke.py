@@ -202,9 +202,11 @@ def _call(port, tok, method, body, timeout=15):
                                  headers={"Content-Type": "application/json", "x-codeium-csrf-token": tok,
                                           "Connect-Protocol-Version": "1"})
     try:
-        return 200, json.loads(urllib.request.urlopen(req, timeout=timeout).read() or b"{}")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")[:300]
+        with e:
+            return e.code, e.read().decode("utf-8", "replace")[:300]
 
 
 _ls_cache = (0.0, None)
