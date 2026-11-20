@@ -118,7 +118,8 @@ class TestPovBackend(unittest.TestCase):
         s = server.create_session()
         sid = s["id"]
         self.assertEqual(s["setting"]["image"]["pov_mode"], "auto")
-        self.assertEqual(s["setting"]["image"]["pov_keep"], True)
+        self.assertEqual(s["setting"]["image"]["pov_keep"], False)
+        self.assertEqual(s["setting"]["image"]["pov_keep_explicit"], False)
 
         resp = self._post("/api/session/image_pov", {"sid": sid, "pov_mode": "on", "pov_keep": False})
         self.assertTrue(resp.get("ok"))
@@ -128,6 +129,30 @@ class TestPovBackend(unittest.TestCase):
         reloaded = server.load(sid)
         self.assertEqual(reloaded["setting"]["image"]["pov_mode"], "on")
         self.assertEqual(reloaded["setting"]["image"]["pov_keep"], False)
+
+    def test_pov_keep_only_when_explicitly_selected(self):
+        """旧既定の pov_keep=True（明示選択の印なし）は OFF に戻し、規定が勝手に動かないようにする"""
+        legacy = server.merge_defaults({"image": {"pov_mode": "off", "pov_keep": True}})
+        self.assertFalse(legacy["image"]["pov_keep"])
+        self.assertFalse(legacy["image"]["pov_keep_explicit"])
+
+        explicit = server.merge_defaults(
+            {"image": {"pov_mode": "off", "pov_keep": True, "pov_keep_explicit": True}}
+        )
+        self.assertTrue(explicit["image"]["pov_keep"])
+        self.assertTrue(explicit["image"]["pov_keep_explicit"])
+
+    def test_api_session_image_pov_does_not_reset_keep_when_omitted(self):
+        s = server.create_session()
+        sid = s["id"]
+        # 規定維持を明示的に ON にしたあと、規定（pov_mode）だけを変えても維持設定は残る
+        self._post("/api/session/image_pov", {"sid": sid, "pov_keep": True})
+        resp = self._post("/api/session/image_pov", {"sid": sid, "pov_mode": "on"})
+        self.assertTrue(resp.get("ok"))
+        reloaded = server.load(sid)
+        self.assertEqual(reloaded["setting"]["image"]["pov_mode"], "on")
+        self.assertTrue(reloaded["setting"]["image"]["pov_keep"])
+        self.assertTrue(reloaded["setting"]["image"]["pov_keep_explicit"])
 
 
 if __name__ == "__main__":

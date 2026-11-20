@@ -588,7 +588,11 @@ DEFAULT_SETTING = {
         "base_negative": "worst quality, low quality, bad anatomy, bad proportions, missing limbs, extra limbs, bad hands, mutated hands, missing fingers, text, watermark, signature, multiple girls,",
         "ipadapter_image": "",
         "pov_mode": "auto",  # "auto" (AI自動) | "on" (常時POV付与) | "off" (常時POV除外)
-        "pov_keep": True,    # UIでPOVボタンを切り替えた際に規定値(pov_mode)として維持するか
+        # 👁️ POVボタン（その画像のプロンプトだけを切り替えるボタン）の状態を、チャンネルの規定
+        # （pov_mode）にも保存するか。既定は False＝規定は変わらない（規定は上のセレクトでだけ変える）。
+        # True にすると画像を編集するたびに規定が ON/OFF へ動いてしまうため、明示的に選んだ時だけ True。
+        "pov_keep": False,
+        "pov_keep_explicit": False,  # pov_keep をユーザーが自分で選んだ印（旧既定 True の自動移行に使う）
     },
 }
 # 別のチャンネルとして始めるときに持ち越さない、担当IDEの割り当て
@@ -759,6 +763,11 @@ def merge_defaults(setting=None):
                 out["image"]["speed_lora"] = ""
                 if "clip_skip" not in img_conf:
                     out["image"]["clip_skip"] = 1
+        # 旧既定では pov_keep が True で、👁️ POVボタンを押すたびにチャンネルの規定（pov_mode）が
+        # 自動/ON/OFF と書き換わっていた（画像ごとに既定が動いて見える不具合）。
+        # ユーザーが明示的にチェックした印が無い True は旧既定とみなして OFF に戻す。
+        if img_conf.get("pov_keep") is True and not img_conf.get("pov_keep_explicit"):
+            out["image"]["pov_keep"] = False
     if "suggest_choices" in out:
         v = out["suggest_choices"]
         out["suggest_choices"] = (v.lower() not in ("false", "0", "")) if isinstance(v, str) else bool(v)
@@ -1077,11 +1086,18 @@ def latest_choices_task(msgs, statuses=("pending", "processing"), max_age=None, 
 
 
 def read_json(path, default):
-    try:
-        with open(path, encoding="utf-8-sig") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
+    for attempt in range(5):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                return json.load(f)
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            return default
+        except (OSError, ValueError):
+            return default
+    return default
 
 
 def _seed_rel(rel):
@@ -1112,11 +1128,43 @@ def defaults_path(rel):
     return _under(DEFAULTS, rel)
 
 
-def write_json(path, obj):
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+def atomic_write_text(path, text, encoding="utf-8", newline=None):
+    """テキストを一時ファイル経由で原子的（atomic）に書き込む。
+    - プロセスID、スレッドID、UUID を含めた衝突しない一時ファイル名
+    - PermissionError 発生時の指数バックオフ＋ジッター再試行（最大12回、初期10ms、最大~1.2s）
+    - try...finally による一時ファイル残留（孤児ファイル）の完全防止
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding=encoding, newline=newline) as f:
+            f.write(text)
+        delay = 0.01
+        last_err = None
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as e:
+                last_err = e
+                if attempt < 11:
+                    time.sleep(delay + random.uniform(0, 0.01))
+                    delay = min(delay * 1.5, 1.2)
+        if last_err is not None:
+            raise last_err
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def write_json(path, obj, indent=2):
+    text = json.dumps(obj, ensure_ascii=False, indent=indent)
+    atomic_write_text(path, text, encoding="utf-8")
 
 
 def app_settings():
@@ -1143,44 +1191,78 @@ def load_choices_data(sid, readonly=False):
     """choices データを読み込む。
     注意: readonly=True の返り値はキャッシュ本体の参照であるため、呼び出し側での書き換え（破壊的変更）は厳禁。"""
     p = choices_path(sid)
-    if not os.path.exists(p):
-        choices_cache.pop(sid, None)
-        return {}
-    try:
-        st = os.stat(p)
-        cached = choices_cache.get(sid)
-        if cached is not None and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
-            return cached["data"] if readonly else copy.deepcopy(cached["data"])
-        with open(p, encoding="utf-8-sig") as f:
-            d = json.load(f)
-            data = d if isinstance(d, dict) else {}
-            choices_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": data}
-            return data if readonly else copy.deepcopy(data)
-    except Exception:
-        choices_cache.pop(sid, None)
-        return {}
+    for attempt in range(5):
+        try:
+            st = os.stat(p)
+            cached = choices_cache.get(sid)
+            if cached is not None and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
+                return cached["data"] if readonly else copy.deepcopy(cached["data"])
+            with open(p, encoding="utf-8-sig") as f:
+                d = json.load(f)
+                data = d if isinstance(d, dict) else {}
+                choices_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": data}
+                return data if readonly else copy.deepcopy(data)
+        except FileNotFoundError:
+            choices_cache.pop(sid, None)
+            return {}
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            choices_cache.pop(sid, None)
+            return {}
+        except Exception:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            choices_cache.pop(sid, None)
+            return {}
+    return {}
 
 
 def save_choices_data(sid, data):
-    if sid in deleted_sessions:
-        choices_cache.pop(sid, None)
-        return
-    os.makedirs(CHOICES_DIR, exist_ok=True)
-    p = choices_path(sid)
-    tmp = f"{p}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    for _ in range(10):
-        try:
-            os.replace(tmp, p)
-            try:
-                st = os.stat(p)
-                choices_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": copy.deepcopy(data)}
-            except OSError:
-                choices_cache.pop(sid, None)
+    with lock:
+        if sid in deleted_sessions:
+            choices_cache.pop(sid, None)
             return
-        except PermissionError:
-            time.sleep(0.05)
+        os.makedirs(CHOICES_DIR, exist_ok=True)
+        p = choices_path(sid)
+        tmp = f"{p}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            delay = 0.01
+            last_err = None
+            for attempt in range(12):
+                if sid in deleted_sessions:
+                    choices_cache.pop(sid, None)
+                    return
+                try:
+                    os.replace(tmp, p)
+                    try:
+                        st = os.stat(p)
+                        choices_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": copy.deepcopy(data)}
+                    except OSError:
+                        choices_cache.pop(sid, None)
+                    return
+                except PermissionError as e:
+                    last_err = e
+                    if attempt < 11:
+                        time.sleep(delay + random.uniform(0, 0.01))
+                        delay = min(delay * 1.5, 1.2)
+            choices_cache.pop(sid, None)
+            if last_err is not None:
+                raise last_err
+        except Exception:
+            choices_cache.pop(sid, None)
+            raise
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 def states_path(sid):
@@ -1191,44 +1273,78 @@ def load_states_data(sid, readonly=False):
     """states データを読み込む。
     注意: readonly=True の返り値はキャッシュ本体の参照であるため、呼び出し側での書き換え（破壊的変更）は厳禁。"""
     p = states_path(sid)
-    if not os.path.exists(p):
-        states_cache.pop(sid, None)
-        return {}
-    try:
-        st = os.stat(p)
-        cached = states_cache.get(sid)
-        if cached is not None and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
-            return cached["data"] if readonly else copy.deepcopy(cached["data"])
-        with open(p, encoding="utf-8-sig") as f:
-            d = json.load(f)
-            data = d if isinstance(d, dict) else {}
-            states_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": data}
-            return data if readonly else copy.deepcopy(data)
-    except Exception:
-        states_cache.pop(sid, None)
-        return {}
+    for attempt in range(5):
+        try:
+            st = os.stat(p)
+            cached = states_cache.get(sid)
+            if cached is not None and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
+                return cached["data"] if readonly else copy.deepcopy(cached["data"])
+            with open(p, encoding="utf-8-sig") as f:
+                d = json.load(f)
+                data = d if isinstance(d, dict) else {}
+                states_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": data}
+                return data if readonly else copy.deepcopy(data)
+        except FileNotFoundError:
+            states_cache.pop(sid, None)
+            return {}
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            states_cache.pop(sid, None)
+            return {}
+        except Exception:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            states_cache.pop(sid, None)
+            return {}
+    return {}
 
 
 def save_states_data(sid, data):
-    if sid in deleted_sessions:
-        states_cache.pop(sid, None)
-        return
-    os.makedirs(STATES_DIR, exist_ok=True)
-    p = states_path(sid)
-    tmp = f"{p}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    for _ in range(10):
-        try:
-            os.replace(tmp, p)
-            try:
-                st = os.stat(p)
-                states_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": copy.deepcopy(data)}
-            except OSError:
-                states_cache.pop(sid, None)
+    with lock:
+        if sid in deleted_sessions:
+            states_cache.pop(sid, None)
             return
-        except PermissionError:
-            time.sleep(0.05)
+        os.makedirs(STATES_DIR, exist_ok=True)
+        p = states_path(sid)
+        tmp = f"{p}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            delay = 0.01
+            last_err = None
+            for attempt in range(12):
+                if sid in deleted_sessions:
+                    states_cache.pop(sid, None)
+                    return
+                try:
+                    os.replace(tmp, p)
+                    try:
+                        st = os.stat(p)
+                        states_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": copy.deepcopy(data)}
+                    except OSError:
+                        states_cache.pop(sid, None)
+                    return
+                except PermissionError as e:
+                    last_err = e
+                    if attempt < 11:
+                        time.sleep(delay + random.uniform(0, 0.01))
+                        delay = min(delay * 1.5, 1.2)
+            states_cache.pop(sid, None)
+            if last_err is not None:
+                raise last_err
+        except Exception:
+            states_cache.pop(sid, None)
+            raise
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 def images_path(sid):
@@ -1239,44 +1355,78 @@ def load_images_data(sid, readonly=False):
     """images データを読み込む。
     注意: readonly=True の返り値はキャッシュ本体の参照であるため、呼び出し側での書き換え（破壊的変更）は厳禁。"""
     p = images_path(sid)
-    if not os.path.exists(p):
-        images_cache.pop(sid, None)
-        return {}
-    try:
-        st = os.stat(p)
-        cached = images_cache.get(sid)
-        if cached is not None and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
-            return cached["data"] if readonly else copy.deepcopy(cached["data"])
-        with open(p, encoding="utf-8-sig") as f:
-            d = json.load(f)
-            data = d if isinstance(d, dict) else {}
-            images_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": data}
-            return data if readonly else copy.deepcopy(data)
-    except Exception:
-        images_cache.pop(sid, None)
-        return {}
+    for attempt in range(5):
+        try:
+            st = os.stat(p)
+            cached = images_cache.get(sid)
+            if cached is not None and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
+                return cached["data"] if readonly else copy.deepcopy(cached["data"])
+            with open(p, encoding="utf-8-sig") as f:
+                d = json.load(f)
+                data = d if isinstance(d, dict) else {}
+                images_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": data}
+                return data if readonly else copy.deepcopy(data)
+        except FileNotFoundError:
+            images_cache.pop(sid, None)
+            return {}
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            images_cache.pop(sid, None)
+            return {}
+        except Exception:
+            if attempt < 4:
+                time.sleep(random.uniform(0.005, 0.015))
+                continue
+            images_cache.pop(sid, None)
+            return {}
+    return {}
 
 
 def save_images_data(sid, data):
-    if sid in deleted_sessions:
-        images_cache.pop(sid, None)
-        return
-    os.makedirs(IMAGES_DIR, exist_ok=True)
-    p = images_path(sid)
-    tmp = f"{p}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    for _ in range(10):
-        try:
-            os.replace(tmp, p)
-            try:
-                st = os.stat(p)
-                images_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": copy.deepcopy(data)}
-            except OSError:
-                images_cache.pop(sid, None)
+    with lock:
+        if sid in deleted_sessions:
+            images_cache.pop(sid, None)
             return
-        except PermissionError:
-            time.sleep(0.05)
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+        p = images_path(sid)
+        tmp = f"{p}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            delay = 0.01
+            last_err = None
+            for attempt in range(12):
+                if sid in deleted_sessions:
+                    images_cache.pop(sid, None)
+                    return
+                try:
+                    os.replace(tmp, p)
+                    try:
+                        st = os.stat(p)
+                        images_cache[sid] = {"mtime": st.st_mtime, "size": st.st_size, "data": copy.deepcopy(data)}
+                    except OSError:
+                        images_cache.pop(sid, None)
+                    return
+                except PermissionError as e:
+                    last_err = e
+                    if attempt < 11:
+                        time.sleep(delay + random.uniform(0, 0.01))
+                        delay = min(delay * 1.5, 1.2)
+            images_cache.pop(sid, None)
+            if last_err is not None:
+                raise last_err
+        except Exception:
+            images_cache.pop(sid, None)
+            raise
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 def session_needs_migration(s):
@@ -1742,6 +1892,7 @@ def save(s):
     with lock:
         sid = s["id"]
         if sid in deleted_sessions:
+            session_cache.pop(sid, None)
             return
         s["rev"] = int(s.get("rev", 0)) + 1
         s["updated"] = now()
@@ -1960,32 +2111,54 @@ def save(s):
         disk_s["messages"] = disk_msgs
 
         p = spath(sid)
-        tmp = f"{p}.{os.getpid()}.tmp"  # サーバーが2つ動いていても一時ファイルがぶつからないように
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(disk_s, f, ensure_ascii=False, indent=2)
-        for _ in range(10):
-            try:
-                os.replace(tmp, p)
-                poke_event.set(); google_event.set()
-                st_cur = s.get("setting", {})
-                if st_cur.get("ide_auto") or st_cur.get("choices_ide_auto"):
-                    ide_auto_event.set()
-                try:
-                    st_sess = os.stat(p)
-                    session_cache[sid] = {
-                        "mtime": st_sess.st_mtime,
-                        "size": st_sess.st_size,
-                        "choices_mtime": st_choices_mtime,
-                        "states_mtime": st_states_mtime,
-                        "images_mtime": st_images_mtime,
-                        "s": clone_session(s)
-                    }
-                except OSError:
+        os.makedirs(SESS_DIR, exist_ok=True)
+        tmp = f"{p}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+        text = json.dumps(disk_s, ensure_ascii=False, indent=2)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            delay = 0.01
+            last_err = None
+            for attempt in range(12):
+                if sid in deleted_sessions:
                     session_cache.pop(sid, None)
-                return
-            except PermissionError:
-                time.sleep(0.05)
-        raise
+                    return
+                try:
+                    os.replace(tmp, p)
+                    poke_event.set(); google_event.set()
+                    st_cur = s.get("setting", {})
+                    if st_cur.get("ide_auto") or st_cur.get("choices_ide_auto"):
+                        ide_auto_event.set()
+                    try:
+                        st_sess = os.stat(p)
+                        session_cache[sid] = {
+                            "mtime": st_sess.st_mtime,
+                            "size": st_sess.st_size,
+                            "choices_mtime": st_choices_mtime,
+                            "states_mtime": st_states_mtime,
+                            "images_mtime": st_images_mtime,
+                            "s": clone_session(s)
+                        }
+                    except OSError:
+                        session_cache.pop(sid, None)
+                    return
+                except PermissionError as e:
+                    last_err = e
+                    if attempt < 11:
+                        time.sleep(delay + random.uniform(0, 0.01))
+                        delay = min(delay * 1.5, 1.2)
+            session_cache.pop(sid, None)
+            if last_err is not None:
+                raise last_err
+        except Exception:
+            session_cache.pop(sid, None)
+            raise
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 known_ides = None
@@ -5096,12 +5269,16 @@ def update_session_pov_setting(sid: str, pov_mode: str = None, pov_keep: bool = 
                 raise ValueError(f"invalid pov_mode: {pov_mode}")
             img_cfg["pov_mode"] = norm_mode
         if pov_keep is not None:
-            img_cfg["pov_keep"] = bool(pov_keep)
+            keep = bool(pov_keep)
+            img_cfg["pov_keep"] = keep
+            # ユーザーが「規定維持」を切り替えた印。旧既定の True と区別する
+            img_cfg["pov_keep_explicit"] = keep
         save(s)
         return {
             "ok": True,
             "pov_mode": img_cfg.get("pov_mode", "auto"),
-            "pov_keep": bool(img_cfg.get("pov_keep", True)),
+            "pov_keep": bool(img_cfg.get("pov_keep", False)),
+            "pov_keep_explicit": bool(img_cfg.get("pov_keep_explicit", False)),
         }
 
 
@@ -5433,13 +5610,14 @@ def _write_text_if_changed(path, text):
     """中身が変わったときだけ書く（毎ターンの書き込みで mtime を動かさない）"""
     cur = None
     if os.path.isfile(path):
-        with open(path, encoding="utf-8", errors="replace", newline="") as f:
-            cur = f.read()
+        try:
+            with open(path, encoding="utf-8", errors="replace", newline="") as f:
+                cur = f.read()
+        except OSError:
+            cur = None
     if cur == text:
         return False
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    atomic_write_text(path, text, encoding="utf-8", newline="\n")
     return True
 
 
@@ -8853,10 +9031,7 @@ def _google_write_outbox(sid, mid, task_type, rep, slot=""):
         mark = f"_{task_type}_"
     name = f"{sid}_google{mark}{mid}_{int(time.time() * 1000)}.json"
     path = os.path.join(OUTBOX, name)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(rep, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(rep, ensure_ascii=False))
     return name
 
 
@@ -9124,6 +9299,9 @@ def ph_restore(text):
     return out, restored[0], left
 
 
+_ph_misses_lock = threading.Lock()
+
+
 def _log_ph_misses(text="", misses=None):
     cfg = ph_settings()
     act_tokens = set((cfg.get("act") or {}).values())
@@ -9145,24 +9323,31 @@ def _log_ph_misses(text="", misses=None):
     today = time.strftime("%Y-%m-%d")
     path = os.path.join(DATA, "ph_misses.log")
     try:
-        existing = []
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                existing = f.readlines()
-        existing_set = {line.strip() for line in existing}
-        new_lines = []
-        for tok in misses:
-            entry = f"{today} {tok}"
-            if entry not in existing_set:
-                new_lines.append(entry + "\n")
-                existing_set.add(entry)
-        if new_lines:
-            all_lines = existing + new_lines
-            if len(all_lines) > 1000:
-                all_lines = all_lines[-1000:]
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.writelines(all_lines)
+        with _ph_misses_lock:
+            existing = []
+            if os.path.exists(path):
+                for _ in range(5):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            existing = f.readlines()
+                        break
+                    except PermissionError:
+                        time.sleep(0.005)
+                    except OSError:
+                        existing = []
+                        break
+            existing_set = {line.strip() for line in existing}
+            new_lines = []
+            for tok in misses:
+                entry = f"{today} {tok}"
+                if entry not in existing_set:
+                    new_lines.append(entry + "\n")
+                    existing_set.add(entry)
+            if new_lines:
+                all_lines = existing + new_lines
+                if len(all_lines) > 1000:
+                    all_lines = all_lines[-1000:]
+                atomic_write_text(path, "".join(all_lines), encoding="utf-8")
     except Exception as e:
         print(f"[ph] warning: failed to write ph_misses.log: {e}")
 

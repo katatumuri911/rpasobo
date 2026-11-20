@@ -30,12 +30,34 @@ class _StopLoop(Exception):
     """poke_worker の無限ループをテストから抜けるための番兵"""
 
 
+class _FakeClock:
+    """server.time を差し替えるための仮想時計。time.time() だけを早送りし、他は本物へ委譲する。
+
+    poke_worker は「合図直後の quiet（1.5秒）」や POKE_AGAIN の再送判定を time.time() で
+    行うため、実時間で待つ代わりにこの時計を進めて同じ状況を作る。
+    """
+
+    def __init__(self):
+        self.offset = 0.0
+        self._real_time = time.time
+
+    def time(self):
+        return self._real_time() + self.offset
+
+    def advance(self, seconds):
+        self.offset += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 class _StepEvent:
     """poke_worker が使う poke_event の代用。steps 回だけループを回してから止める。"""
 
-    def __init__(self, steps=1, gap=0.0):
+    def __init__(self, steps=1, gap=0.0, clock=None):
         self.steps = steps
         self.gap = gap
+        self.clock = clock
         self.calls = 0
 
     def wait(self, timeout=None):
@@ -43,7 +65,11 @@ class _StepEvent:
         if self.calls > self.steps:
             raise _StopLoop()
         if self.calls > 1 and self.gap:
-            time.sleep(self.gap)  # quiet（合図直後の1.5秒）を明けて次の周回に入る
+            # quiet（合図直後の1.5秒）を明けて次の周回に入る。実時間では待たず時計を進める
+            if self.clock is not None:
+                self.clock.advance(self.gap)
+            else:
+                time.sleep(self.gap)
         return True
 
     def clear(self):
@@ -131,8 +157,10 @@ class TestPokeSignal(unittest.TestCase):
             calls.append((ide, full, media))
             return True, "test", False
 
-        server.poke_event = _StepEvent(steps=steps, gap=gap)
-        with mock.patch.object(server, "send_poke", side_effect=fake_send_poke):
+        clock = _FakeClock()
+        server.poke_event = _StepEvent(steps=steps, gap=gap, clock=clock)
+        with mock.patch.object(server, "time", clock), \
+             mock.patch.object(server, "send_poke", side_effect=fake_send_poke):
             with self.assertRaises(_StopLoop):
                 server.poke_worker()
         return calls

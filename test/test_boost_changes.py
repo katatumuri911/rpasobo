@@ -571,9 +571,12 @@ class TestBoostChanges(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(len(server.queued_memories), 0)
 
-        # Allow worker a fraction of a second to complete disk write
-        time.sleep(0.2)
+        # ディスク書き込みの完了を待つ（固定時間ではなく、ファイルに現れるまで待つ）
+        deadline = time.time() + 2.0
         mem_data = memory_store.load_memories(sid)
+        while time.time() < deadline and not mem_data.get("memories"):
+            time.sleep(0.005)
+            mem_data = memory_store.load_memories(sid)
         self.assertEqual(len(mem_data.get("memories", [])), 1)
         self.assertEqual(mem_data["memories"][0]["content"], "ワーカーで保存された記憶")
 

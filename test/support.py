@@ -3,6 +3,7 @@
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -238,3 +239,18 @@ class IsolatedTestCase(unittest.TestCase):
         self.assertTrue(os.path.realpath(memory_store.DATA).startswith(root))
         self.assertTrue(os.path.realpath(memory_store.RAG_DIR).startswith(root))
         self.assertTrue(os.path.realpath(memory_store.TRASH).startswith(root))
+
+
+class NoWaitTime:
+    """`time` モジュール互換のスタブ。sleep だけ無効化し、他（time()/strftime() 等）は本物へ委譲する。
+
+    実装側の「少し待ってから再確認する」ループ（IDE の IDLE 待ち、outbox の取り込み待ちなど）を、
+    待ち時間そのものを検証しないテストで実時間を消費せずに通すためのもの。
+    使い方: `with mock.patch.object(ide_poke, "time", NoWaitTime()):`
+    """
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def sleep(self, *_args, **_kwargs):
+        return None

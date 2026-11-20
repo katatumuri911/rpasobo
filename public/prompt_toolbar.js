@@ -17,7 +17,6 @@
   "use strict";
 
   const STORAGE_KEY_POV_MODE = "rpchat_default_pov_mode"; // "auto" | "on" | "off"
-  const STORAGE_KEY_POV_KEEP = "rpchat_default_pov_keep"; // "1" | "0"
   const STORAGE_KEY_SMART_REPLACE = "rpchat_prompt_smart_replace"; // "1" | "0"
   const MAX_UNDO_STACK = 25;
 
@@ -731,15 +730,14 @@
   }
 
   function getSavedPovKeep(channelSetting) {
-    if (
+    // 「規定維持」は明示的に ON にした時だけ有効。旧既定（pov_keep=True）のセッションや
+    // localStorage の古い値で勝手に ON に戻らないようにする（POVボタンで規定が動く不具合の元）。
+    return Boolean(
       channelSetting &&
-      channelSetting.image &&
-      typeof channelSetting.image.pov_keep === "boolean"
-    ) {
-      return channelSetting.image.pov_keep;
-    }
-    const local = localStorage.getItem(STORAGE_KEY_POV_KEEP);
-    return local === null ? true : local === "1";
+        channelSetting.image &&
+        channelSetting.image.pov_keep === true &&
+        channelSetting.image.pov_keep_explicit === true
+    );
   }
 
   function getSmartReplacePref() {
@@ -749,10 +747,20 @@
 
   let saveTimer = null;
 
+  function notifyPovDefaultChanged(mode) {
+    const label = mode === "on" ? "常時POV(ON)" : "非POV(OFF)";
+    const notify = global.toast;
+    if (typeof notify !== "function") return;
+    try {
+      notify(`POVの規定（既定）も「${label}」に変更しました`, { kind: "info", dedupe: false, ms: 5000 });
+    } catch (_) {
+      // 通知できない環境では何もしない
+    }
+  }
+
   async function savePovPreferences(povMode, povKeep, rawOptions = {}) {
     const options = resolveContextOptions(rawOptions);
     localStorage.setItem(STORAGE_KEY_POV_MODE, povMode);
-    localStorage.setItem(STORAGE_KEY_POV_KEEP, povKeep ? "1" : "0");
 
     const st =
       options.channelSetting ||
@@ -764,6 +772,8 @@
       st.image = st.image || {};
       st.image.pov_mode = povMode;
       st.image.pov_keep = Boolean(povKeep);
+      // ユーザーが明示的に「規定維持」を切り替えた印（旧既定と区別する）
+      st.image.pov_keep_explicit = Boolean(povKeep);
     }
 
     syncAllToolbarsPovDefaultUI(povMode, povKeep);
@@ -801,7 +811,8 @@
           await fetch("/api/setting", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: sid, setting: st }),
+            // /api/setting は sid でチャンネルを引く（id だけでは no such session になる）
+            body: JSON.stringify({ sid, setting: st }),
           });
         } catch (e) {
           console.warn("[PromptToolbar] Fallback setting save error:", e);
@@ -1066,13 +1077,14 @@
     const keepLabel = document.createElement("label");
     keepLabel.className = "rp-pt-inline-check";
     keepLabel.title =
-      "ONにすると、POVボタンを切り替えた際にその状態（ON/OFF）をそのまま規定設定として維持・保存します";
+      "OFF（既定）では、POVボタンはこの画像のプロンプトだけを切り替え、チャンネルの規定（上のセレクト）は変えません。" +
+      "ONにすると、POVボタンを切り替えた際にその状態（ON/OFF）を規定としても保存します";
     const keepCheck = document.createElement("input");
     keepCheck.type = "checkbox";
     keepCheck.className = "rp-pov-keep-checkbox";
     keepCheck.checked = getSavedPovKeep(options.channelSetting);
     const keepSpan = document.createElement("span");
-    keepSpan.textContent = "📌 規定維持";
+    keepSpan.textContent = "📌 ボタンで規定も保存";
     keepLabel.appendChild(keepCheck);
     keepLabel.appendChild(keepSpan);
 
@@ -1092,9 +1104,13 @@
       const updated = setPovInPrompt(textarea.value, nextEnable);
       applyToolbarValue(updated);
 
+      // 既定（OFF）では、ここでチャンネルの規定は変えない。画像ごとに規定が ON/OFF して
+      // 「既定から外れる」のを防ぐ。規定を変えるのは上のセレクトだけ。
       if (keepCheck.checked) {
         const newMode = nextEnable ? "on" : "off";
         povDefaultSelect.value = newMode;
+        // 規定も変える設定のときは、黙って変わると混乱するので必ず知らせる
+        notifyPovDefaultChanged(newMode);
         await savePovPreferences(newMode, true, rawOptions);
       }
     });

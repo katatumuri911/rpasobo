@@ -20,7 +20,7 @@ AIはそれを合図に wait_input.py を実行し、応答を書いたら待機
    "characters": [{"name": "キャラ名", "tags": "外見タグ"}]}  # 任意
 """
 import http.client
-import json, os, re, sys, time, urllib.parse
+import json, os, random, re, sys, threading, time, urllib.parse, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTBOX = os.path.join(HERE, "outbox")
@@ -44,6 +44,35 @@ class _ByteCounter:
         return self.target.write(s)
     def flush(self):
         return self.target.flush()
+
+
+def atomic_write_text(path, text, encoding="utf-8"):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding=encoding) as f:
+            f.write(text)
+        delay = 0.01
+        last_err = None
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as e:
+                last_err = e
+                if attempt < 11:
+                    time.sleep(delay + random.uniform(0, 0.01))
+                    delay = min(delay * 1.5, 1.2)
+        if last_err is not None:
+            raise last_err
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 _SERVER_HOST_PORT = None
 _HTTP_CONN = None
@@ -227,8 +256,7 @@ def show(sid, m, note="", ctx=None, task_type=None):
                 CTX_DIR,
                 ctx.get("ctx_file") or f"{sid}.md",
             )
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(f"# {title} / reply_to {m['id']}\n{body}")
+            atomic_write_text(path, f"# {title} / reply_to {m['id']}\n{body}", encoding="utf-8")
             print(f"\n設定・会話・発言はファイルに書いた（{body.count(chr(10)) + 1}行）。"
                   "このコマンドの表示ではなく、必ずこのファイルを最初から最後まで読んでから応答する:")
             print(f"  {path}")

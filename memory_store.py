@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import shutil
 import threading
@@ -823,36 +824,52 @@ def load_memories(session_id, character_name=""):
 
 def save_memories(session_id, data):
     path = memory_path(session_id)
-    tmp_path = path + f".tmp_{os.getpid()}_{threading.get_ident()}"
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp_path = f"{path}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
     with _store_lock:
         if session_id in _deleted_sessions:
             _memory_cache.pop(session_id, None)
             return
         data["updated_at"] = time.time()
         formatted = to_compact_json(data)
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(formatted)
-        for _ in range(10):
-            try:
-                os.replace(tmp_path, path)
-                break
-            except OSError:
-                time.sleep(0.01)
-        else:
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
         try:
-            st = os.stat(path)
-            _memory_cache[session_id] = {
-                "mtime": st.st_mtime,
-                "size": st.st_size,
-                "data": copy.deepcopy(data)
-            }
-        except OSError:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(formatted)
+            delay = 0.01
+            last_err = None
+            for attempt in range(12):
+                if session_id in _deleted_sessions:
+                    _memory_cache.pop(session_id, None)
+                    return
+                try:
+                    os.replace(tmp_path, path)
+                    try:
+                        st = os.stat(path)
+                        _memory_cache[session_id] = {
+                            "mtime": st.st_mtime,
+                            "size": st.st_size,
+                            "data": copy.deepcopy(data)
+                        }
+                    except OSError:
+                        _memory_cache.pop(session_id, None)
+                    return
+                except OSError as e:
+                    last_err = e
+                    if attempt < 11:
+                        time.sleep(delay + random.uniform(0, 0.01))
+                        delay = min(delay * 1.5, 1.2)
             _memory_cache.pop(session_id, None)
+            if last_err is not None:
+                raise last_err
+        except Exception:
+            _memory_cache.pop(session_id, None)
+            raise
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 # 記憶ごとの小さな押し上げ（0〜MEMORY_BOOST_MAX）。

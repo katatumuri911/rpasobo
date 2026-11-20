@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 import urllib.request
 import urllib.parse
@@ -21,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ide_poke
 import wait_input
 import server
+from test.support import NoWaitTime
 
 # serve_forever の待ち時間。既定の 0.5 秒だと tearDown の shutdown() が毎回 0.5 秒ブロックする
 _POLL = 0.02
@@ -154,6 +156,12 @@ class TestParallelChoices(unittest.TestCase):
         self.assertIsNot(lock1, lock2)
 
     def test_wait_input_check_previous_role_filtering(self):
+        # check_previous の「取り込み待ち」（0.03秒×最大35回）は実装側の待機なので、
+        # ここでは実時間を消費せずに判定（main/choices の振り分け）だけを確かめる
+        patcher = mock.patch.object(wait_input, "time", NoWaitTime())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
         # Create dummy outbox files
         main_file = os.path.join(wait_input.OUTBOX, "test-sid_user_12345.json")
         choices_file = os.path.join(wait_input.OUTBOX, "test-sid_choices_12346.json")

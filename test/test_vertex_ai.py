@@ -706,8 +706,11 @@ class TestVertexAI(unittest.TestCase):
         with patch("google_ai.load_vertex_config", return_value=cfg), \
              patch("google_ai.effective_vertex_location", return_value="global"), \
              patch("google_ai.probe_vertex_model", side_effect=fake_probe), \
+             patch("google_ai._should_use_sdk", return_value=False), \
+             patch("google_ai.urllib.request.urlopen", side_effect=OSError("no network")), \
              patch.object(google_ai, "list_models", wraps=google_ai.list_models):
             # probe=None (既定) で呼び出したときに無限再帰せず、available=True のみ返ること
+            # （モデル一覧の取得はネットワークに出ないよう失敗させ、ビルトイン一覧にフォールバックさせる）
             models = google_ai.list_models(provider="vertex", probe=None)
             self.assertEqual(len(models), 1)
             self.assertEqual(models[0]["id"], "gemini-2.5-flash")
@@ -1058,18 +1061,34 @@ class TestVertexAI(unittest.TestCase):
     # 42: _sdk_client の cfg=None ガード
     def test_42_sdk_client_cfg_none_guard(self):
         cfg = {"project_id": "demo-gcp-proj", "location": "asia-east1", "configured": True, "fingerprint": "fp_cfg_none"}
+        created = []
+
+        class _FakeGenai:
+            """SDK クライアント生成だけを差し替える（本物は SSL コンテキスト構築に 0.7 秒かかる）"""
+
+            @staticmethod
+            def Client(**kwargs):
+                created.append(kwargs)
+                return "fake-sdk-client"
+
         with patch("google_ai.load_vertex_config", return_value=cfg), \
-             patch("google_ai.effective_vertex_location", return_value="asia-east1"), \
-             patch("google_ai._should_use_sdk", return_value=True):
+             patch("google_ai.effective_vertex_location", side_effect=lambda c=None: (c or cfg).get("location")), \
+             patch("google_ai._should_use_sdk", return_value=True), \
+             patch.object(google_ai, "genai", _FakeGenai):
             with google_ai._sdk_client_lock:
                 google_ai._sdk_client_cache.clear()
             # cfg を渡さない (None) でも TypeError にならずクライアントが取得できること
             cli = google_ai._sdk_client("vertex", None)
             self.assertIsNotNone(cli)
+            self.assertEqual(created[-1].get("project"), "demo-gcp-proj")
+            self.assertEqual(created[-1].get("location"), "asia-east1")
 
             # 部分 dict (fingerprint 等の欠落) でも KeyError にならずクライアントが取得できること
             cli_partial = google_ai._sdk_client("vertex", {"project_id": "demo-partial", "location": "global"})
             self.assertIsNotNone(cli_partial)
+            self.assertEqual(created[-1].get("project"), "demo-partial")
+            self.assertEqual(created[-1].get("location"), "global")
+            self.assertEqual(len(created), 2)
 
 
 if __name__ == "__main__":

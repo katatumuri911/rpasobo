@@ -1878,11 +1878,8 @@ def _sig_load():
 def _sig_save():
     """常駐キャッシュをファイルへ（原子的更新）。失敗しても生成は止めない"""
     try:
-        os.makedirs(os.path.dirname(SIG_CACHE_FILE) or ".", exist_ok=True)
-        tmp = f"{SIG_CACHE_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_sig_load(), f, ensure_ascii=False)
-        os.replace(tmp, SIG_CACHE_FILE)
+        from server import write_json
+        write_json(SIG_CACHE_FILE, _sig_load(), indent=None)
     except Exception as e:
         print(f"[sig] save failed: {e}")
 

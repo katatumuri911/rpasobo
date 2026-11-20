@@ -17,6 +17,7 @@ if ROOT not in sys.path:
 import memory_store as ms
 import server
 import ide_poke
+from test.support import NoWaitTime
 
 
 def make_msg(role, text, mid=None, **kwargs):
@@ -264,7 +265,8 @@ class TestIdePokeRevertAndCache(unittest.TestCase):
             return 1234, "tok", {"status": st, "stepCount": 10}
 
         with patch("ide_poke.locate", side_effect=mock_locate), \
-             patch("ide_poke.revert", return_value=(True, "reverted")) as mock_revert:
+             patch("ide_poke.revert", return_value=(True, "reverted")) as mock_revert, \
+             patch.object(ide_poke, "time", NoWaitTime()):  # IDLE 待ちの 0.4 秒ポーリングは実時間を使わない
             ok, msg = ide_poke.revert_when_idle("test-cid-idle", at=4, timeout=5)
             self.assertTrue(ok)
             self.assertEqual("reverted", msg)

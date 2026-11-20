@@ -28,7 +28,7 @@
   python ide_poke.py --list                 # Antigravity IDE のウィンドウ一覧（キーは送らない）
   python ide_poke.py --find <ワークスペース名>  # 合図を送る先のウィンドウを探すだけ（キーは送らない）
 """
-import copy, ctypes, datetime, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import copy, ctypes, datetime, json, os, random, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from ctypes import wintypes
 
 EXE = "antigravity ide.exe"
@@ -414,6 +414,36 @@ _disk_cfg_cache = None
 _cid_cfg = {}  # cid -> cascadeConfig インメモリキャッシュ
 
 
+def _atomic_write_json(path, obj):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:8]}.tmp"
+    text = json.dumps(obj, ensure_ascii=False)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        delay = 0.01
+        last_err = None
+        for attempt in range(12):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as e:
+                last_err = e
+                if attempt < 11:
+                    time.sleep(delay + random.uniform(0, 0.01))
+                    delay = min(delay * 1.5, 1.2)
+        if last_err is not None:
+            raise last_err
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def _cached_config(cfg=None):
     """最後に読めた設定を覚えておく（cfg を渡すと保存、渡さないと読む）。
     Antigravity を起動し直した直後は、言語サーバーに入力のある会話がまだ読み込まれておらず、新規会話に借りる設定がないので"""
@@ -421,8 +451,7 @@ def _cached_config(cfg=None):
     try:
         if cfg:
             if cfg != _disk_cfg_cache:
-                with open(CFG_CACHE, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False)
+                _atomic_write_json(CFG_CACHE, cfg)
                 _disk_cfg_cache = cfg
             return cfg
         if _disk_cfg_cache is not None:

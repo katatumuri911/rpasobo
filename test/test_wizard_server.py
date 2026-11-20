@@ -108,6 +108,17 @@ class WizardTestBase(unittest.TestCase):
         server.wizard_save(d)
         return d
 
+    def _wait_job_finished(self, job, timeout=5.0):
+        """バックグラウンドのウィザードジョブが終わるまで待つ（固定時間待ちの代わり）。
+
+        run() は status を queued → running → (done/canceled/error) と遷移させるので、
+        running 以外になるまで短い間隔で見る。
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline and job.get("status") in ("queued", "running"):
+            time.sleep(0.001)
+        return job
+
 
 class TestSourceModel(WizardTestBase):
     def test_defaults_are_not_stored(self):
@@ -650,8 +661,12 @@ class TestDraftResume(WizardTestBase):
         d = server.wizard_load(old)
         server.wslot_set(d, "rough_idea", "残す話", "user")
         server.wizard_save(d)
-        time.sleep(1.1)
-        server.wizard_start({"base_sid": sid, "force_new": True})
+        # 「内容ありの古い下書き」と「空の新しい下書き」を作る。並び順は updated で決まるので、
+        # 実時間を待つのではなく updated を明示して新陳を固定する（結果は同じで高速・決定的）
+        base_t = time.time()
+        self.put_updated(old, base_t)
+        new = server.wizard_start({"base_sid": sid, "force_new": True})["draft"]["id"]
+        self.put_updated(new, base_t + 60)
         r = server.wizard_start({"base_sid": sid})
         self.assertTrue(r["resumed"])
         self.assertEqual(r["draft"]["id"], old)
@@ -915,7 +930,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
         # When wizard_do_compose raises WizardError(code="canceled"), run() sets status to "canceled", not "error"
         with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=server.WizardError("キャンセルしました", code="canceled")):
             job, _ = server.wizard_start_job(d, "compose")
-            time.sleep(0.1)
+            self._wait_job_finished(job)
             self.assertEqual(job["status"], "canceled")
             self.assertIsNone(job["error"])
 
@@ -928,7 +943,7 @@ class TestJobCancelAndWorkerRecheck(WizardTestBase):
 
         with mock.patch.object(channel_wizard, "wizard_do_compose", side_effect=fail_with_cancel):
             job2, _ = server.wizard_start_job(d2, "compose")
-            time.sleep(0.1)
+            self._wait_job_finished(job2)
             self.assertEqual(job2["status"], "canceled")
             self.assertIsNone(job2["error"])
 

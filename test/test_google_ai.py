@@ -1263,7 +1263,7 @@ class TestGoogleFetchSignatureCache(unittest.TestCase):
 
         def fake_req(model, pl, timeout=180, *, provider="google"):
             calls.append(copy.deepcopy(pl))
-            time.sleep(0.05)
+            time.sleep(0.02)  # timeout(0.01秒) を確実に超える最小限の待ち
             raise google_ai.GoogleAPIError("thought_signature invalid", status=400, retryable=False)
 
         with patch("google_ai.request", side_effect=fake_req):

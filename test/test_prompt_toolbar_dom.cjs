@@ -191,7 +191,7 @@ const PromptToolbar = require("../public/prompt_toolbar.js");
   let savedKeep = null;
   const tb = PromptToolbar.attach(textarea, {
     sessionId: "sess_123",
-    channelSetting: { image: { pov_mode: "auto", pov_keep: true } },
+    channelSetting: { image: { pov_mode: "auto", pov_keep: true, pov_keep_explicit: true } },
     onSaveSetting: async (m, k) => {
       savedMode = m;
       savedKeep = k;
@@ -286,6 +286,37 @@ const PromptToolbar = require("../public/prompt_toolbar.js");
   textarea.value = "1girl, pov, smile";
   PromptToolbar.syncTextareaUI(textarea);
   assert.strictEqual(tb.povBtn.classList.contains("is-active"), true);
+
+  // 9. 規定維持がOFF（既定）なら、POVボタンはチャンネルの規定を変えない
+  async function attachWithoutKeep(channelSetting) {
+    const c = document.createElement("div");
+    const ta = document.createElement("textarea");
+    ta.value = "1girl, smile";
+    c.appendChild(ta);
+    document.body.appendChild(c);
+    let saves = 0;
+    const bar = PromptToolbar.attach(ta, {
+      sessionId: "sess_456",
+      channelSetting,
+      onSaveSetting: async () => { saves += 1; },
+    });
+    return { tb: bar, ta, saves: () => saves };
+  }
+
+  const offCase = await attachWithoutKeep({ image: { pov_mode: "auto", pov_keep: false, pov_keep_explicit: false } });
+  assert.strictEqual(offCase.tb.keepCheck.checked, false, "規定維持は既定でOFF");
+  offCase.tb.povBtn.dispatchEvent(new Event("click"));
+  assert(offCase.ta.value.includes("pov"), "ボタンはこの画像のプロンプトだけを切り替える");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(offCase.saves(), 0, "規定維持OFFでは規定を保存しない");
+  assert.strictEqual(offCase.tb.povDefaultSelect.value, "auto", "規定（既定）は変わらない");
+
+  // 旧既定（pov_keep=True だが明示選択の印なし）も規定維持OFF扱い
+  const legacyCase = await attachWithoutKeep({ image: { pov_mode: "auto", pov_keep: true } });
+  assert.strictEqual(legacyCase.tb.keepCheck.checked, false, "旧既定のTrueはOFF扱い");
+  legacyCase.tb.povBtn.dispatchEvent(new Event("click"));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(legacyCase.saves(), 0, "旧既定のTrueでも規定を保存しない");
 
   console.log("All DOM integration and Undo tests passed successfully!");
 })().catch((err) => {
