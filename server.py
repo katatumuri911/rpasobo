@@ -1432,6 +1432,8 @@ def session_needs_migration(s):
         if "state" in m:
             return True
         im = m.get("image")
+        if isinstance(im, str) and im.strip():
+            return True
         if isinstance(im, dict):
             if any(k not in ("file", "status", "error") for k in im):
                 return True
@@ -1479,7 +1481,10 @@ def migrate_session(sid, s):
                 sdata[mid] = copy.deepcopy(st_val)
                 states_count += 1
         im = m.get("image")
-        if isinstance(im, dict):
+        if isinstance(im, str) and im.strip():
+            # 旧形式: 画像パスの文字列だけが入っている
+            m["image"] = {"file": im.strip(), "status": "done"}
+        elif isinstance(im, dict):
             details = {k: v for k, v in im.items() if k not in ("file", "status", "error")}
             if details:
                 cur_im = idata.get(mid, {})
@@ -9923,7 +9928,7 @@ def summary_of(s):
         "rev": s.get("rev"), "updated": s.get("updated"), "created": s.get("created"),
         "count": len(msgs),
         "waiting": any((m["role"] == "user" and m.get("status") in ("pending", "processing")) or (m.get("image_refine_status") in ("pending", "processing")) or (m.get("choices_status") in ("pending", "processing")) or (m["role"] == "assistant" and (m.get("memory_status") in ("pending", "processing") or m.get("consolidation_status") in ("pending", "processing"))) for m in msgs),
-        "generating": any((m.get("image") or {}).get("status") in ("queued", "generating") for m in msgs),
+        "generating": any(isinstance(m.get("image"), dict) and m["image"].get("status") in ("queued", "generating") for m in msgs),
         "last": (msgs[-1]["text"][:60] if msgs else ""),
         "ide_title": st.get("ide_title", "") if st.get("ide_session") else "",
         "choices_ide_title": st.get("choices_ide_title", "") if st.get("choices_ide_session") else "",
@@ -9950,9 +9955,13 @@ def clean_import(obj):
         if m["role"] == "user":
             m["status"] = "answered"
             m.pop("error", None)
-        if m.get("image") and m["image"].get("status") in ("queued", "generating"):
-            m["image"]["status"] = "error"
-            m["image"]["error"] = "取り込み時に未完成"
+        im = m.get("image")
+        if isinstance(im, str) and im.strip():
+            # 旧形式: 画像パスの文字列だけが入っている
+            m["image"] = {"file": im.strip(), "status": "done"}
+        elif isinstance(im, dict) and im.get("status") in ("queued", "generating"):
+            im["status"] = "error"
+            im["error"] = "取り込み時に未完成"
         for fld in ("choices", "choices_erotic"):
             if fld in m:
                 norm = normalize_choices(m[fld])

@@ -11887,7 +11887,7 @@ if (typeof window !== 'undefined') {
     );
     const hidden = typeof document !== "undefined" && document.hidden;
     const isErr = $("statusPill")?.classList?.contains("err");
-    const delay = isErr ? (hidden ? 5000 : 1500) : (hidden ? (isWaiting ? 1000 : 5000) : (isWaiting ? 100 : 1500));
+    const delay = isErr ? (hidden ? 5000 : 1500) : (hidden ? (isWaiting ? 1000 : 5000) : (isWaiting ? 450 : 1500));
     pollTimer = setTimeout(pollLoop, delay);
   }
 
@@ -11896,7 +11896,7 @@ if (typeof window !== 'undefined') {
   initHistoryAutoload();
   pollLoop();
   setInterval(pollProgress, 800);
-  setInterval(refreshSessions, 3000);
+  setInterval(refreshSessions, 10000);
   setInterval(() => {
     if (typeof document !== "undefined" && !document.hidden && !$("settingsPanel").classList.contains("hidden")) {
       loadIdeSessions();

@@ -505,11 +505,11 @@ ${appJsSrc.slice(appJsSrc.indexOf("async function poll()"), appJsSrc.indexOf("le
 
   it("Delay calculation backs off during error state", () => {
     const computeDelay = (isErr, isWaiting, hidden) => {
-      return isErr ? (hidden ? 5000 : 1500) : (hidden ? (isWaiting ? 1000 : 5000) : (isWaiting ? 100 : 1500));
+      return isErr ? (hidden ? 5000 : 1500) : (hidden ? (isWaiting ? 1000 : 5000) : (isWaiting ? 450 : 1500));
     };
 
     // Normal state
-    assert.strictEqual(computeDelay(false, true, false), 100, "waiting in foreground = 100ms");
+    assert.strictEqual(computeDelay(false, true, false), 450, "waiting in foreground = 450ms");
     assert.strictEqual(computeDelay(false, false, false), 1500, "idle in foreground = 1500ms");
     assert.strictEqual(computeDelay(false, true, true), 1000, "waiting in background = 1000ms");
     assert.strictEqual(computeDelay(false, false, true), 5000, "idle in background = 5000ms");
