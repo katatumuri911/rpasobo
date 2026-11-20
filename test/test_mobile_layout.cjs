@@ -273,19 +273,29 @@ t("hideReveal で受け皿も隠れる", els.revealBackdrop.classList.contains("
 
 console.log("[6] モバイル表示は id セレクタで上書きする（class だと display:none に負ける）");
 const css = fs.readFileSync(path.join(__dirname, "..", "public", "style.css"), "utf8");
-// 最後の @media (max-width: 768px) ブロックを波括弧対応で切り出す（モバイル小物の定義がある場所）
-function lastMediaBlock(text) {
-  const at = text.lastIndexOf("@media (max-width: 768px)");
-  if (at < 0) throw new Error("モバイル用 @media が無い");
-  const open = text.indexOf("{", at);
-  let depth = 0;
-  for (let i = open; i < text.length; i++) {
-    if (text[i] === "{") depth++;
-    else if (text[i] === "}" && --depth === 0) return text.slice(open + 1, i);
+// モバイル用 @media (max-width: 768px) をすべて走査し、対象セレクタを含むブロックを切り出す
+function mobileBlockFor(text) {
+  // すべての @media (max-width: 768px) ブロックを集め、対象セレクタを含むものを返す
+  const blocks = [];
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf("@media (max-width: 768px)", from);
+    if (at < 0) break;
+    const open = text.indexOf("{", at);
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      else if (text[i] === "}" && --depth === 0) { end = i; break; }
+    }
+    if (end < 0) throw new Error("@media ブロックの閉じ括弧が無い");
+    blocks.push(text.slice(open + 1, end));
+    from = end + 1;
   }
-  throw new Error("@media ブロックの閉じ括弧が無い");
+  if (!blocks.length) throw new Error("モバイル用 @media が無い");
+  return blocks.find((b) => b.includes("#mobileActionToggle")) || blocks[blocks.length - 1];
 }
-const mediaBlock = lastMediaBlock(css);
+const mediaBlock = mobileBlockFor(css);
 function declares(block, selector, prop) {
   const at = block.indexOf(selector);
   if (at < 0) return false;

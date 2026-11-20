@@ -14,7 +14,7 @@ class StubEl {
     this.className = "";
     this._textContent = "";
     this.title = "";
-    this.style = {};
+    this.style = { removeProperty() {} };
     this.attrs = {};
     this.listeners = {};
     this.onclick = null;
@@ -178,6 +178,7 @@ getOrCreate("ragHitsModal").classList.add("modal", "hidden");
 getOrCreate("textModal").classList.add("modal", "hidden");
 getOrCreate("settingsPanel").classList.add("hidden");
 getOrCreate("lightbox").classList.add("hidden");
+getOrCreate("wizardRoot").classList.add("hidden");
 
 // app.js から対象関数を抽出して評価
 const vm = require("vm");
