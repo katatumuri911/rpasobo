@@ -4717,6 +4717,13 @@ function buildMoreMenu(m, isLast, s) {
   // 会話系
   if (m.role !== "user" && menuMsgIdx >= 0 && allMsgsForMenu.slice(0, menuMsgIdx).some((x) => x.role === "user")) {
     item("🔄 再生成", async () => {
+      const busyTurn = (typeof hasWaitingInput === "function" && hasWaitingInput())
+        || (typeof sending !== "undefined" && sending)
+        || (typeof stopping !== "undefined" && stopping);
+      if (busyTurn) {
+        toast("応答中は再生成できません。停止してから操作してください。", 4000);
+        return;
+      }
       if (!confirm("この応答以降の会話を削除して、AI応答を作り直しますか？")) return;
       const ch = sid;
       let r;
@@ -4755,8 +4762,20 @@ function buildMoreMenu(m, isLast, s) {
     });
   }
   item("🗑️ 削除", async () => {
+    const busyTurn = (typeof hasWaitingInput === "function" && hasWaitingInput())
+      || (typeof sending !== "undefined" && sending)
+      || (typeof stopping !== "undefined" && stopping);
+    if (busyTurn) {
+      toast("応答中は削除できません。停止してから操作してください。", 4000);
+      return;
+    }
     if (!confirm("このメッセージを削除？")) return;
     const ch = sid, r = await post("/api/delete", { id: m.id });
+    if (r && r.error) {
+      toast(r.error, { kind: "warn", ms: 4000 });
+      await poll();
+      return;
+    }
     await poll();
     await revertIde(r, ch);
   }, { danger: true });
@@ -7163,19 +7182,31 @@ async function send() {
   capacityToastPhase = "";
   capacityToastAttempt = -1;
   lastStepToastKey = "";
-  // 送信した瞬間に前のターンの行を全部消す（ターンをまたいで混ぜない）。
-  progressHistory = [];
-  progressStateLabel = "";
-  progressStateKey = "";
-  progressTurnId = "";
-  progressSeenKeys = new Set();
-  progressHtml = "";
-  progressEpoch++;
-  if ($("progress")) $("progress").innerHTML = "";
   syncSendButton();
   try {
     const r = await post("/api/send", { text, files: attaching.map((a) => a.file) });
-    if (r.error) return alert("送れませんでした: " + r.error);
+    if (r.error) {
+      if (r.code === "pending_turn_exists") {
+        if (typeof toast === "function") {
+          toast(r.error || "返信待ちのメッセージがあります。停止するか返信をお待ちください", { kind: "warn", ms: 4000 });
+        } else {
+          alert("送れませんでした: " + r.error);
+        }
+        syncSendButton();
+        await poll();
+        return;
+      }
+      return alert("送れませんでした: " + r.error);
+    }
+    // 送信が通ってから前のターンの行を消す（409 エラー時の点滅・白紙化を防ぐ）
+    progressHistory = [];
+    progressStateLabel = "";
+    progressStateKey = "";
+    progressTurnId = "";
+    progressSeenKeys = new Set();
+    progressHtml = "";
+    progressEpoch++;
+    if ($("progress")) $("progress").innerHTML = "";
     {
       const st = r.session?.setting || state?.setting || {};   // session が無い経路でも落ちない
       const api = ["google", "vertex"].includes(st.ai_provider || "antigravity");
@@ -7629,6 +7660,13 @@ function choicesBox(m, targetContainer) {
   headRow.appendChild(sw);
 
   async function startChoicesRegen(kind) {
+    const busyTurn = (typeof hasWaitingInput === "function" && hasWaitingInput())
+      || (typeof sending !== "undefined" && sending)
+      || (typeof stopping !== "undefined" && stopping);
+    if (busyTurn) {
+      toast("応答中は選択肢を再生成できません。停止してから操作してください。", 4000);
+      return;
+    }
     const type = kind === "erotic" ? "erotic" : "normal";
     // 1) 先に状態を全部決める
     m.choices_status = "pending";
@@ -8411,6 +8449,10 @@ function openEdit(m) {
     toast("応答中は編集できません。停止してから操作してください。", 4000);
     return;
   }
+  if (m && m.role !== "user" && busyTurn) {
+    toast("応答中は改変できません。停止してから操作してください。", 4000);
+    return;
+  }
   editTarget = m;
   $("editTitle").textContent = m.role === "user" ? "過去の入力を編集" : "AI応答を改変";
   $("editHint").textContent = m.role === "user"
@@ -8432,6 +8474,10 @@ async function saveEdit() {
     || (typeof sending !== "undefined" && sending)
     || (typeof stopping !== "undefined" && stopping);
   if (m.role === "user" && busyTurn) {
+    toast("応答中は保存できません。停止してから操作してください。", 4000);
+    return;
+  }
+  if (busyTurn) {
     toast("応答中は保存できません。停止してから操作してください。", 4000);
     return;
   }

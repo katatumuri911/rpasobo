@@ -7585,11 +7585,24 @@ def process_outbox():
                         target_sid = session_of_msg(cand_mid)
                 if not target_sid:
                     base = name[:-5] if name.lower().endswith(".json") else name
-                    parts = base.split("_reply_") if "_reply_" in base else base.split("_")
-                    if len(parts) >= 1 and os.path.exists(spath(parts[0])):
-                        target_sid = parts[0]
-                        if len(parts) >= 2 and not cand_mid:
-                            cand_mid = parts[-1]
+                    for cand in sorted(list_ids(), key=len, reverse=True):
+                        if base == cand or base.startswith(cand + "_"):
+                            if cand not in deleted_sessions:
+                                target_sid = cand
+                                break
+                    if target_sid and not cand_mid:
+                        rest_name = base[len(target_sid) + 1:] if base.startswith(target_sid + "_") else base
+                        tokens = [t for t in rest_name.split("_") if t]
+                        if os.path.exists(spath(target_sid)):
+                            try:
+                                s_tmp = load(target_sid)
+                                u_mids = {mb["id"] for mb in s_tmp.get("messages", []) if mb.get("role") == "user"}
+                                for tok in tokens:
+                                    if tok in u_mids:
+                                        cand_mid = tok
+                                        break
+                            except Exception:
+                                pass
                 if target_sid and target_sid not in deleted_sessions and os.path.exists(spath(target_sid)):
                     try:
                         with lock:
@@ -7624,12 +7637,44 @@ def process_outbox():
 
         with lock:
             sid = rep.get("session") or rep.get("session_id") or (rep.get("reply_to") and session_of_msg(rep["reply_to"]))
+            # F-03: JSON本文に session が無い場合、実在セッション一覧との最長一致でアンダースコア入りIDを安全に解決
+            if not sid:
+                base_name = name[:-5] if name.lower().endswith(".json") else name
+                for cand in sorted(list_ids(), key=len, reverse=True):
+                    if base_name == cand or base_name.startswith(cand + "_"):
+                        if cand not in deleted_sessions:
+                            sid = cand
+                            break
+
             if not sid or sid in deleted_sessions or not os.path.exists(spath(sid)):
                 print(f"[outbox] no session for {name}")
                 safe_move(path, os.path.join(DONE, name + ".nosession"))
                 continue
             s = load(sid)
             reply_to = rep.get("reply_to")
+
+            # F-03: JSON本文に reply_to が無い場合の二段階トークン照合
+            if not reply_to:
+                base_name = name[:-5] if name.lower().endswith(".json") else name
+                rest_name = base_name[len(sid) + 1:] if base_name.startswith(sid + "_") else base_name
+                tokens = [t for t in rest_name.split("_") if t]
+
+                pending_u_ids = {m["id"] for m in s.get("messages", []) if m.get("role") == "user" and m.get("status") in ("pending", "processing")}
+                all_u_ids = {m["id"] for m in s.get("messages", []) if m.get("role") == "user" and m.get("id")}
+
+                # 1. 保留中ユーザー発言への一致を最優先（正常マッチ）
+                for tok in tokens:
+                    if tok in pending_u_ids:
+                        reply_to = tok
+                        break
+
+                # 2. 保留中になく、過去の回答済み発言に一致した場合は陳腐化応答として reply_to を設定（.stale 直行）
+                if not reply_to:
+                    for tok in tokens:
+                        if tok in all_u_ids:
+                            reply_to = tok
+                            break
+                # 3. どのメッセージIDにも一致しない（タイムスタンプ等）なら reply_to は None のまま（先頭フォールバック）
             # consolidation（世代交代の睡眠プロセス）タスクの応答
             if rep.get("type") == "consolidation":
                 cst = s["setting"]
@@ -8073,8 +8118,7 @@ def process_outbox():
                         m["error"] = "モデルが生成を拒否しました（コンテンツフィルタ）。本文を調整して再送してください。"
                         m.pop("claimed_ts", None)
                         m.pop("error_retries", None)
-                        if reply_to:
-                            break
+                        break
                 save(s)
                 _google_clear_status(sid, "user")
                 imported = True
@@ -8101,8 +8145,7 @@ def process_outbox():
                             m["poke_ts"] = time.time()
                             request_repoke(m["id"])
                             repoked_any = True
-                        if reply_to:
-                            break
+                        break
                 save(s)
                 if repoked_any:
                     sent = read_sent(sid)
@@ -8118,6 +8161,7 @@ def process_outbox():
                     m.pop("ide_pending_for", None)
                     m.pop("error_retries", None)
                     target_u = m
+                    break
             st = s["setting"]
             drawing = st.get("image_mode") != "off"
             updates = []
@@ -11888,39 +11932,62 @@ class H(BaseHTTPRequestHandler):
                     v_mdl = (s["setting"].get("vertex_model") or "").strip()
                     if not v_mdl or not google_ai.MODEL_ID_RE.fullmatch(v_mdl):
                         s["setting"]["vertex_model"] = google_ai.default_vertex_model()
-                m = {"id": new_id(), "role": "user", "text": text, "ts": now(), "status": "pending"}
-                if files:
-                    m["files"] = files
-                if has_parallel_choices_ide(s["setting"]):
-                    m["choices_status"] = "pending"
-                    m["choices_type"] = parallel_choices_type(s["setting"])
-                    m["choices_ts"] = now()
-                    m["choices_orig_id"] = m["id"]
-                for msg in s["messages"]:
-                    if (msg.get("choices_type") == "erotic" or msg.get("choices_slot") == "erotic") and msg.get("choices_status") in ("pending", "processing"):
-                        continue                      # 🔞は走っている/待っているものを殺さない
-                    msg.pop("choices_status", None)
-                    msg.pop("choices_type", None)
-                    msg.pop("choices_slot", None)
-                    msg.pop("choices_ts", None)
-                    msg.pop("choices_claimed_ts", None)
-                    msg.pop("choices_orig_id", None)
-                    msg.pop("staged_choices", None)
-                    msg.pop("staged_choices_dec", None)
-                    msg.pop("staged_choices_slot", None)
-                    msg.pop("staged_choices_notice", None)
-                    msg.pop("memory_status", None)
-                    msg.pop("memory_ts", None)
-                    msg.pop("memory_claimed_ts", None)
-                s["messages"].append(m)
-                collect_text_tag_misses(text, "user", s.get("setting"))
-                # total_turns は「通算ユーザーターン番号」の唯一の真実。増えるのは送信時だけ。
-                # 0 のときだけ total_turns_base で補填（旧セッションの巻き戻り防止）
-                in_file = user_turns_of(s["messages"])
-                prev_total = total_turns_base(s["setting"], max(0, in_file - 1))
-                s["setting"]["total_turns"] = max(prev_total, in_file - 1) + 1
-                rotation_maybe_arm(s)      # ← P2-1（30ターン目なら armed / 数ミリ秒）
-                save(s)
+
+                blocked = False
+                with lock:
+                    s = load(sid)
+                    if any(m.get("role") == "user" and m.get("status") in ("pending", "processing") for m in s.get("messages", [])):
+                        blocked = True
+                    else:
+                        if prov == "google" and not (s["setting"].get("google_model") or "").strip():
+                            try:
+                                s["setting"]["google_model"] = google_ai.default_model()
+                            except Exception:
+                                pass
+                        elif prov == "vertex":
+                            v_mdl = (s["setting"].get("vertex_model") or "").strip()
+                            if not v_mdl or not google_ai.MODEL_ID_RE.fullmatch(v_mdl):
+                                s["setting"]["vertex_model"] = google_ai.default_vertex_model()
+                        m = {"id": new_id(), "role": "user", "text": text, "ts": now(), "status": "pending"}
+                        if files:
+                            m["files"] = files
+                        if has_parallel_choices_ide(s["setting"]):
+                            m["choices_status"] = "pending"
+                            m["choices_type"] = parallel_choices_type(s["setting"])
+                            m["choices_ts"] = now()
+                            m["choices_orig_id"] = m["id"]
+                        for msg in s["messages"]:
+                            if (msg.get("choices_type") == "erotic" or msg.get("choices_slot") == "erotic") and msg.get("choices_status") in ("pending", "processing"):
+                                continue                      # 🔞は走っている/待っているものを殺さない
+                            msg.pop("choices_status", None)
+                            msg.pop("choices_type", None)
+                            msg.pop("choices_slot", None)
+                            msg.pop("choices_ts", None)
+                            msg.pop("choices_claimed_ts", None)
+                            msg.pop("choices_orig_id", None)
+                            msg.pop("staged_choices", None)
+                            msg.pop("staged_choices_dec", None)
+                            msg.pop("staged_choices_slot", None)
+                            msg.pop("staged_choices_notice", None)
+                            msg.pop("memory_status", None)
+                            msg.pop("memory_ts", None)
+                            msg.pop("memory_claimed_ts", None)
+                        s["messages"].append(m)
+                        collect_text_tag_misses(text, "user", s.get("setting"))
+                        # total_turns は「通算ユーザーターン番号」の唯一の真実。増えるのは送信時だけ。
+                        # 0 のときだけ total_turns_base で補填（旧セッションの巻き戻り防止）
+                        in_file = user_turns_of(s["messages"])
+                        prev_total = total_turns_base(s["setting"], max(0, in_file - 1))
+                        s["setting"]["total_turns"] = max(prev_total, in_file - 1) + 1
+                        rotation_maybe_arm(s)      # ← P2-1（30ターン目なら armed / 数ミリ秒）
+                        save(s)
+
+                if blocked:
+                    return self.send_json({
+                        "error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから送信してください。",
+                        "code": "pending_turn_exists"
+                    }, 409)
+
                 if is_api_provider(s["setting"]):
                     google_event.set()
                 else:
@@ -11932,70 +11999,92 @@ class H(BaseHTTPRequestHandler):
                 # 担当IDEがすでに生成中でも、この発言を消すので、あとから届いた応答は outbox 側で
                 # stale になり取り込まれない。入力した本文と添付は返して、画面の入力欄に戻せるようにする。
                 target_id = d.get("id")
-                if target_id:
-                    # 画面の発言ごとの「停止」からは、押した発言を狙って止める
-                    target = find_msg(s, target_id)
-                    if not target or target.get("role") != "user" or target.get("status") not in ("pending", "processing"):
-                        target = None
-                else:
-                    target = next((m for m in reversed(s["messages"])
-                                   if m.get("role") == "user" and m.get("status") in ("pending", "processing")), None)
-                if not target:
-                    return self.send_json({"error": "停止できる送信がありません（もう応答が届いています）"}, 409)
-                target_seen = target.get("status") == "processing"
-                rotation_abort_if_active(s, "送信が停止された")
-                backup(s, "stop")
-                ide_id = (s.get("setting") or {}).get("ide_session") or ""
                 revert_at = None
-                if (target_seen and ide_id and ide_poke
-                        and not is_api_provider(s.get("setting", {}))
-                        and s.get("setting", {}).get("ide_revert", True)):
-                    st_sum = ide_poke.summary(ide_id)
-                    if st_sum and st_sum.get("lastUserInputStepIndex") is not None:
-                        u_step = int(st_sum.get("lastUserInputStepIndex") or 0)
-                        if u_step > 0:
-                            revert_at = u_step - 1
+                ide_id = ""
+                no_target = False
+                with lock:
+                    s = load(sid)
+                    if target_id:
+                        # 画面の発言ごとの「停止」からは、押した発言を狙って止める
+                        target = find_msg(s, target_id)
+                        if not target or target.get("role") != "user" or target.get("status") not in ("pending", "processing"):
+                            target = None
+                    else:
+                        target = next((m for m in reversed(s["messages"])
+                                       if m.get("role") == "user" and m.get("status") in ("pending", "processing")), None)
+                    if not target:
+                        no_target = True
+                    else:
+                        target_seen = target.get("status") == "processing"
+                        rotation_abort_if_active(s, "送信が停止された")
+                        backup(s, "stop")
+                        ide_id = (s.get("setting") or {}).get("ide_session") or ""
+                        if (target_seen and ide_id and ide_poke
+                                and not is_api_provider(s.get("setting", {}))
+                                and s.get("setting", {}).get("ide_revert", True)):
+                            st_sum = ide_poke.summary(ide_id)
+                            if st_sum and st_sum.get("lastUserInputStepIndex") is not None:
+                                u_step = int(st_sum.get("lastUserInputStepIndex") or 0)
+                                if u_step > 0:
+                                    revert_at = u_step - 1
 
-                rollback_sent_on_abort(sid, target["id"])
+                        rollback_sent_on_abort(sid, target["id"])
+                        target_idx = s["messages"].index(target)
+                        old_total = s["setting"].get("total_turns") or 0
+                        deleted_turn = calc_turn_idx(s["messages"], target_idx, old_total)
+                        later_user = any(m.get("role") == "user" for m in s["messages"][target_idx + 1:])
+                        s["messages"] = [m for m in s["messages"] if m.get("id") != target["id"]]
+                        memory_store.delete_by_mid(sid, target["id"])
+                        # 取り消したのはユーザーターン1つ分なので、通算ターンも1つ戻す
+                        new_total = max(0, old_total - 1)
+                        s["setting"]["total_turns"] = new_total
+                        if later_user:
+                            memory_store.shift_turn_indices(sid, deleted_turn, -1)
+                        else:
+                            memory_store.delete_after_turn(sid, new_total)
+                        for k in [k for k in claimed_at if k == target["id"] or k.startswith(target["id"] + ":")]:
+                            claimed_at.pop(k, None)
+                        restore_latest_snapshot(s)
+                        save(s)
+                        res_data = {
+                            "ok": True,
+                            "id": target["id"],
+                            "text": target.get("text", ""),
+                            "files": target.get("files") or [],
+                            "session": s
+                        }
+
+                if no_target:
+                    return self.send_json({"error": "停止できる送信がありません（もう応答が届いています）"}, 409)
 
                 if revert_at is not None:
                     trigger_async_revert(ide_id, target_step=revert_at)
-                target_idx = s["messages"].index(target)
-                old_total = s["setting"].get("total_turns") or 0
-                deleted_turn = calc_turn_idx(s["messages"], target_idx, old_total)
-                later_user = any(m.get("role") == "user" for m in s["messages"][target_idx + 1:])
-                s["messages"] = [m for m in s["messages"] if m.get("id") != target["id"]]
-                memory_store.delete_by_mid(sid, target["id"])
-                # 取り消したのはユーザーターン1つ分なので、通算ターンも1つ戻す
-                new_total = max(0, old_total - 1)
-                s["setting"]["total_turns"] = new_total
-                if later_user:
-                    memory_store.shift_turn_indices(sid, deleted_turn, -1)
-                else:
-                    memory_store.delete_after_turn(sid, new_total)
-                for k in [k for k in claimed_at if k == target["id"] or k.startswith(target["id"] + ":")]:
-                    claimed_at.pop(k, None)
-                restore_latest_snapshot(s)
-                save(s)
                 _google_clear_status(sid)
                 poke_event.set(); google_event.set()
-                return self.send_json({"ok": True, "id": target["id"], "text": target.get("text", ""),
-                                       "files": target.get("files") or [], "session": s})
+                return self.send_json(res_data)
             if p == "/api/message/alter":
-                rotation_abort_if_active(s, "会話の書き換えが行われた")
-                m = find_msg(s, d.get("id"))
-                text = d.get("text")
-                if not m or m.get("role") != "assistant":
-                    return self.send_json({"error": "no such assistant message"}, 404)
-                if not isinstance(text, str) or not text.strip():
-                    return self.send_json({"error": "text is required"}, 400)
-                rv = text.strip() != m["text"] and plan_revert(s, s["messages"].index(m) - 1)
-                m.setdefault("original_text", m["text"])
-                m["text"] = text.strip()
-                m["edited"] = True
-                m.pop("text_decensor", None)
-                _decensor_undo.pop((sid, m["id"], "text"), None)   # undo 枠も解放
-                save(s)
+                resp_err = None
+                with lock:
+                    s = load(sid)
+                    m = find_msg(s, d.get("id"))
+                    text = d.get("text")
+                    if not m or m.get("role") != "assistant":
+                        resp_err = ({"error": "no such assistant message"}, 404)
+                    elif any(msg.get("role") == "user" and msg.get("status") in ("pending", "processing") for msg in s.get("messages", [])):
+                        resp_err = ({"error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから操作してください。", "code": "pending_turn_exists"}, 409)
+                    elif not isinstance(text, str) or not text.strip():
+                        resp_err = ({"error": "text is required"}, 400)
+                    else:
+                        rotation_abort_if_active(s, "会話の書き換えが行われた")
+                        rv = text.strip() != m["text"] and plan_revert(s, s["messages"].index(m) - 1)
+                        m.setdefault("original_text", m["text"])
+                        m["text"] = text.strip()
+                        m["edited"] = True
+                        m.pop("text_decensor", None)
+                        _decensor_undo.pop((sid, m["id"], "text"), None)   # undo 枠も解放
+                        save(s)
+                if resp_err:
+                    return self.send_json(resp_err[0], resp_err[1])
                 return self.send_json({"ok": True, "revert": rv})
             if p == "/api/message/state":
                 # 応答のときのキャラの状態を手で直す（次の入力でそのまま AI に見せるので、巻き戻しはいらない）
@@ -12022,128 +12111,169 @@ class H(BaseHTTPRequestHandler):
                 save(s)
                 return self.send_json({"ok": True, "state": new_st})
             if p in ("/api/message/edit", "/api/message/regenerate", "/api/message/truncate"):
-                idx = next((i for i, m in enumerate(s["messages"]) if m["id"] == d.get("id")), -1)
-                if idx < 0:
-                    return self.send_json({"error": "no such message"}, 404)
-                # drop=true の truncate は「巻き戻し」: そのユーザー発言ごと消して、本文を入力欄に戻す。
-                # 応答待ちの発言がある間は切らない（生成中の応答が stale として残るため）
-                drop_target = None
-                if p == "/api/message/truncate" and d.get("drop"):
-                    cand = s["messages"][idx]
-                    if cand.get("role") != "user":
-                        return self.send_json({"error": "not a user message"}, 400)
-                    if cand.get("status") in ("pending", "processing") or any(
+                resp_err = None
+                with lock:
+                    s = load(sid)
+                    idx = next((i for i, m in enumerate(s["messages"]) if m["id"] == d.get("id")), -1)
+                    if idx < 0:
+                        resp_err = ({"error": "no such message"}, 404)
+                    else:
+                        other_pending = any(
+                            m.get("role") == "user" and m.get("status") in ("pending", "processing") and m.get("id") != d.get("id")
+                            for m in s.get("messages", [])
+                        )
+                        target_msg = s["messages"][idx]
+                        target_is_processing = target_msg.get("role") == "user" and target_msg.get("status") == "processing"
+                        has_any_pending = any(
                             m.get("role") == "user" and m.get("status") in ("pending", "processing")
-                            for m in s["messages"]):
-                        return self.send_json({"error": "応答中は巻き戻せません。停止してから操作してください。"}, 409)
-                    drop_target = cand
-                rotation_abort_if_active(s, "会話の書き換えが行われた")
-                before_turns = user_turns_of(s["messages"])  # ← 追加（書き換え前）
-                new_user, rv, removed_ids = None, False, []
-                if p == "/api/message/truncate":
-                    backup(s, "truncate")
-                    if drop_target is not None:
-                        removed_ids = [m["id"] for m in s["messages"][idx:]]
-                        rv = plan_revert(s, idx - 1)
-                        s["messages"] = s["messages"][:idx]
-                    else:
-                        rv = idx + 1 < len(s["messages"]) and plan_revert(s, idx)
-                        s["messages"] = s["messages"][:idx + 1]
-                elif p == "/api/message/edit":
-                    old = s["messages"][idx]
-                    text = d.get("text")
-                    if old["role"] != "user":
-                        return self.send_json({"error": "not a user message"}, 400)
-                    if not isinstance(text, str) or not text.strip():
-                        return self.send_json({"error": "text is required"}, 400)
-                    backup(s, "edit")
-                    rv = plan_revert(s, idx - 1)
-                    new_user = {"id": new_id(), "role": "user", "text": text.strip(), "ts": now(), "status": "pending"}
-                    if old.get("files"):
-                        new_user["files"] = old["files"]
-                    if has_parallel_choices_ide(s["setting"]):
-                        new_user["choices_status"] = "pending"
-                        new_user["choices_type"] = parallel_choices_type(s["setting"])
-                        new_user["choices_ts"] = now()
-                        new_user["choices_orig_id"] = new_user["id"]
-                    s["messages"] = s["messages"][:idx] + [new_user]
-                else:
-                    if s["messages"][idx]["role"] != "assistant":
-                        return self.send_json({"error": "not an assistant message"}, 400)
-                    user_idx = next((i for i in range(idx - 1, -1, -1) if s["messages"][i]["role"] == "user"), -1)
-                    if user_idx < 0:
-                        return self.send_json({"error": "no preceding user message"}, 400)
-                    backup(s, "regenerate")
-                    rv = plan_revert(s, user_idx - 1)
-                    target_mid = s["messages"][idx]["id"]
-                    s["messages"] = s["messages"][:user_idx + 1]
-                    new_user = s["messages"][-1]
-                    new_user["id"] = new_id()
-                    new_user["status"] = "pending"
-                    new_user.pop("pasted", None)  # 担当の会話は巻き戻すので、画像はもう一度貼る
-                    new_user.pop("staged_choices", None)
-                    new_user.pop("staged_choices_dec", None)
-                    new_user.pop("staged_choices_notice", None)
-                    new_user["ts"] = now()
-                    if has_parallel_choices_ide(s["setting"]):
-                        new_user["choices_status"] = "pending"
-                        new_user["choices_type"] = parallel_choices_type(s["setting"])
-                        new_user["choices_ts"] = now()
-                        new_user["choices_orig_id"] = new_user["id"]
-                    else:
-                        new_user.pop("choices_status", None)
-                        new_user.pop("choices_type", None)
-                        new_user.pop("choices_ts", None)
-                        new_user.pop("choices_claimed_ts", None)
-                        new_user.pop("choices_orig_id", None)
-                if new_user:
-                    for msg in s["messages"][:-1]:
-                        msg.pop("choices_status", None)
-                        msg.pop("choices_type", None)
-                        msg.pop("choices_slot", None)
-                        msg.pop("choices_ts", None)
-                        msg.pop("choices_claimed_ts", None)
-                        msg.pop("choices_orig_id", None)
-                        msg.pop("staged_choices", None)
-                        msg.pop("staged_choices_dec", None)
-                        msg.pop("staged_choices_notice", None)
-                remaining_turn = user_turns_of(s["messages"])
-                # 削除したユーザーターン数だけ通算を戻す（in_file から再計算しない＝巻き戻り事故の防止）
-                removed = max(0, before_turns - remaining_turn)
-                prev_total = total_turns_base(s["setting"], before_turns)
-                s["setting"]["total_turns"] = max(0, prev_total - removed)
-                current_total = s["setting"]["total_turns"]
-                if p == "/api/message/regenerate":
-                    memory_store.delete_by_mid(sid, target_mid)
-                    memory_store.delete_after_turn(sid, max(0, current_total - 1))
-                elif p == "/api/message/edit":
-                    memory_store.delete_after_turn(sid, max(0, current_total - 1))
-                else:
-                    # 巻き戻し（drop）で消した発言の記憶も落とす
-                    for mid in removed_ids:
-                        memory_store.delete_by_mid(sid, mid)
-                        for k in [k for k in list(claimed_at) if k == mid or k.startswith(mid + ":")]:
-                            claimed_at.pop(k, None)
-                    # truncate: if ending on a user message, its assistant response was cut
-                    if s["messages"] and s["messages"][-1].get("role") == "user":
-                        memory_store.delete_after_turn(sid, max(0, current_total - 1))
-                    else:
-                        memory_store.delete_after_turn(sid, current_total)
-                restore_latest_snapshot(s, preserve_total_turns=True)
-                save(s)
+                            for m in s.get("messages", [])
+                        )
+
+                        if p == "/api/message/truncate":
+                            if has_any_pending:
+                                if d.get("drop"):
+                                    resp_err = ({"error": "応答中は巻き戻せません。停止してから操作してください。", "code": "pending_turn_exists"}, 409)
+                                else:
+                                    resp_err = ({"error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから操作してください。", "code": "pending_turn_exists"}, 409)
+                        elif p == "/api/message/regenerate":
+                            if s["messages"][idx]["role"] != "assistant":
+                                resp_err = ({"error": "not an assistant message"}, 400)
+                            else:
+                                user_idx = next((i for i in range(idx - 1, -1, -1) if s["messages"][i]["role"] == "user"), -1)
+                                if user_idx < 0:
+                                    resp_err = ({"error": "no preceding user message"}, 400)
+                                elif any(m.get("role") == "user" and m.get("status") in ("pending", "processing") and i != user_idx for i, m in enumerate(s.get("messages", []))):
+                                    resp_err = ({"error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから操作してください。", "code": "pending_turn_exists"}, 409)
+                        elif p == "/api/message/edit":
+                            if other_pending or target_is_processing:
+                                resp_err = ({"error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから操作してください。", "code": "pending_turn_exists"}, 409)
+
+                        if not resp_err:
+                            drop_target = None
+                            if p == "/api/message/truncate" and d.get("drop"):
+                                cand = s["messages"][idx]
+                                if cand.get("role") != "user":
+                                    resp_err = ({"error": "not a user message"}, 400)
+                                else:
+                                    drop_target = cand
+                            elif p == "/api/message/edit":
+                                old = s["messages"][idx]
+                                text = d.get("text")
+                                if old["role"] != "user":
+                                    resp_err = ({"error": "not a user message"}, 400)
+                                elif not isinstance(text, str) or not text.strip():
+                                    resp_err = ({"error": "text is required"}, 400)
+                            elif p == "/api/message/regenerate":
+                                if s["messages"][idx]["role"] != "assistant":
+                                    resp_err = ({"error": "not an assistant message"}, 400)
+                                else:
+                                    user_idx = next((i for i in range(idx - 1, -1, -1) if s["messages"][i]["role"] == "user"), -1)
+                                    if user_idx < 0:
+                                        resp_err = ({"error": "no preceding user message"}, 400)
+
+                        if not resp_err:
+                            rotation_abort_if_active(s, "会話の書き換えが行われた")
+                            before_turns = user_turns_of(s["messages"])  # ← 追加（書き換え前）
+                            new_user, rv, removed_ids = None, False, []
+                            if p == "/api/message/truncate":
+                                backup(s, "truncate")
+                                if drop_target is not None:
+                                    removed_ids = [m["id"] for m in s["messages"][idx:]]
+                                    rv = plan_revert(s, idx - 1)
+                                    s["messages"] = s["messages"][:idx]
+                                else:
+                                    rv = idx + 1 < len(s["messages"]) and plan_revert(s, idx)
+                                    s["messages"] = s["messages"][:idx + 1]
+                            elif p == "/api/message/edit":
+                                old = s["messages"][idx]
+                                text = d.get("text")
+                                backup(s, "edit")
+                                rv = plan_revert(s, idx - 1)
+                                new_user = {"id": new_id(), "role": "user", "text": text.strip(), "ts": now(), "status": "pending"}
+                                if old.get("files"):
+                                    new_user["files"] = old["files"]
+                                if has_parallel_choices_ide(s["setting"]):
+                                    new_user["choices_status"] = "pending"
+                                    new_user["choices_type"] = parallel_choices_type(s["setting"])
+                                    new_user["choices_ts"] = now()
+                                    new_user["choices_orig_id"] = new_user["id"]
+                                s["messages"] = s["messages"][:idx] + [new_user]
+                            else:
+                                user_idx = next((i for i in range(idx - 1, -1, -1) if s["messages"][i]["role"] == "user"), -1)
+                                backup(s, "regenerate")
+                                rv = plan_revert(s, user_idx - 1)
+                                target_mid = s["messages"][idx]["id"]
+                                s["messages"] = s["messages"][:user_idx + 1]
+                                new_user = s["messages"][-1]
+                                new_user["id"] = new_id()
+                                new_user["status"] = "pending"
+                                new_user.pop("pasted", None)  # 担当の会話は巻き戻すので、画像はもう一度貼る
+                                new_user.pop("staged_choices", None)
+                                new_user.pop("staged_choices_dec", None)
+                                new_user.pop("staged_choices_notice", None)
+                                new_user["ts"] = now()
+                                if has_parallel_choices_ide(s["setting"]):
+                                    new_user["choices_status"] = "pending"
+                                    new_user["choices_type"] = parallel_choices_type(s["setting"])
+                                    new_user["choices_ts"] = now()
+                                    new_user["choices_orig_id"] = new_user["id"]
+                                else:
+                                    new_user.pop("choices_status", None)
+                                    new_user.pop("choices_type", None)
+                                    new_user.pop("choices_ts", None)
+                                    new_user.pop("choices_claimed_ts", None)
+                                    new_user.pop("choices_orig_id", None)
+                            if new_user:
+                                for msg in s["messages"][:-1]:
+                                    msg.pop("choices_status", None)
+                                    msg.pop("choices_type", None)
+                                    msg.pop("choices_slot", None)
+                                    msg.pop("choices_ts", None)
+                                    msg.pop("choices_claimed_ts", None)
+                                    msg.pop("choices_orig_id", None)
+                                    msg.pop("staged_choices", None)
+                                    msg.pop("staged_choices_dec", None)
+                                    msg.pop("staged_choices_notice", None)
+                            remaining_turn = user_turns_of(s["messages"])
+                            # 削除したユーザーターン数だけ通算を戻す（in_file から再計算しない＝巻き戻り事故の防止）
+                            removed = max(0, before_turns - remaining_turn)
+                            prev_total = total_turns_base(s["setting"], before_turns)
+                            s["setting"]["total_turns"] = max(0, prev_total - removed)
+                            current_total = s["setting"]["total_turns"]
+                            if p == "/api/message/regenerate":
+                                memory_store.delete_by_mid(sid, target_mid)
+                                memory_store.delete_after_turn(sid, max(0, current_total - 1))
+                            elif p == "/api/message/edit":
+                                memory_store.delete_after_turn(sid, max(0, current_total - 1))
+                            else:
+                                # 巻き戻し（drop）で消した発言の記憶も落とす
+                                for mid in removed_ids:
+                                    memory_store.delete_by_mid(sid, mid)
+                                    for k in [k for k in list(claimed_at) if k == mid or k.startswith(mid + ":")]:
+                                        claimed_at.pop(k, None)
+                                # truncate: if ending on a user message, its assistant response was cut
+                                if s["messages"] and s["messages"][-1].get("role") == "user":
+                                    memory_store.delete_after_turn(sid, max(0, current_total - 1))
+                                else:
+                                    memory_store.delete_after_turn(sid, current_total)
+                            restore_latest_snapshot(s, preserve_total_turns=True)
+                            save(s)
+                            result_data = {
+                                "ok": True,
+                                "id": new_user["id"] if new_user else (drop_target["id"] if drop_target else None),
+                                "text": (drop_target.get("text") or "") if drop_target else "",
+                                "files": (drop_target.get("files") or []) if drop_target else [],
+                                "drop": bool(drop_target),
+                                "revert": rv,
+                            }
+                if resp_err:
+                    return self.send_json(resp_err[0], resp_err[1])
                 if is_api_provider(s["setting"]):
                     google_event.set()
                 else:
                     ide_auto_event.set()
                     poke_event.set()
-                return self.send_json({
-                    "ok": True,
-                    "id": new_user["id"] if new_user else (drop_target["id"] if drop_target else None),
-                    "text": (drop_target.get("text") or "") if drop_target else "",
-                    "files": (drop_target.get("files") or []) if drop_target else [],
-                    "drop": bool(drop_target),
-                    "revert": rv,
-                })
+                return self.send_json(result_data)
             if p == "/api/message/regenerate-choices":
                 target_id = d.get("id")
                 if target_id:
@@ -12156,7 +12286,7 @@ class H(BaseHTTPRequestHandler):
                 if m["role"] != "assistant":
                     return self.send_json({"error": "not an assistant message"}, 400)
                 if any(msg["role"] == "user" and msg.get("status") in ("pending", "processing") for msg in s["messages"]):
-                    return self.send_json({"error": "現在、別のメッセージを応答中です"}, 400)
+                    return self.send_json({"error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから操作してください。", "code": "pending_turn_exists"}, 409)
                 if any(msg.get("choices_status") in ("pending", "processing") for msg in s["messages"]):
                     return self.send_json({"error": "現在、選択肢を生成中です"}, 400)
                 backup(s, "regenerate_choices")
@@ -12625,30 +12755,40 @@ class H(BaseHTTPRequestHandler):
                     save(s)
                 return self.send_json({"ok": True})
             if p == "/api/delete":
-                target = find_msg(s, d.get("id"))
-                if not target:
-                    return self.send_json({"error": "no such message"}, 404)
-                backup(s, "delete")
-                target_idx = s["messages"].index(target)
-                old_total = s["setting"].get("total_turns") or 0
-                deleted_turn = calc_turn_idx(s["messages"], target_idx, old_total)
-                # 削除した位置より後にユーザー発言が残っているか（途中削除か末尾削除か）
-                later_user = any(m.get("role") == "user" for m in s["messages"][target_idx + 1:])
-                rv = plan_revert(s, target_idx - 1)
-                s["messages"] = [m for m in s["messages"] if m["id"] != d.get("id")]
-                memory_store.delete_by_mid(sid, target["id"])
-                if later_user:
-                    # 途中削除: 以降のターン番号を詰める（delete_after_turn で以降の記憶を巻き込まない）
-                    if target.get("role") == "user":
-                        memory_store.shift_turn_indices(sid, deleted_turn, -1)
-                        s["setting"]["total_turns"] = max(0, old_total - 1)
-                else:
-                    new_total = calc_turn_idx(s["messages"], len(s["messages"]) - 1, old_total) if s["messages"] else 0
-                    mem_turn = max(0, new_total - 1) if (s["messages"] and s["messages"][-1].get("role") == "user") else new_total
-                    s["setting"]["total_turns"] = new_total
-                    memory_store.delete_after_turn(sid, mem_turn)
-                restore_latest_snapshot(s, preserve_total_turns=True)
-                save(s)
+                resp_err = None
+                with lock:
+                    s = load(sid)
+                    target = find_msg(s, d.get("id"))
+                    if not target:
+                        resp_err = ({"error": "no such message"}, 404)
+                    elif any(m.get("role") == "user" and m.get("status") in ("pending", "processing") for m in s.get("messages", [])):
+                        resp_err = ({"error": "応答待ちのメッセージがあります。AIの返信を待つか、停止してから操作してください。", "code": "pending_turn_exists"}, 409)
+                    else:
+                        backup(s, "delete")
+                        target_idx = s["messages"].index(target)
+                        old_total = s["setting"].get("total_turns") or 0
+                        deleted_turn = calc_turn_idx(s["messages"], target_idx, old_total)
+                        # 削除した位置より後にユーザー発言が残っているか（途中削除か末尾削除か）
+                        later_user = any(m.get("role") == "user" for m in s["messages"][target_idx + 1:])
+                        rv = plan_revert(s, target_idx - 1)
+                        s["messages"] = [m for m in s["messages"] if m["id"] != d.get("id")]
+                        memory_store.delete_by_mid(sid, target["id"])
+                        if later_user:
+                            # 途中削除: 以降のターン番号を詰める（delete_after_turn で以降の記憶を巻き込まない）
+                            if target.get("role") == "user":
+                                memory_store.shift_turn_indices(sid, deleted_turn, -1)
+                                s["setting"]["total_turns"] = max(0, old_total - 1)
+                        else:
+                            new_total = calc_turn_idx(s["messages"], len(s["messages"]) - 1, old_total) if s["messages"] else 0
+                            mem_turn = max(0, new_total - 1) if (s["messages"] and s["messages"][-1].get("role") == "user") else new_total
+                            s["setting"]["total_turns"] = new_total
+                            memory_store.delete_after_turn(sid, mem_turn)
+                        for k in [k for k in list(claimed_at) if k == target["id"] or k.startswith(target["id"] + ":")]:
+                            claimed_at.pop(k, None)
+                        restore_latest_snapshot(s, preserve_total_turns=True)
+                        save(s)
+                if resp_err:
+                    return self.send_json(resp_err[0], resp_err[1])
                 return self.send_json({"ok": True, "revert": rv})
             if p == "/api/chars/upsert":
                 c = d.get("char") if isinstance(d.get("char"), dict) else {}
