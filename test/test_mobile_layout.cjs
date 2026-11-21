@@ -289,7 +289,8 @@ function mobileBlockFor(text) {
       else if (text[i] === "}" && --depth === 0) { end = i; break; }
     }
     if (end < 0) throw new Error("@media ブロックの閉じ括弧が無い");
-    blocks.push(text.slice(open + 1, end));
+    // コメント内のセレクタ名で誤判定しないよう、ブロック単位でコメントを除去する
+    blocks.push(text.slice(open + 1, end).replace(/\/\*[\s\S]*?\*\//g, ""));
     from = end + 1;
   }
   if (!blocks.length) throw new Error("モバイル用 @media が無い");

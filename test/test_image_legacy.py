@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """L-07: 旧形式（文字列）image の取込・マイグレーション・要約の回帰テスト"""
+import json
+import os
 import unittest
 
 import server
@@ -55,6 +57,44 @@ class TestLegacyStringImage(IsolatedTestCase):
         loaded = server.load(s["id"], readonly=True)
         self.assertEqual(loaded["messages"][-1]["image"], {"file": "images/old.png", "status": "done"})
         self.assertFalse(server.session_needs_migration(loaded))
+
+    def test_load_migrates_id_less_string_image_once(self):
+        sid = "legacy_idless"
+        raw = {
+            "id": sid,
+            "setting": {},
+            "messages": [{
+                "role": "user", "text": "no id legacy", "ts": server.now(),
+                "status": "answered", "image": "images/old.png",
+            }],
+        }
+        with open(server.spath(sid), "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False)
+        server.session_cache.clear()
+        loaded = server.load(sid, readonly=True)
+        self.assertEqual(loaded["messages"][0]["image"], {"file": "images/old.png", "status": "done"})
+        self.assertFalse(server.session_needs_migration(loaded))
+
+        # 再起動相当のコールドロードを繰り返してもバックアップが増えない
+        server.session_cache.clear()
+        server.load(sid, readonly=True)
+        backups = [n for n in os.listdir(server.TRASH) if n.startswith("migration_backup_")]
+        self.assertEqual(len(backups), 1)
+
+    def test_process_images_ignores_invalid_image_type(self):
+        sid = "legacy_bad_image"
+        raw = {
+            "id": sid,
+            "setting": {},
+            "messages": [{
+                "id": "u1", "role": "user", "text": "bad", "ts": server.now(),
+                "status": "answered", "image": 123,
+            }],
+        }
+        with open(server.spath(sid), "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False)
+        server.session_cache.clear()
+        server.process_images()   # 例外が出ないこと
 
 
 if __name__ == "__main__":

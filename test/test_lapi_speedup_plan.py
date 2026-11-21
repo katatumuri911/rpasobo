@@ -177,6 +177,17 @@ class TestServerSentTransactionAndStop(unittest.TestCase):
         # 差分モードが維持され、破壊されないこと
         self.assertEqual("diff", ctx1_retry["mode"])
 
+    def test_idless_message_does_not_restore_stale_prev_sent(self):
+        """idなしメッセージでは inflight_mid=None でも prev_sent を誤復元しない（L-05）"""
+        s = server.create_session({"title": "L05", "ide_session": "ide-1"})
+        s["messages"].append(make_msg("user", "1ターン目", mid="u0"))
+        server.save(s)
+        stale = {"reset": True, "why": "STALE_PREV_SENT", "msgs": []}
+        fake_sent = {"inflight_mid": None, "prev_sent": stale}
+        with patch.object(server, "read_sent", return_value=fake_sent):
+            ctx = server.build_context(s, {"role": "user", "text": "idなし"})
+        self.assertNotIn("STALE_PREV_SENT", ctx.get("reason", ""))
+
     def test_rollback_sent_on_abort_restores_prev_sent(self):
         """Stop実行時に rollback_sent_on_abort が sent を前ターンの確定状態へ戻し reset: False を維持すること"""
         s = server.create_session({"title": "StopRollbackテスト", "ide_session": "ide-1"})

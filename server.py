@@ -106,6 +106,7 @@ ide_waiting = {}  # IDE会話ID -> wait_input.py が最後に問い合わせて�
 POKE_DELAY = 0  # 即時合図を送る（0秒）
 poke_event = threading.Event()  # 入力発生時に poke_worker を即時起床させるイベント
 google_event = threading.Event()  # Google API ワーカーを即時起床させるイベント
+outbox_event = threading.Event()  # ユーザー操作時に outbox_worker を即時起床させるイベント
 google_inflight = set()            # sid:task_key の二重実行防止
 google_inflight_guard = threading.RLock()
 google_retry_at = {}               # sid:task_key -> monotonic 再試行時刻
@@ -1898,6 +1899,15 @@ def save(s):
         summary_cache.pop(sid, None)
 
         msgs = s.get("messages", [])
+        # 旧形式（文字列）や不正な型の image を保存前に正規化する（L-07）
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            im = m.get("image")
+            if isinstance(im, str) and im.strip():
+                m["image"] = {"file": im.strip(), "status": "done"}
+            elif im is not None and not isinstance(im, dict):
+                m.pop("image", None)
         for m in msgs[-20:]:
             mid = m.get("id")
             if mid:
@@ -3167,8 +3177,8 @@ def last_image_prompt(msgs, idx, sid=None):
                 break
     idata = None
     for m in reversed(msgs[:idx]):
-        im = m.get("image") or {}
-        if im.get("prompt"):
+        im = m.get("image")
+        if isinstance(im, dict) and im.get("prompt"):
             return im["prompt"], im.get("chars") or []
         if sid:
             if idata is None:
@@ -5313,7 +5323,8 @@ def build_image_refine_context(s, m, base_prompt=None):
     # タイムスリップ防止: msgs[:idx+1] （その発言までの履歴）のみを参照
     history = msgs[:idx + 1]
 
-    current_prompt = base_prompt if (base_prompt is not None and str(base_prompt).strip()) else ((m.get("image") or {}).get("prompt") or "")
+    im_obj = m.get("image")
+    current_prompt = base_prompt if (base_prompt is not None and str(base_prompt).strip()) else ((im_obj.get("prompt") if isinstance(im_obj, dict) else "") or "")
     if not current_prompt and s.get("id") and mid:
         img_meta = load_images_data(s["id"], readonly=True).get(mid, {})
         current_prompt = img_meta.get("prompt", "")
@@ -5364,7 +5375,7 @@ def build_image_refine_context(s, m, base_prompt=None):
         sections.append({"label": "登録キャラクターの外見タグ（固定キャラ）", "text": "\n".join(c_lines)})
 
     # 対象画像に指定されているキャラ名
-    im_chars = (m.get("image") or {}).get("chars") or []
+    im_chars = (im_obj.get("chars") if isinstance(im_obj, dict) else []) or []
     if not im_chars and s.get("id") and mid:
         im_chars = load_images_data(s["id"], readonly=True).get(mid, {}).get("chars") or []
     if not im_chars:
@@ -8653,7 +8664,7 @@ def process_images():
             if os.path.exists(spath(q_sid)):
                 s = load(q_sid)
                 m = find_msg(s, q_mid)
-                if m and (m.get("image") or {}).get("status") == "queued":
+                if m and isinstance(m.get("image"), dict) and m["image"].get("status") == "queued":
                     target = (s, m)
                     break
         if not target:
@@ -8661,7 +8672,7 @@ def process_images():
                 s = load(sid, readonly=True)
                 for m in reversed(s["messages"]):
                     im = m.get("image")
-                    if im and im.get("status") == "queued":
+                    if isinstance(im, dict) and im.get("status") == "queued":
                         s = load(sid)
                         target = (s, find_msg(s, m["id"]))
                         break
@@ -9533,9 +9544,11 @@ def ph_log(task_type, applied, restored, left, length=0, raw_len_before=0, elaps
 
 
 def run_google_task(sid, mid, task_type=None, key=None):
-    if task_type not in ("user", "choices", "image_refine") \
-            and mid in ("user", "choices", "image_refine"):
-        task_type, mid = mid, task_type
+    if task_type not in ("user", "choices", "image_refine"):
+        if mid in ("user", "choices", "image_refine"):
+            task_type, mid = mid, task_type   # 旧引数順（mid, task_type）の互換
+        else:
+            return
     try:
         with lock:
             s = load(sid)
@@ -9818,8 +9831,31 @@ def google_worker():
             executor.submit(_runner)
 
 
+OUTBOX_ACTIVE_WINDOW = 600   # 操作後10分は通常速度（P-08 確定仕様）
+OUTBOX_DEEP_IDLE = 5.0       # 10分以上アイドル時の走査間隔
+_outbox_active_until = 0.0
+
+
+def touch_outbox_activity():
+    """ユーザー操作があったことを記録し、outbox ワーカーを即時起床させる"""
+    global _outbox_active_until
+    _outbox_active_until = time.monotonic() + OUTBOX_ACTIVE_WINDOW
+    outbox_event.set()
+
+
+def _outbox_delay(empty_sec, active):
+    """空 outbox を次に走査するまでの待ち時間（秒）"""
+    if active:
+        return 0.05 if empty_sec < 0.3 else 0.3   # 従来と同じ
+    if empty_sec < 60:
+        return 0.3
+    if empty_sec < OUTBOX_ACTIVE_WINDOW:
+        return 1.0
+    return OUTBOX_DEEP_IDLE                        # 10分以上: 5秒
+
+
 def outbox_worker():
-    idle_count = 0
+    empty_since = time.monotonic()
     while True:
         try:
             had_files = process_outbox()
@@ -9827,13 +9863,13 @@ def outbox_worker():
             print(f"[outbox worker] {e}")
             had_files = False
         if had_files:
-            idle_count = 0
-        else:
-            idle_count += 1
-            if idle_count > 5:
-                time.sleep(0.3)
-            else:
-                time.sleep(0.05)
+            empty_since = time.monotonic()
+            continue                               # 連続ファイルは即処理
+        active = time.monotonic() < _outbox_active_until
+        delay = _outbox_delay(time.monotonic() - empty_since, active)
+        if outbox_event.wait(delay):
+            empty_since = time.monotonic()          # 起床したら fast に戻す
+            outbox_event.clear()
 
 
 def _memory_task_alive(sid, mid):
@@ -9962,6 +9998,8 @@ def clean_import(obj):
         elif isinstance(im, dict) and im.get("status") in ("queued", "generating"):
             im["status"] = "error"
             im["error"] = "取り込み時に未完成"
+        elif im is not None:
+            m.pop("image", None)
         for fld in ("choices", "choices_erotic"):
             if fld in m:
                 norm = normalize_choices(m[fld])
@@ -11095,6 +11133,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p = u.path
+        touch_outbox_activity()
         q = parse_qs(u.query)
         if self.blocked(u, post=True):
             return

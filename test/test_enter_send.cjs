@@ -37,12 +37,14 @@ class El {
 
 const messageInput = new El("messageInput");
 let sendCount = 0;
+let hideAgQuotaCalls = 0;
 const sandbox = {
   console,
   setTimeout: (fn, delay) => { fn(); },
   clearTimeout: (id) => {},
   $: (id) => (id === "messageInput" ? messageInput : null),
   send: () => { sendCount++; },
+  hideAgQuota: () => { hideAgQuotaCalls++; },
   setTypingInput: () => {},
   updateFabState: () => {},
   syncActionControlsVisibility: () => {},
@@ -121,7 +123,9 @@ test("PC判定時はEnterでsend()が呼ばれpreventDefaultされる", sendCoun
 
 // 9. blur 時に inputIsComposing がリセットされる
 messageInput.fire("compositionstart");
+hideAgQuotaCalls = 0;
 messageInput.fire("blur");
+test("blurでhideAgQuotaが呼ばれる", hideAgQuotaCalls === 1);
 sendCount = 0;
 prevented = messageInput.fire("keydown", { key: "Enter", shiftKey: false, isComposing: false, keyCode: 13 });
 test("blur後はinputIsComposingがリセットされてEnter送信できる", sendCount === 1 && prevented === true);

@@ -652,6 +652,27 @@ class TestParallelChoices(unittest.TestCase):
         u1 = next(m for m in s_res["messages"] if m["id"] == "u1")
         self.assertEqual(u1.get("staged_choices"), choices_data)
 
+    def test_case_b_pending_user_without_choices_status_does_not_get_stale_choices(self):
+        sid = "sid-pending-newuser"
+        s = {"id": sid, "setting": copy.deepcopy(server.DEFAULT_SETTING), "messages": []}
+        s["setting"].update(ide_session="conv-main", choices_ide_session="conv-choices")
+        s["messages"].append({"id": "u0", "role": "user", "text": "Turn 0", "ts": "2026-11-05T00:00:00", "status": "answered"})
+        s["messages"].append({"id": "a0", "role": "assistant", "text": "Turn 0 reply", "ts": "2026-11-05T00:00:01"})
+        # 新しいターンのユーザー発言。本文待ち(status=pending)だが choices_status は無い
+        s["messages"].append({"id": "u1", "role": "user", "text": "Turn 1", "ts": "2026-11-05T00:00:02", "status": "pending"})
+        server.save(s)
+
+        outbox_filename = f"{sid}_choices_1700000100.json"
+        with open(os.path.join(server.OUTBOX, outbox_filename), "w", encoding="utf-8") as f:
+            json.dump({"session": sid, "choices": [{"label": "stale", "text": "old"}]}, f)
+
+        server.process_outbox()
+
+        s_res = server.load(sid)
+        u1 = next(m for m in s_res["messages"] if m["id"] == "u1")
+        self.assertNotIn("staged_choices", u1)
+        self.assertTrue(any(n.endswith(".stale") for n in os.listdir(server.DONE)))
+
     def test_locate_empty_summary(self):
         cid = "cid-empty-summary"
         ide_poke._servers[cid] = (1234, "tok-test")

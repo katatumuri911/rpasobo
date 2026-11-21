@@ -286,7 +286,7 @@ if (typeof hideAgQuota === "function") hideAgQuota();
 - **補足**: 同様の呼び出しが他に2箇所ある（`fadeAgQuota()` のタイマー内と `send()` 冒頭）。どちらもフォーカス処理ではない。テストが踏むのは blur の1箇所だが、`send()` 側は将来テストから呼ばれる可能性があるため、余裕があれば3箇所すべてガードする。
 - **リスク**: なし（未定義時は何もしない）。
 - **確認**:
-  - `node test/test_enter_send.cjs` → 12 PASS / 0 FAIL
+  - `node test/test_enter_send.cjs` → 13 PASS / 0 FAIL
   - `python -m unittest test.test_composer_ui`（`hideAgQuota()` の文字列assertを維持）
 
 ---
@@ -595,7 +595,7 @@ python -m unittest test.test_composer_ui
 node test\test_mobile_layout.cjs        :: PASS 80 / FAIL 0
 node test\test_rag_hits_modal_ui.cjs    :: ALL UI tests PASSED
 node test\test_model_favorites_ui.cjs   :: 87 PASSED, 0 FAILED
-node test\test_enter_send.cjs           :: 12 PASS / 0 FAIL
+node test\test_enter_send.cjs           :: 13 PASS / 0 FAIL
 node test\test_poll_error_ui.cjs
 
 :: 全体
@@ -639,7 +639,22 @@ python tools\run_tests.py               :: 収集0件NGが無いこと
 | B-2 (U-06) | `min-width` 方式は `.badges` を広げてタイトルを圧迫するため、疑似要素 `::before` で当たり判定だけ広げる代替案を追加 |
 | C-1 (F-10) | 「`#mobileActionToggle` を含むブロック」はヒューリスティックである点と関数名変更の提案を追記 |
 | C-3 (F-13) | 外部バンドル依存で簡単修正ではないため、プランから削除（§8へ移動） |
-| 期待値 | `test_enter_send.cjs` の期待値を 11 → **12 PASS** に修正 |
+| 期待値 | `test_enter_send.cjs` の期待値を 11 → **13 PASS** に修正（F-09 の blur 検証を追加） |
+
+### 9.1 実装後レビューで追加修正した項目
+
+| 指摘 | 対応 |
+|:--|:--|
+| F-07 未知の `task_type` が `_google_build_prompt` まで落ちる | `run_google_task` の引数入替後に未知なら早期 `return`。`test_google_ai.py` に「prompt を構築しない」回帰を追加 |
+| L-07 idなしメッセージの文字列imageが毎回再バックアップ | `save()` の先頭で文字列/不正型の `image` を正規化。idなしの旧JSONを直接書く回帰テストを追加 |
+| L-07 不正型imageで `process_images` が例外 | `process_images` / `last_image_prompt` / `build_image_refine_context` に `isinstance(dict)` ガード。`clean_import` は不正型を除去 |
+| U-06 36×36 の下端8pxが概要行を奪う | `margin` は元の `-8px` のまま、`clip-path: inset(0 0 8px 0)` で下端8pxを描画・ヒット領域から除外（行高を増やさない） |
+| F-10 コメント内の `#mobileActionToggle` を実規則と誤認 | `mobileBlockFor` でブロック単位にCSSコメントを除去してから判定 |
+| F-09 sandboxで `hideAgQuota` が未定義 | `fadeAgQuota` / `send` も `typeof` ガード。`test_enter_send.cjs` に blur 時の呼び出し回数assertを追加 |
+| P-08 壁時計依存 | `_outbox_active_until` / `empty_since` を `time.monotonic()` に統一 |
+| L-05 / L-03 の回帰不足 | idなしで `prev_sent` を復元しないテスト、新規pendingユーザーに旧choicesを付けないテストを追加 |
+| U-06 の他ボタン（`.fork-btn` 等） | Phase 2 の承認範囲外。レイアウト影響を別途確認するため今回は変更しない |
+| P-01 サーバー側キャッシュ | クライアント側のみの修正で、サーバー `/api/sessions` は別タスクのまま |
 
 ---
 

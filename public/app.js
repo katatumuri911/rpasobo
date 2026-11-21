@@ -5756,7 +5756,7 @@ function fadeAgQuota() {
   if (agQuotaPeekTimer) { clearTimeout(agQuotaPeekTimer); agQuotaPeekTimer = null; }
   layer.classList.add("is-fading");
   agQuotaFadeTimer = setTimeout(() => {
-    hideAgQuota();
+    if (typeof hideAgQuota === "function") hideAgQuota();
     backgroundFetchAgQuota().catch(() => {});
   }, AG_QUOTA_FADE_MS);
 }
@@ -7165,7 +7165,7 @@ function syncSendButton(waiting = hasWaitingInput()) {
 }
 
 async function send() {
-  hideAgQuota();
+  if (typeof hideAgQuota === "function") hideAgQuota();
   closeChoicesAccordions();
   if (sending || stopping || hasWaitingInput()) return;
   const ta = $("messageInput");

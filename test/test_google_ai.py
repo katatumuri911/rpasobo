@@ -255,6 +255,19 @@ class TestGoogleServerIntegration(unittest.TestCase):
         self.assertEqual(task_type, "choices")
         self.assertEqual(m["id"], "m1")
 
+    def test_unknown_task_type_is_rejected_without_building_prompt(self):
+        sid = "sid_unknown_task"
+        s = {
+            "id": sid,
+            "setting": {"title": "Unknown", "ai_provider": "google", "google_model": "gemini-2.5-flash"},
+            "messages": [{"id": "u1", "role": "user", "text": "x", "status": "pending"}],
+        }
+        server.save(s)
+        with patch.object(server, "_google_build_prompt") as build, \
+                patch.object(server, "_call_google_generate", return_value={"error": "stop"}):
+            server.run_google_task(sid, "u1", "memory_extract")
+        build.assert_not_called()
+
     def test_google_status_tracking(self):
         sid = "sid_test_status"
         server._google_status(sid, state="requesting", task="user", model="gemini-2.5-flash")

@@ -37,6 +37,8 @@ body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-ins
   opacity: 0;
   padding: 8px; margin: -8px;                 /* 見た目を変えず押し判定だけ 36px に拡大 */
   min-width: 36px; min-height: 36px;
+  /* 下端8pxは概要行に重なるため、描画・ヒット領域とも clip-path で除外する */
+  clip-path: inset(0 0 8px 0);
   display: inline-flex; align-items: center; justify-content: center;
 }
 .sess:hover .sess-rename, .sess.active .sess-rename { opacity: .6; }

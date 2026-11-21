@@ -41,9 +41,9 @@ STATEFUL = (
 # clear() のみ行うキュー（deque）群（3件）
 QUEUES = ("queued_images", "queued_memories", "_choice_notice_q")
 
-# clear() のみ行う同期イベント群（7件）
+# clear() のみ行う同期イベント群（8件）
 EVENTS = (
-    "poke_event", "google_event", "image_event", "memory_event",
+    "poke_event", "google_event", "outbox_event", "image_event", "memory_event",
     "rotation_event", "ide_auto_event", "_choice_notice_event"
 )
 
@@ -162,6 +162,7 @@ class IsolatedTestCase(unittest.TestCase):
             getattr(server, q_name).clear()
         for ev_name in EVENTS:
             getattr(server, ev_name).clear()
+        server._outbox_active_until = 0.0
 
         # 7. 環境変数汚染防止
         os.environ["RPCHAT_PERF_LOG"] = "0"
